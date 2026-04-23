@@ -1,0 +1,7 @@
+interface:
+  display_name: "Staged Commit Message"
+  short_description: "Generate git-cz messages from staged changes"
+  default_prompt: "Use $staged-commit-message to inspect the current staged changes and return 1-3 concise git-cz style commit messages."
+
+policy:
+  allow_implicit_invocation: true
