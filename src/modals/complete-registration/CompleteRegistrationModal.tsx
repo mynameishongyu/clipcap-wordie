@@ -39,6 +39,10 @@ function mapEmailAuthErrorMessage(message: string | undefined) {
   return message ?? '发送登录邮件失败，请稍后重试。';
 }
 
+function isLocalhostLike(origin: string) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin.trim());
+}
+
 export function CompleteRegistrationModal({
   innerProps,
 }: ContextModalProps<CompleteRegistrationInnerProps>) {
@@ -87,13 +91,21 @@ export function CompleteRegistrationModal({
 
   const appOrigin = useMemo(() => {
     const configuredOrigin = process.env.NEXT_PUBLIC_APP_URL?.trim();
+    const normalizedConfiguredOrigin = configuredOrigin?.replace(/\/+$/, '') ?? '';
+    const browserOrigin =
+      typeof window !== 'undefined' ? window.location.origin.replace(/\/+$/, '') : '';
 
-    if (configuredOrigin) {
-      return configuredOrigin.replace(/\/+$/, '');
+    if (
+      normalizedConfiguredOrigin &&
+      (!browserOrigin ||
+        !isLocalhostLike(normalizedConfiguredOrigin) ||
+        isLocalhostLike(browserOrigin))
+    ) {
+      return normalizedConfiguredOrigin;
     }
 
-    if (typeof window !== 'undefined') {
-      return window.location.origin;
+    if (browserOrigin) {
+      return browserOrigin;
     }
 
     return '';
