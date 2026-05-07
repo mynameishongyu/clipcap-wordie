@@ -1,12 +1,35 @@
 'use client';
 
-import { Badge, Box, Button, Group, Paper, Stack, Text, Textarea, Title } from '@mantine/core';
+import {
+  Badge,
+  Box,
+  Button,
+  Group,
+  Paper,
+  Stack,
+  Text,
+  Textarea,
+  Title,
+} from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useRouter } from 'next/navigation';
-import { startTransition, useEffect, useRef, useState } from 'react';
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import type { TemplateExtractionTaskResponse } from '@/src/app/api/types/template-extraction-task';
 import { isLoginGateBypassedForLocal } from '@/src/lib/auth/login-gate';
+import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { parseDocxInBrowser } from '@/src/lib/docx/parse-browser';
+import {
+  parsePdf,
+  pickVisionPageNumbers,
+  renderPdfPagesForVision,
+  type PdfVisionPageInput as BrowserPdfVisionPageInput,
+} from '@/src/lib/pdf/client-pdf';
 import { SLOT_REVIEW_SESSION_KEY } from '@/src/lib/templates/slot-review-session';
 import { openCompleteRegistrationModal } from '@/src/modals/complete-registration';
 import { openUsageGuideModal } from '@/src/modals/usage-guide';
@@ -38,10 +61,32 @@ function readFileAsBase64(file: File) {
 
 interface TemplateExtractionTaskSummary extends TemplateExtractionTaskResponse {}
 
-async function createTemplateExtractionTask(file: File, prompt: string) {
+interface CreateTemplateExtractionTaskInput {
+  file: File;
+  prompt: string;
+  pdfName?: string;
+  pdfVisionPages?: BrowserPdfVisionPageInput[];
+}
+
+async function createTemplateExtractionTask(
+  input: CreateTemplateExtractionTaskInput,
+) {
   const formData = new FormData();
-  formData.append('file', file);
-  formData.append('prompt', prompt);
+  formData.append('file', input.file);
+  formData.append('prompt', input.prompt);
+
+  if (input.pdfName && input.pdfVisionPages?.length) {
+    formData.append('pdfName', input.pdfName);
+    formData.append(
+      'pdfVisionPages',
+      JSON.stringify(
+        input.pdfVisionPages.map((page) => ({
+          page_number: page.pageNumber,
+          image_data_url: page.imageDataUrl,
+        })),
+      ),
+    );
+  }
 
   const response = await fetch('/api/template-extraction-tasks', {
     method: 'POST',
@@ -78,12 +123,15 @@ async function fetchTemplateExtractionTask(taskId: string) {
 }
 
 async function startTemplateExtractionTask(taskId: string) {
-  console.log(
+  browserProcessLog.log(
     `[Template Extract] Starting process route via /api/template-extraction-tasks/${taskId}/process`,
   );
-  const response = await fetch(`/api/template-extraction-tasks/${taskId}/process`, {
-    method: 'POST',
-  });
+  const response = await fetch(
+    `/api/template-extraction-tasks/${taskId}/process`,
+    {
+      method: 'POST',
+    },
+  );
 
   if (!response.ok) {
     const payload = (await response.json()) as { message?: string };
@@ -91,31 +139,62 @@ async function startTemplateExtractionTask(taskId: string) {
   }
 }
 
+async function preparePdfVisionPages(file: File) {
+  browserProcessLog.info(
+    `[Template Extract][PDF Evidence] Preparing scanned PDF pages for ${file.name}.`,
+  );
+
+  const parsedPdf = await parsePdf(file);
+  const pageNumbers = pickVisionPageNumbers(parsedPdf);
+
+  browserProcessLog.info(
+    `[Template Extract][PDF Evidence] Rendering ${pageNumbers.length} page(s) for OCR evidence.`,
+  );
+
+  const visionPages = await renderPdfPagesForVision(file, pageNumbers);
+
+  browserProcessLog.info(
+    `[Template Extract][PDF Evidence] Rendered ${visionPages.length} PDF page image(s) for ${file.name}.`,
+  );
+
+  return visionPages;
+}
+
 export function HomeHero() {
   const [prompt, setPrompt] = useState('');
   const [selectedDocxName, setSelectedDocxName] = useState('');
   const [selectedDocxFile, setSelectedDocxFile] = useState<File | null>(null);
+  const [selectedPdfName, setSelectedPdfName] = useState('');
+  const [selectedPdfFile, setSelectedPdfFile] = useState<File | null>(null);
   const [authErrorMessage, setAuthErrorMessage] = useState('');
   const [processingSeconds, setProcessingSeconds] = useState(0);
   const [isSubmissionLocked, setIsSubmissionLocked] = useState(false);
   const [activeExtractionTask, setActiveExtractionTask] =
     useState<TemplateExtractionTaskSummary | null>(null);
 
-  const parsedDocumentPromiseRef = useRef<ReturnType<typeof parseDocxInBrowser> | null>(null);
+  const parsedDocumentPromiseRef = useRef<ReturnType<
+    typeof parseDocxInBrowser
+  > | null>(null);
   const uploadDocxBase64PromiseRef = useRef<Promise<string> | null>(null);
+  const pdfVisionPagesPromiseRef = useRef<Promise<
+    BrowserPdfVisionPageInput[]
+  > | null>(null);
+  const pdfVisionPagesRef = useRef<BrowserPdfVisionPageInput[]>([]);
   const processKickoffInFlightRef = useRef(false);
   const hasHandledTaskCompletionRef = useRef(false);
   const lastExtractionTraceRef = useRef('');
 
   const router = useRouter();
-  const { isAuthenticated, registrationStatus, signOut } = useRegistrationGateStore();
+  const { isAuthenticated, registrationStatus, signOut } =
+    useRegistrationGateStore();
 
   const isLoginBypassed = isLoginGateBypassedForLocal();
   const canUseProtectedActions = isLoginBypassed || isAuthenticated;
   const isProcessingTemplate =
     isSubmissionLocked ||
     (activeExtractionTask !== null &&
-      (activeExtractionTask.status === 'pending' || activeExtractionTask.status === 'running'));
+      (activeExtractionTask.status === 'pending' ||
+        activeExtractionTask.status === 'running'));
   const canEditPrompt = canUseProtectedActions && !isProcessingTemplate;
   const hasUploadedDocx = Boolean(selectedDocxFile);
 
@@ -148,7 +227,11 @@ export function HomeHero() {
       setAuthErrorMessage(nextErrorMessage);
     }, 0);
 
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    window.history.replaceState(
+      null,
+      '',
+      window.location.pathname + window.location.search,
+    );
 
     return () => {
       window.clearTimeout(timeoutId);
@@ -209,13 +292,13 @@ export function HomeHero() {
     openCompleteRegistrationModal({ sourceAction });
   };
 
-  const resetExtractionTaskState = () => {
+  const resetExtractionTaskState = useCallback(() => {
     setActiveExtractionTask(null);
     setIsSubmissionLocked(false);
     setProcessingSeconds(0);
     processKickoffInFlightRef.current = false;
     lastExtractionTraceRef.current = '';
-  };
+  }, []);
 
   const ensureTaskProcessing = async (taskId: string) => {
     if (processKickoffInFlightRef.current) {
@@ -233,73 +316,93 @@ export function HomeHero() {
     }
   };
 
-  const handleCompletedTask = async (task: TemplateExtractionTaskSummary) => {
-    if (hasHandledTaskCompletionRef.current) {
-      return;
-    }
-
-    hasHandledTaskCompletionRef.current = true;
-
-    try {
-      const [parsedDocument, uploadDocxBase64] = await Promise.all([
-        parsedDocumentPromiseRef.current ??
-          Promise.reject(new Error('当前会话缺少 DOCX 预览数据，请重新上传后再试。')),
-        uploadDocxBase64PromiseRef.current ??
-          Promise.reject(new Error('当前会话缺少原始 DOCX 文件，请重新上传后再试。')),
-      ]);
-
-      if (!task.result) {
-        throw new Error('槽位抽取任务已完成，但缺少抽取结果。');
+  const handleCompletedTask = useCallback(
+    async (task: TemplateExtractionTaskSummary) => {
+      if (hasHandledTaskCompletionRef.current) {
+        return;
       }
 
-      window.sessionStorage.setItem(
-        SLOT_REVIEW_SESSION_KEY,
-        JSON.stringify({
-          templateId: undefined,
-          templateName: undefined,
-          fileName: task.source_docx_name,
-          uploadDocxName: task.source_docx_name,
-          uploadDocxBase64,
-          prompt: task.prompt,
-          uploadText: task.upload_text ?? '',
-          uploadHtml: task.upload_html ?? '',
-          parsedDocument,
-          documentInfo: task.result.document_info,
-          extractionResult: task.result.extraction_result,
-        }),
-      );
+      hasHandledTaskCompletionRef.current = true;
 
-      notifications.update({
-        id: 'template-slot-extraction',
-        autoClose: 1800,
-        color: 'teal',
-        loading: false,
-        title: '处理完成',
-        message: task.error_message ?? '槽位识别完成，正在打开编辑页面。',
-        withCloseButton: true,
-      });
+      try {
+        const [parsedDocument, uploadDocxBase64] = await Promise.all([
+          parsedDocumentPromiseRef.current ??
+            Promise.reject(
+              new Error('当前会话缺少 DOCX 预览数据，请重新上传后再试。'),
+            ),
+          uploadDocxBase64PromiseRef.current ??
+            Promise.reject(
+              new Error('当前会话缺少原始 DOCX 文件，请重新上传后再试。'),
+            ),
+        ]);
 
-      notifications.hide('template-slot-extraction');
-      resetExtractionTaskState();
+        if (!task.result) {
+          throw new Error('槽位抽取任务已完成，但缺少抽取结果。');
+        }
 
-      startTransition(() => {
-        router.push('/documents/slot-review');
-      });
-    } catch (error) {
-      notifications.update({
-        id: 'template-slot-extraction',
-        autoClose: 3000,
-        color: 'red',
-        loading: false,
-        title: '处理失败',
-        message: error instanceof Error ? error.message : '槽位识别失败，请稍后重试。',
-        withCloseButton: true,
-      });
+        window.sessionStorage.setItem(
+          SLOT_REVIEW_SESSION_KEY,
+          JSON.stringify({
+            templateId: undefined,
+            templateName: undefined,
+            fileName: task.source_docx_name,
+            uploadDocxName: task.source_docx_name,
+            uploadDocxBase64,
+            prompt: task.prompt,
+            uploadText: task.upload_text ?? '',
+            uploadHtml: task.upload_html ?? '',
+            parsedDocument,
+            documentInfo: task.result.document_info,
+            extractionResult: task.result.extraction_result,
+            pdfEvidence:
+              task.pdf_evidence && pdfVisionPagesRef.current.length > 0
+                ? {
+                    pdfFileName: task.pdf_evidence.pdf_file_name,
+                    pages: pdfVisionPagesRef.current,
+                    ocrPages: task.pdf_evidence.ocr_pages,
+                    matches: task.pdf_evidence.matches,
+                  }
+                : undefined,
+          }),
+        );
 
-      hasHandledTaskCompletionRef.current = false;
-      resetExtractionTaskState();
-    }
-  };
+        notifications.update({
+          id: 'template-slot-extraction',
+          autoClose: 1800,
+          color: 'teal',
+          loading: false,
+          title: '处理完成',
+          message: task.error_message ?? '槽位识别完成，正在打开编辑页面。',
+          withCloseButton: true,
+        });
+
+        notifications.hide('template-slot-extraction');
+        resetExtractionTaskState();
+
+        startTransition(() => {
+          router.push('/documents/slot-review');
+        });
+      } catch (error) {
+        browserProcessLog.error(error);
+        notifications.update({
+          id: 'template-slot-extraction',
+          autoClose: 3000,
+          color: 'red',
+          loading: false,
+          title: '处理失败',
+          message:
+            error instanceof Error
+              ? error.message
+              : '槽位识别失败，请稍后重试。',
+          withCloseButton: true,
+        });
+
+        hasHandledTaskCompletionRef.current = false;
+        resetExtractionTaskState();
+      }
+    },
+    [resetExtractionTaskState, router],
+  );
 
   useEffect(() => {
     const nextTrace = activeExtractionTask?.processing_trace ?? '';
@@ -322,27 +425,19 @@ export function HomeHero() {
         line.includes('[Template Extract][LLM][ErrorDetails]') ||
         line.includes('[RouteErrorDetails][TemplateExtraction]')
       ) {
-        const jsonStartIndex = line.indexOf('{');
-
-        if (jsonStartIndex >= 0) {
-          const prefix = line.slice(0, jsonStartIndex).trim();
-          const rawJson = line.slice(jsonStartIndex);
-
-          try {
-            console.error(prefix, JSON.parse(rawJson));
-            continue;
-          } catch {
-            // Fall through to raw logging.
-          }
-        }
-      }
-
-      if (line.includes('[Template Extract][LLM] Failed') || line.includes('槽位抽取失败')) {
-        console.error(line);
+        browserProcessLog.error(line);
         continue;
       }
 
-      console.log(line);
+      if (
+        line.includes('[Template Extract][LLM] Failed') ||
+        line.includes('槽位抽取失败')
+      ) {
+        browserProcessLog.error(line);
+        continue;
+      }
+
+      browserProcessLog.log(line);
     }
 
     lastExtractionTraceRef.current = nextTrace;
@@ -354,8 +449,13 @@ export function HomeHero() {
     }
 
     if (activeExtractionTask.status === 'completed') {
-      void handleCompletedTask(activeExtractionTask);
-      return;
+      const timeoutId = window.setTimeout(() => {
+        void handleCompletedTask(activeExtractionTask);
+      }, 0);
+
+      return () => {
+        window.clearTimeout(timeoutId);
+      };
     }
 
     if (activeExtractionTask.status === 'failed') {
@@ -365,12 +465,18 @@ export function HomeHero() {
         color: 'red',
         loading: false,
         title: '处理失败',
-        message: activeExtractionTask.error_message ?? '槽位识别失败，请稍后重试。',
+        message:
+          activeExtractionTask.error_message ?? '槽位识别失败，请稍后重试。',
         withCloseButton: true,
       });
 
-      resetExtractionTaskState();
-      return;
+      const timeoutId = window.setTimeout(() => {
+        resetExtractionTaskState();
+      }, 0);
+
+      return () => {
+        window.clearTimeout(timeoutId);
+      };
     }
 
     let isDisposed = false;
@@ -381,7 +487,9 @@ export function HomeHero() {
           void ensureTaskProcessing(activeExtractionTask.id);
         }
 
-        const nextTask = await fetchTemplateExtractionTask(activeExtractionTask.id);
+        const nextTask = await fetchTemplateExtractionTask(
+          activeExtractionTask.id,
+        );
 
         if (!isDisposed) {
           setActiveExtractionTask(nextTask);
@@ -402,7 +510,12 @@ export function HomeHero() {
       isDisposed = true;
       window.clearInterval(intervalId);
     };
-  }, [activeExtractionTask, router]);
+  }, [
+    activeExtractionTask,
+    handleCompletedTask,
+    resetExtractionTaskState,
+    router,
+  ]);
 
   const handleStartSlotDetection = () => {
     if (isProcessingTemplate) {
@@ -420,11 +533,19 @@ export function HomeHero() {
       }
 
       const notificationId = 'template-slot-extraction';
+      const sourcePdfFile = selectedPdfFile;
       setProcessingSeconds(0);
       setIsSubmissionLocked(true);
       hasHandledTaskCompletionRef.current = false;
       parsedDocumentPromiseRef.current = parseDocxInBrowser(selectedDocxFile);
       uploadDocxBase64PromiseRef.current = readFileAsBase64(selectedDocxFile);
+      pdfVisionPagesRef.current = [];
+      pdfVisionPagesPromiseRef.current = sourcePdfFile
+        ? preparePdfVisionPages(sourcePdfFile).then((visionPages) => {
+            pdfVisionPagesRef.current = visionPages;
+            return visionPages;
+          })
+        : Promise.resolve([]);
 
       notifications.show({
         id: notificationId,
@@ -433,22 +554,35 @@ export function HomeHero() {
         withCloseButton: false,
         color: 'teal',
         title: '正在创建抽取任务',
-        message: '模板已上传，正在创建槽位抽取任务，请稍候。',
+        message: sourcePdfFile
+          ? '模板与扫描 PDF 已上传，正在准备 OCR 证据并创建槽位抽取任务，请稍候。'
+          : '模板已上传，正在创建槽位抽取任务，请稍候。',
       });
 
       try {
-        const task = await createTemplateExtractionTask(selectedDocxFile, prompt);
+        const pdfVisionPages = await (pdfVisionPagesPromiseRef.current ??
+          Promise.resolve([]));
+        const task = await createTemplateExtractionTask({
+          file: selectedDocxFile,
+          prompt,
+          pdfName: sourcePdfFile?.name,
+          pdfVisionPages,
+        });
         setActiveExtractionTask(task);
         setIsSubmissionLocked(false);
         void ensureTaskProcessing(task.id);
       } catch (error) {
+        browserProcessLog.error(error);
         notifications.update({
           id: notificationId,
           autoClose: 3000,
           color: 'red',
           loading: false,
           title: '处理失败',
-          message: error instanceof Error ? error.message : '槽位识别失败，请稍后重试。',
+          message:
+            error instanceof Error
+              ? error.message
+              : '槽位识别失败，请稍后重试。',
           withCloseButton: true,
         });
 
@@ -492,7 +626,11 @@ export function HomeHero() {
             开发模式
           </Button>
         ) : (
-          <Button radius="xl" variant="white" onClick={() => openCompleteRegistrationModal()}>
+          <Button
+            radius="xl"
+            variant="white"
+            onClick={() => openCompleteRegistrationModal()}
+          >
             登录后使用
           </Button>
         )}
@@ -515,7 +653,12 @@ export function HomeHero() {
           <Text c="#d4cdc1" size="lg" ta="center">
             上传 DOCX 模板定义槽位，再从 PDF 材料中批量抽取内容并完成自动填充。
           </Text>
-          <Button radius="xl" size="sm" variant="light" onClick={() => openUsageGuideModal()}>
+          <Button
+            radius="xl"
+            size="sm"
+            variant="light"
+            onClick={() => openUsageGuideModal()}
+          >
             使用说明
           </Button>
         </Stack>
@@ -581,12 +724,16 @@ export function HomeHero() {
               onChange={(event) => setPrompt(event.currentTarget.value)}
               onClick={() => {
                 if (!canEditPrompt && !isProcessingTemplate) {
-                  openCompleteRegistrationModal({ sourceAction: '输入任务描述' });
+                  openCompleteRegistrationModal({
+                    sourceAction: '输入任务描述',
+                  });
                 }
               }}
               onFocus={() => {
                 if (!canEditPrompt && !isProcessingTemplate) {
-                  openCompleteRegistrationModal({ sourceAction: '输入任务描述' });
+                  openCompleteRegistrationModal({
+                    sourceAction: '输入任务描述',
+                  });
                 }
               }}
             />
@@ -602,6 +749,18 @@ export function HomeHero() {
                 setSelectedDocxFile(event.currentTarget.files?.[0] ?? null);
               }}
             />
+            <input
+              hidden
+              id="home-pdf-evidence-upload-input"
+              accept=".pdf,application/pdf"
+              disabled={isProcessingTemplate}
+              type="file"
+              onChange={(event) => {
+                const nextFile = event.currentTarget.files?.[0] ?? null;
+                setSelectedPdfName(nextFile?.name ?? '');
+                setSelectedPdfFile(nextFile);
+              }}
+            />
 
             <Group justify="space-between" align="flex-end" wrap="wrap">
               <Stack gap={8}>
@@ -615,12 +774,27 @@ export function HomeHero() {
                   >
                     上传 DOCX 模板
                   </Button>
+                  <Button
+                    component="label"
+                    htmlFor="home-pdf-evidence-upload-input"
+                    disabled={isProcessingTemplate}
+                    radius="xl"
+                    variant="light"
+                  >
+                    上传扫描 PDF 证据
+                  </Button>
                 </Group>
 
                 <Text c="#7a7365" size="sm">
-                  先上传 DOCX 模板定义槽位结构，后续再进入流程上传 PDF 材料。
+                  先上传 DOCX 模板定义槽位结构；如需关联扫描件页面，可同时上传
+                  PDF 作为证据。
                 </Text>
-                {selectedDocxName ? <Text size="sm">已选择 DOCX：{selectedDocxName}</Text> : null}
+                {selectedDocxName ? (
+                  <Text size="sm">已选择 DOCX：{selectedDocxName}</Text>
+                ) : null}
+                {selectedPdfName ? (
+                  <Text size="sm">已选择 PDF：{selectedPdfName}</Text>
+                ) : null}
               </Stack>
 
               <Button

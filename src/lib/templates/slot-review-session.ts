@@ -1,7 +1,21 @@
-import type { ExtractionParagraph, TemplateSlotExtractionResult } from '@/src/app/api/types/template-slot-extraction';
+import type {
+  ExtractionParagraph,
+  TemplatePdfEvidenceResult,
+  TemplateSlotExtractionResult,
+} from '@/src/app/api/types/template-slot-extraction';
 import type { ParsedDocument } from '@/src/types/docx-preview';
 
 export const SLOT_REVIEW_SESSION_KEY = 'clipcap:slot-review-session';
+
+export interface SlotReviewPdfEvidencePayload {
+  pdfFileName: string;
+  pages: Array<{
+    pageNumber: number;
+    imageDataUrl: string;
+  }>;
+  ocrPages: TemplatePdfEvidenceResult['ocr_pages'];
+  matches: TemplatePdfEvidenceResult['matches'];
+}
 
 export interface SlotReviewSessionPayload {
   templateId?: string;
@@ -15,4 +29,5 @@ export interface SlotReviewSessionPayload {
   parsedDocument?: ParsedDocument;
   documentInfo: TemplateSlotExtractionResult['document_info'];
   extractionResult: ExtractionParagraph[];
+  pdfEvidence?: SlotReviewPdfEvidencePayload;
 }

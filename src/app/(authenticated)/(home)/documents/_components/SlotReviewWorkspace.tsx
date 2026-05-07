@@ -1,12 +1,35 @@
 ﻿'use client';
 
-import { Badge, Button, Card, Group, Paper, ScrollArea, Stack, Text, TextInput, Title } from '@mantine/core';
+import {
+  Badge,
+  Box,
+  Button,
+  Card,
+  Group,
+  Paper,
+  ScrollArea,
+  Stack,
+  Text,
+  TextInput,
+  Title,
+} from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import type { ExtractionItem, ExtractionParagraph } from '@/src/app/api/types/template-slot-extraction';
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
+import type {
+  ExtractionItem,
+  ExtractionParagraph,
+} from '@/src/app/api/types/template-slot-extraction';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import {
@@ -15,7 +38,13 @@ import {
 } from '@/src/lib/templates/slot-review-session';
 import { openSaveTemplateModal } from '@/src/modals/save-template';
 import { useSaveTemplate } from '@/src/querys/use-template-library';
-import type { DocBlock, ParagraphBlock, ParsedDocument, TextSegment, TextStyleSnapshot } from '@/src/types/docx-preview';
+import type {
+  DocBlock,
+  ParagraphBlock,
+  ParsedDocument,
+  TextSegment,
+  TextStyleSnapshot,
+} from '@/src/types/docx-preview';
 
 interface EditableExtractionItem extends ExtractionItem {
   id: string;
@@ -39,26 +68,28 @@ function buildExtractionResultFromItems(
   sourceParagraphs: ExtractionParagraph[],
 ): ExtractionParagraph[] {
   const matchedItemIds = new Set<string>();
-  const groupedSourceParagraphs = sourceParagraphs.flatMap((paragraph, paragraphIndex) => {
-    const paragraphItems = items
-      .filter((item) => item.id.startsWith(`${paragraphIndex}-`))
-      .map(({ id, paragraphTitle, ...rest }) => {
-        matchedItemIds.add(id);
-        return rest;
-      });
+  const groupedSourceParagraphs = sourceParagraphs.flatMap(
+    (paragraph, paragraphIndex) => {
+      const paragraphItems = items
+        .filter((item) => item.id.startsWith(`${paragraphIndex}-`))
+        .map(({ id, paragraphTitle, ...rest }) => {
+          matchedItemIds.add(id);
+          return rest;
+        });
 
-    if (paragraphItems.length === 0) {
-      return [];
-    }
+      if (paragraphItems.length === 0) {
+        return [];
+      }
 
-    return [
-      {
-        paragraph_index: paragraph.paragraph_index ?? paragraphIndex,
-        paragraph_title: paragraph.paragraph_title,
-        items: paragraphItems,
-      },
-    ];
-  });
+      return [
+        {
+          paragraph_index: paragraph.paragraph_index ?? paragraphIndex,
+          paragraph_title: paragraph.paragraph_title,
+          items: paragraphItems,
+        },
+      ];
+    },
+  );
 
   const manualParagraphMap = new Map<
     string,
@@ -74,24 +105,28 @@ function buildExtractionResultFromItems(
       return;
     }
 
-    const paragraphIndex = typeof rest.paragraph_index === 'number' ? rest.paragraph_index : undefined;
+    const paragraphIndex =
+      typeof rest.paragraph_index === 'number'
+        ? rest.paragraph_index
+        : undefined;
     const paragraphKey = `${paragraphTitle}::${paragraphIndex ?? 'manual'}`;
-    const bucket =
-      manualParagraphMap.get(paragraphKey) ?? {
-        paragraphIndex,
-        paragraphTitle,
-        items: [],
-      };
+    const bucket = manualParagraphMap.get(paragraphKey) ?? {
+      paragraphIndex,
+      paragraphTitle,
+      items: [],
+    };
 
     bucket.items.push(rest);
     manualParagraphMap.set(paragraphKey, bucket);
   });
 
-  const manualParagraphs = Array.from(manualParagraphMap.values()).map((manualParagraph) => ({
-    paragraph_index: manualParagraph.paragraphIndex,
-    paragraph_title: manualParagraph.paragraphTitle,
-    items: manualParagraph.items,
-  }));
+  const manualParagraphs = Array.from(manualParagraphMap.values()).map(
+    (manualParagraph) => ({
+      paragraph_index: manualParagraph.paragraphIndex,
+      paragraph_title: manualParagraph.paragraphTitle,
+      items: manualParagraph.items,
+    }),
+  );
 
   return [...groupedSourceParagraphs, ...manualParagraphs];
 }
@@ -107,8 +142,13 @@ function buildJsonPreviewPayload(
   items: EditableExtractionItem[],
   payload: SlotReviewSessionPayload,
 ) {
-  const groupedParagraphs = buildExtractionResultFromItems(items, payload.extractionResult);
-  const paragraphTexts = extractParagraphTextsFromUploadText(payload.uploadText);
+  const groupedParagraphs = buildExtractionResultFromItems(
+    items,
+    payload.extractionResult,
+  );
+  const paragraphTexts = extractParagraphTextsFromUploadText(
+    payload.uploadText,
+  );
 
   return {
     document_info: payload.documentInfo,
@@ -116,9 +156,13 @@ function buildJsonPreviewPayload(
       const paragraphIndex =
         typeof paragraph.paragraph_index === 'number'
           ? paragraph.paragraph_index
-          : paragraph.items.find((item) => typeof item.paragraph_index === 'number')?.paragraph_index;
+          : paragraph.items.find(
+              (item) => typeof item.paragraph_index === 'number',
+            )?.paragraph_index;
       const paragraphOriginalText =
-        typeof paragraphIndex === 'number' ? paragraphTexts[paragraphIndex] ?? '' : '';
+        typeof paragraphIndex === 'number'
+          ? (paragraphTexts[paragraphIndex] ?? '')
+          : '';
 
       return {
         ...paragraph,
@@ -127,7 +171,7 @@ function buildJsonPreviewPayload(
           ...item,
           sequence_paragraph_original_text:
             typeof item.paragraph_index === 'number'
-              ? paragraphTexts[item.paragraph_index] ?? paragraphOriginalText
+              ? (paragraphTexts[item.paragraph_index] ?? paragraphOriginalText)
               : paragraphOriginalText,
         })),
       };
@@ -162,10 +206,14 @@ function buildPreviewItems(
 
 function findClosestPreviewParagraphIndex(node: Node | null) {
   let currentElement =
-    node?.nodeType === Node.ELEMENT_NODE ? (node as Element) : node?.parentElement ?? null;
+    node?.nodeType === Node.ELEMENT_NODE
+      ? (node as Element)
+      : (node?.parentElement ?? null);
 
   while (currentElement) {
-    const paragraphIndexValue = currentElement.getAttribute('data-preview-paragraph-index');
+    const paragraphIndexValue = currentElement.getAttribute(
+      'data-preview-paragraph-index',
+    );
 
     if (paragraphIndexValue) {
       const paragraphIndex = Number(paragraphIndexValue);
@@ -192,7 +240,11 @@ function buildDocumentFallbackHtml(uploadText: string) {
     .join('');
 }
 
-function createHighlightMarkup(itemId: string, value: string, isActive: boolean) {
+function createHighlightMarkup(
+  itemId: string,
+  value: string,
+  isActive: boolean,
+) {
   const background = isActive ? '#ffd16666' : '#38d39f22';
   const border = isActive ? '#f59f00' : '#7adfb8';
 
@@ -213,7 +265,9 @@ function highlightDocumentHtml(
     return documentHtml;
   }
 
-  const highlightItems = items.filter((item) => item.original_value.trim() && item.id !== hiddenItemId);
+  const highlightItems = items.filter(
+    (item) => item.original_value.trim() && item.id !== hiddenItemId,
+  );
 
   if (highlightItems.length === 0) {
     return documentHtml;
@@ -229,19 +283,23 @@ function highlightDocumentHtml(
       return;
     }
 
-    const walker = documentNode.createTreeWalker(documentNode.body, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        if (!node.nodeValue?.trim()) {
-          return NodeFilter.FILTER_REJECT;
-        }
+    const walker = documentNode.createTreeWalker(
+      documentNode.body,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (!node.nodeValue?.trim()) {
+            return NodeFilter.FILTER_REJECT;
+          }
 
-        if (node.parentElement?.closest('mark')) {
-          return NodeFilter.FILTER_REJECT;
-        }
+          if (node.parentElement?.closest('mark')) {
+            return NodeFilter.FILTER_REJECT;
+          }
 
-        return NodeFilter.FILTER_ACCEPT;
+          return NodeFilter.FILTER_ACCEPT;
+        },
       },
-    });
+    );
 
     while (walker.nextNode()) {
       const textNode = walker.currentNode as Text;
@@ -278,7 +336,9 @@ function highlightPlainText(
   activeId: string | null,
   hiddenItemId: string | null,
 ) {
-  const highlightItems = items.filter((item) => item.original_value.trim() && item.id !== hiddenItemId);
+  const highlightItems = items.filter(
+    (item) => item.original_value.trim() && item.id !== hiddenItemId,
+  );
 
   if (highlightItems.length === 0) {
     return buildDocumentFallbackHtml(uploadText);
@@ -341,7 +401,10 @@ function collectParagraphDecorations(
       return;
     }
 
-    if (typeof item.paragraph_index === 'number' && item.paragraph_index !== paragraphIndex) {
+    if (
+      typeof item.paragraph_index === 'number' &&
+      item.paragraph_index !== paragraphIndex
+    ) {
       return;
     }
 
@@ -365,7 +428,9 @@ function collectParagraphDecorations(
         end: matchIndex + value.length,
       };
       const overlapsExisting = consumedRanges.some(
-        (range) => Math.max(range.start, nextRange.start) < Math.min(range.end, nextRange.end),
+        (range) =>
+          Math.max(range.start, nextRange.start) <
+          Math.min(range.end, nextRange.end),
       );
 
       if (!overlapsExisting) {
@@ -391,7 +456,10 @@ function collectParagraphDecorations(
     paragraphOffset = segmentEnd;
 
     const segmentDecorations = decorations
-      .filter((decoration) => decoration.start < segmentEnd && decoration.end > segmentStart)
+      .filter(
+        (decoration) =>
+          decoration.start < segmentEnd && decoration.end > segmentStart,
+      )
       .map((decoration) => ({
         itemId: decoration.itemId,
         start: Math.max(0, decoration.start - segmentStart),
@@ -457,9 +525,12 @@ function renderSegmentContent(
           borderBottomLeftRadius: decoration.continuesFromPrevious ? 0 : 6,
           borderTopRightRadius: decoration.continuesToNext ? 0 : 6,
           borderBottomRightRadius: decoration.continuesToNext ? 0 : 6,
-          boxShadow: isActive && !decoration.continuesFromPrevious && !decoration.continuesToNext
-            ? '0 0 0 2px rgba(245, 159, 0, 0.35), 0 0 22px rgba(245, 159, 0, 0.24)'
-            : undefined,
+          boxShadow:
+            isActive &&
+            !decoration.continuesFromPrevious &&
+            !decoration.continuesToNext
+              ? '0 0 0 2px rgba(245, 159, 0, 0.35), 0 0 22px rgba(245, 159, 0, 0.24)'
+              : undefined,
           paddingLeft: decoration.continuesFromPrevious ? 1 : 3,
           paddingRight: decoration.continuesToNext ? 1 : 3,
           paddingTop: 0,
@@ -467,7 +538,8 @@ function renderSegmentContent(
           marginLeft: decoration.continuesFromPrevious ? -1 : 0,
           marginRight: decoration.continuesToNext ? -1 : 0,
           scrollMarginBlock: '140px',
-          transition: 'background-color 180ms ease, box-shadow 180ms ease, transform 180ms ease',
+          transition:
+            'background-color 180ms ease, box-shadow 180ms ease, transform 180ms ease',
           transform: isActive ? 'translateY(-1px)' : undefined,
         }}
       >
@@ -496,9 +568,14 @@ function renderParagraphBlock(
   hiddenItemId: string | null,
   paragraphIndex: number,
 ) {
-  const firstText = block.segments.find((segment): segment is TextSegment => segment.type === 'text' && segment.text.trim().length > 0);
+  const firstText = block.segments.find(
+    (segment): segment is TextSegment =>
+      segment.type === 'text' && segment.text.trim().length > 0,
+  );
   const paragraphDecorationMap = collectParagraphDecorations(
-    block.segments.filter((segment): segment is TextSegment => segment.type === 'text'),
+    block.segments.filter(
+      (segment): segment is TextSegment => segment.type === 'text',
+    ),
     items,
     hiddenItemId,
     paragraphIndex,
@@ -529,20 +606,35 @@ function renderParagraphBlock(
         if (segment.type === 'text') {
           return (
             <span key={segment.id} style={textStyleToCss(segment.style)}>
-              {renderSegmentContent(segment, paragraphDecorationMap.get(segment.id) ?? [], activeItemId)}
+              {renderSegmentContent(
+                segment,
+                paragraphDecorationMap.get(segment.id) ?? [],
+                activeItemId,
+              )}
             </span>
           );
         }
 
         return (
-          <span key={segment.id} style={{ display: 'inline-flex', margin: '0 6px', verticalAlign: 'middle' }}>
+          <span
+            key={segment.id}
+            style={{
+              display: 'inline-flex',
+              margin: '0 6px',
+              verticalAlign: 'middle',
+            }}
+          >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               alt={segment.altText || '鏂囨。鍥剧墖'}
               src={segment.src}
               style={{
-                maxWidth: segment.style.widthPx ? `${segment.style.widthPx}px` : '100%',
-                maxHeight: segment.style.heightPx ? `${segment.style.heightPx}px` : undefined,
+                maxWidth: segment.style.widthPx
+                  ? `${segment.style.widthPx}px`
+                  : '100%',
+                maxHeight: segment.style.heightPx
+                  ? `${segment.style.heightPx}px`
+                  : undefined,
               }}
             />
           </span>
@@ -558,11 +650,20 @@ function renderStructuredBlocks(
   activeItemId: string | null,
   hiddenItemId: string | null,
 ): ReactNode {
-  const renderBlocks = (nextBlocks: DocBlock[], startingParagraphIndex: number): [ReactNode[], number] => {
+  const renderBlocks = (
+    nextBlocks: DocBlock[],
+    startingParagraphIndex: number,
+  ): [ReactNode[], number] => {
     let currentParagraphIndex = startingParagraphIndex;
     const nodes = nextBlocks.map((block) => {
       if (block.type === 'paragraph') {
-        const node = renderParagraphBlock(block, items, activeItemId, hiddenItemId, currentParagraphIndex);
+        const node = renderParagraphBlock(
+          block,
+          items,
+          activeItemId,
+          hiddenItemId,
+          currentParagraphIndex,
+        );
         currentParagraphIndex += 1;
         return node;
       }
@@ -570,7 +671,10 @@ function renderStructuredBlocks(
       const renderedRows = block.rows.map((row) => (
         <tr key={row.id}>
           {row.cells.map((cell) => {
-            const [cellNodes, nextParagraphIndex] = renderBlocks(cell.blocks, currentParagraphIndex);
+            const [cellNodes, nextParagraphIndex] = renderBlocks(
+              cell.blocks,
+              currentParagraphIndex,
+            );
             currentParagraphIndex = nextParagraphIndex;
 
             return (
@@ -617,7 +721,9 @@ function collectStructuredParagraphTexts(blocks: DocBlock[]): string[] {
       if (block.type === 'paragraph') {
         paragraphTexts.push(
           block.segments
-            .filter((segment): segment is TextSegment => segment.type === 'text')
+            .filter(
+              (segment): segment is TextSegment => segment.type === 'text',
+            )
             .map((segment) => segment.text)
             .join(''),
         );
@@ -671,7 +777,9 @@ function buildStructuredParagraphIndexMap(
       const isExactMatch =
         normalizedStructuredParagraphText === normalizedRawParagraphText;
       const isContainedMatch =
-        normalizedStructuredParagraphText.includes(normalizedRawParagraphText) ||
+        normalizedStructuredParagraphText.includes(
+          normalizedRawParagraphText,
+        ) ||
         normalizedRawParagraphText.includes(normalizedStructuredParagraphText);
 
       if (!isExactMatch && !isContainedMatch) {
@@ -692,7 +800,9 @@ function resolveStructuredPreviewItems(
   uploadText: string,
   items: EditableExtractionItem[],
 ) {
-  const structuredParagraphTexts = collectStructuredParagraphTexts(parsedDocument.blocks);
+  const structuredParagraphTexts = collectStructuredParagraphTexts(
+    parsedDocument.blocks,
+  );
   const rawParagraphTexts = extractParagraphTextsFromUploadText(uploadText);
   const structuredParagraphIndexMap = buildStructuredParagraphIndexMap(
     rawParagraphTexts,
@@ -710,7 +820,8 @@ function resolveStructuredPreviewItems(
       return [];
     }
 
-    const matchesParagraph = (paragraphText: string) => paragraphText.includes(originalValue);
+    const matchesParagraph = (paragraphText: string) =>
+      paragraphText.includes(originalValue);
 
     if (
       typeof mappedParagraphIndex === 'number' &&
@@ -733,17 +844,22 @@ function resolveStructuredPreviewItems(
           ? fallbackParagraphIndexes[fallbackParagraphIndexes.length - 1]
           : fallbackParagraphIndexes[0];
 
-      return [{
-        ...item,
-        paragraph_index: fallbackParagraphIndex,
-      }];
+      return [
+        {
+          ...item,
+          paragraph_index: fallbackParagraphIndex,
+        },
+      ];
     }
 
     return [];
   });
 }
 
-function filterPlainPreviewItems(uploadText: string, items: EditableExtractionItem[]) {
+function filterPlainPreviewItems(
+  uploadText: string,
+  items: EditableExtractionItem[],
+) {
   return items.filter((item) => {
     const originalValue = item.original_value.trim();
 
@@ -753,6 +869,45 @@ function filterPlainPreviewItems(uploadText: string, items: EditableExtractionIt
 
     return uploadText.includes(originalValue);
   });
+}
+
+function findPdfEvidenceMatchForItem(
+  item: EditableExtractionItem | null,
+  payload: SlotReviewSessionPayload | null,
+) {
+  if (!item || !payload?.pdfEvidence) {
+    return null;
+  }
+
+  const [paragraphResultIndexRaw, itemIndexRaw, sequenceRaw] =
+    item.id.split('-');
+  const paragraphResultIndex = Number(paragraphResultIndexRaw);
+  const itemIndex = Number(itemIndexRaw);
+  const sequence = Number(sequenceRaw);
+  const keyedMatch =
+    Number.isInteger(paragraphResultIndex) &&
+    Number.isInteger(itemIndex) &&
+    Number.isInteger(sequence)
+      ? payload.pdfEvidence.matches.find(
+          (match) =>
+            match.paragraph_result_index === paragraphResultIndex &&
+            match.item_index === itemIndex &&
+            match.sequence === sequence,
+        )
+      : null;
+
+  if (keyedMatch) {
+    return keyedMatch;
+  }
+
+  return (
+    payload.pdfEvidence.matches.find(
+      (match) =>
+        normalizeSlotCategoryLabel(match.field_category) ===
+          item.field_category &&
+        match.original_value.trim() === item.original_value.trim(),
+    ) ?? null
+  );
 }
 
 function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
@@ -787,13 +942,14 @@ function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
   }
 
   const parsed = JSON.parse(rawValue) as SlotReviewSessionPayload;
-  const flattenedItems = parsed.extractionResult.flatMap((paragraph: ExtractionParagraph, paragraphIndex) =>
-    paragraph.items.map((item, itemIndex) => ({
-      ...item,
-      field_category: normalizeSlotCategoryLabel(item.field_category),
-      id: `${paragraphIndex}-${itemIndex}-${item.sequence}`,
-      paragraphTitle: paragraph.paragraph_title,
-    })),
+  const flattenedItems = parsed.extractionResult.flatMap(
+    (paragraph: ExtractionParagraph, paragraphIndex) =>
+      paragraph.items.map((item, itemIndex) => ({
+        ...item,
+        field_category: normalizeSlotCategoryLabel(item.field_category),
+        id: `${paragraphIndex}-${itemIndex}-${item.sequence}`,
+        paragraphTitle: paragraph.paragraph_title,
+      })),
   );
 
   return {
@@ -814,17 +970,18 @@ export function SlotReviewWorkspace() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const saveTemplateMutation = useSaveTemplate();
-  const [workspaceState, setWorkspaceState] = useState<SlotReviewWorkspaceState>({
-    payload: null,
-    items: [],
-    activeItemId: null,
-    editingItemId: null,
-    pendingSelectionByItemId: {},
-    isAddingItem: false,
-    pendingNewItemSelection: '',
-    pendingNewItemParagraphIndex: null,
-    pendingNewItemMeaning: '',
-  });
+  const [workspaceState, setWorkspaceState] =
+    useState<SlotReviewWorkspaceState>({
+      payload: null,
+      items: [],
+      activeItemId: null,
+      editingItemId: null,
+      pendingSelectionByItemId: {},
+      isAddingItem: false,
+      pendingNewItemSelection: '',
+      pendingNewItemParagraphIndex: null,
+      pendingNewItemMeaning: '',
+    });
   const documentViewportRef = useRef<HTMLDivElement | null>(null);
   const documentContentRef = useRef<HTMLDivElement | null>(null);
   const {
@@ -855,7 +1012,11 @@ export function SlotReviewWorkspace() {
     }
 
     if (payload.parsedDocument) {
-      return resolveStructuredPreviewItems(payload.parsedDocument, payload.uploadText, items);
+      return resolveStructuredPreviewItems(
+        payload.parsedDocument,
+        payload.uploadText,
+        items,
+      );
     }
 
     return filterPlainPreviewItems(payload.uploadText, items);
@@ -869,7 +1030,12 @@ export function SlotReviewWorkspace() {
         pendingNewItemSelection,
         pendingNewItemParagraphIndex,
       ),
-    [isAddingItem, pendingNewItemParagraphIndex, pendingNewItemSelection, visibleItems],
+    [
+      isAddingItem,
+      pendingNewItemParagraphIndex,
+      pendingNewItemSelection,
+      visibleItems,
+    ],
   );
 
   const highlightedText = useMemo(() => {
@@ -899,7 +1065,11 @@ export function SlotReviewWorkspace() {
       return [];
     }
 
-    return resolveStructuredPreviewItems(payload.parsedDocument, payload.uploadText, previewItems);
+    return resolveStructuredPreviewItems(
+      payload.parsedDocument,
+      payload.uploadText,
+      previewItems,
+    );
   }, [payload, previewItems]);
 
   const structuredPreview = useMemo(() => {
@@ -913,14 +1083,21 @@ export function SlotReviewWorkspace() {
       isAddingItem ? 'pending-new-item' : activeItemId,
       editingItemId,
     );
-  }, [activeItemId, editingItemId, isAddingItem, payload, resolvedPreviewItems]);
+  }, [
+    activeItemId,
+    editingItemId,
+    isAddingItem,
+    payload,
+    resolvedPreviewItems,
+  ]);
 
   useEffect(() => {
     if (!activeItemId || !documentViewportRef.current) {
       return;
     }
 
-    const activeResolvedItem = resolvedPreviewItems.find((item) => item.id === activeItemId) ?? null;
+    const activeResolvedItem =
+      resolvedPreviewItems.find((item) => item.id === activeItemId) ?? null;
     const targetParagraph =
       typeof activeResolvedItem?.paragraph_index === 'number'
         ? documentViewportRef.current.querySelector<HTMLElement>(
@@ -928,8 +1105,12 @@ export function SlotReviewWorkspace() {
           )
         : null;
     const activeMarker =
-      targetParagraph?.querySelector<HTMLElement>(`[data-slot-id="${activeItemId}"]`) ??
-      documentViewportRef.current.querySelector<HTMLElement>(`[data-slot-id="${activeItemId}"]`);
+      targetParagraph?.querySelector<HTMLElement>(
+        `[data-slot-id="${activeItemId}"]`,
+      ) ??
+      documentViewportRef.current.querySelector<HTMLElement>(
+        `[data-slot-id="${activeItemId}"]`,
+      );
 
     if (!activeMarker && !targetParagraph) {
       return;
@@ -950,34 +1131,55 @@ export function SlotReviewWorkspace() {
       return;
     }
 
-    setWorkspaceState((currentState) => {
-      const nextActiveItemId = visibleItems[0]?.id ?? null;
+    const timeoutId = window.setTimeout(() => {
+      setWorkspaceState((currentState) => {
+        const nextActiveItemId = visibleItems[0]?.id ?? null;
 
-      if (currentState.activeItemId === nextActiveItemId) {
-        return currentState;
-      }
+        if (currentState.activeItemId === nextActiveItemId) {
+          return currentState;
+        }
 
-      return {
-        ...currentState,
-        activeItemId: nextActiveItemId,
-        editingItemId:
-          currentState.editingItemId &&
-          visibleItems.some((item) => item.id === currentState.editingItemId)
-            ? currentState.editingItemId
-            : null,
-      };
-    });
+        return {
+          ...currentState,
+          activeItemId: nextActiveItemId,
+          editingItemId:
+            currentState.editingItemId &&
+            visibleItems.some((item) => item.id === currentState.editingItemId)
+              ? currentState.editingItemId
+              : null,
+        };
+      });
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [activeItemId, isAddingItem, visibleItems]);
 
   const activeItem = useMemo(
     () => visibleItems.find((item) => item.id === activeItemId) ?? null,
     [activeItemId, visibleItems],
   );
+  const activeEvidenceMatch = useMemo(
+    () => findPdfEvidenceMatchForItem(activeItem, payload),
+    [activeItem, payload],
+  );
+  const activeEvidencePage = useMemo(
+    () =>
+      activeEvidenceMatch
+        ? (payload?.pdfEvidence?.pages.find(
+            (page) => page.pageNumber === activeEvidenceMatch.page_number,
+          ) ?? null)
+        : null,
+    [activeEvidenceMatch, payload],
+  );
   const editingItem = useMemo(
     () => visibleItems.find((item) => item.id === editingItemId) ?? null,
     [editingItemId, visibleItems],
   );
-  const pendingEditingSelection = editingItemId ? pendingSelectionByItemId[editingItemId] ?? '' : '';
+  const pendingEditingSelection = editingItemId
+    ? (pendingSelectionByItemId[editingItemId] ?? '')
+    : '';
 
   const handleDocumentMouseUp = () => {
     if ((!editingItemId && !isAddingItem) || !documentContentRef.current) {
@@ -997,7 +1199,10 @@ export function SlotReviewWorkspace() {
         ? (range.commonAncestorContainer as Element)
         : range.commonAncestorContainer.parentElement;
 
-    if (!commonAncestor || !documentContentRef.current.contains(commonAncestor)) {
+    if (
+      !commonAncestor ||
+      !documentContentRef.current.contains(commonAncestor)
+    ) {
       return;
     }
 
@@ -1044,7 +1249,11 @@ export function SlotReviewWorkspace() {
       return '';
     }
 
-    return JSON.stringify(buildJsonPreviewPayload(visibleItems, payload), null, 2);
+    return JSON.stringify(
+      buildJsonPreviewPayload(visibleItems, payload),
+      null,
+      2,
+    );
   }, [payload, visibleItems]);
 
   const handleSaveTemplate = () => {
@@ -1107,7 +1316,8 @@ export function SlotReviewWorkspace() {
         <Stack gap="md" align="center">
           <Title order={2}>正在恢复槽位识别结果</Title>
           <Text c="dimmed" ta="center">
-            页面正在从当前浏览器会话中加载 DOCX 预览与抽取结果。如果长时间没有内容，再返回首页重新识别一次。
+            页面正在从当前浏览器会话中加载 DOCX
+            预览与抽取结果。如果长时间没有内容，再返回首页重新识别一次。
           </Text>
         </Stack>
       </Paper>
@@ -1147,7 +1357,12 @@ export function SlotReviewWorkspace() {
       </Stack>
 
       <Group align="stretch" gap="xl" wrap="nowrap">
-        <Paper p="lg" radius="xl" withBorder style={{ flex: '0 0 320px', minWidth: 320 }}>
+        <Paper
+          p="lg"
+          radius="xl"
+          withBorder
+          style={{ flex: '0 0 320px', minWidth: 320 }}
+        >
           <Stack gap="md">
             <Title order={4}>抽取槽位</Title>
             <Button
@@ -1160,7 +1375,8 @@ export function SlotReviewWorkspace() {
                   notifications.show({
                     color: 'yellow',
                     title: '请先完成当前槽位修改',
-                    message: '当前正在修改已有槽位，请先保存或取消后再新增槽位。',
+                    message:
+                      '当前正在修改已有槽位，请先保存或取消后再新增槽位。',
                   });
                   return;
                 }
@@ -1169,15 +1385,26 @@ export function SlotReviewWorkspace() {
                   ...currentState,
                   activeItemId: null,
                   isAddingItem: !currentState.isAddingItem,
-                  pendingNewItemSelection: currentState.isAddingItem ? '' : currentState.pendingNewItemSelection,
-                  pendingNewItemParagraphIndex: currentState.isAddingItem ? null : currentState.pendingNewItemParagraphIndex,
-                  pendingNewItemMeaning: currentState.isAddingItem ? '' : currentState.pendingNewItemMeaning,
+                  pendingNewItemSelection: currentState.isAddingItem
+                    ? ''
+                    : currentState.pendingNewItemSelection,
+                  pendingNewItemParagraphIndex: currentState.isAddingItem
+                    ? null
+                    : currentState.pendingNewItemParagraphIndex,
+                  pendingNewItemMeaning: currentState.isAddingItem
+                    ? ''
+                    : currentState.pendingNewItemMeaning,
                 }));
               }}
             >
               {isAddingItem ? '取消新增槽位' : '手动新增槽位'}
             </Button>
-            <ScrollArea h={640} offsetScrollbars scrollbarSize={8} type="always">
+            <ScrollArea
+              h={640}
+              offsetScrollbars
+              scrollbarSize={8}
+              type="always"
+            >
               <Stack gap="md">
                 {isAddingItem ? (
                   <Card
@@ -1218,27 +1445,40 @@ export function SlotReviewWorkspace() {
                             size="compact-xs"
                             variant="filled"
                             onClick={() => {
-                              if (!pendingNewItemSelection.trim() || !pendingNewItemMeaning.trim()) {
+                              if (
+                                !pendingNewItemSelection.trim() ||
+                                !pendingNewItemMeaning.trim()
+                              ) {
                                 notifications.show({
                                   color: 'yellow',
                                   title: '新增槽位信息不完整',
-                                  message: '请先在右侧框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
+                                  message:
+                                    '请先在右侧框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
                                 });
                                 return;
                               }
 
                               setWorkspaceState((currentState) => {
                                 const nextSequence =
-                                  currentState.items.reduce((maxSequence, item) => Math.max(maxSequence, item.sequence), 0) + 1;
+                                  currentState.items.reduce(
+                                    (maxSequence, item) =>
+                                      Math.max(maxSequence, item.sequence),
+                                    0,
+                                  ) + 1;
                                 const newItem: EditableExtractionItem = {
                                   id: `manual-${Date.now()}`,
                                   paragraphTitle: '手动新增槽位',
                                   sequence: nextSequence,
                                   field_category: '手动新增',
-                                  original_value: currentState.pendingNewItemSelection.trim(),
-                                  meaning_to_applicant: currentState.pendingNewItemMeaning.trim(),
-                                  original_doc_position: currentState.pendingNewItemSelection.trim(),
-                                  paragraph_index: currentState.pendingNewItemParagraphIndex ?? undefined,
+                                  original_value:
+                                    currentState.pendingNewItemSelection.trim(),
+                                  meaning_to_applicant:
+                                    currentState.pendingNewItemMeaning.trim(),
+                                  original_doc_position:
+                                    currentState.pendingNewItemSelection.trim(),
+                                  paragraph_index:
+                                    currentState.pendingNewItemParagraphIndex ??
+                                    undefined,
                                 };
 
                                 return {
@@ -1255,7 +1495,8 @@ export function SlotReviewWorkspace() {
                               notifications.show({
                                 color: 'teal',
                                 title: '新增槽位已加入',
-                                message: '手动新增槽位已经加入当前模板编辑结果，记得点击顶部“保存模板”完成保存。',
+                                message:
+                                  '手动新增槽位已经加入当前模板编辑结果，记得点击顶部“保存模板”完成保存。',
                               });
                             }}
                           >
@@ -1289,8 +1530,16 @@ export function SlotReviewWorkspace() {
                 {visibleItems.map((item) => {
                   const isActive = item.id === activeItemId;
                   const isEditing = item.id === editingItemId;
-                  const isLockedByOtherEditing = Boolean((editingItemId && editingItemId !== item.id) || isAddingItem);
-                  const pendingSelection = pendingSelectionByItemId[item.id] ?? '';
+                  const isLockedByOtherEditing = Boolean(
+                    (editingItemId && editingItemId !== item.id) ||
+                    isAddingItem,
+                  );
+                  const pendingSelection =
+                    pendingSelectionByItemId[item.id] ?? '';
+                  const evidenceMatch = findPdfEvidenceMatchForItem(
+                    item,
+                    payload,
+                  );
 
                   return (
                     <Card
@@ -1302,14 +1551,17 @@ export function SlotReviewWorkspace() {
                         cursor: 'pointer',
                         opacity: isLockedByOtherEditing ? 0.72 : 1,
                         borderColor: isActive ? '#38d39f' : undefined,
-                        boxShadow: isActive ? '0 0 0 1px #38d39f inset' : undefined,
+                        boxShadow: isActive
+                          ? '0 0 0 1px #38d39f inset'
+                          : undefined,
                       }}
                       onClick={() => {
                         if (isLockedByOtherEditing) {
                           notifications.show({
                             color: 'yellow',
                             title: '请先完成当前槽位修改',
-                            message: '当前正在修改另一个槽位，请先在右侧完成框选，或点击“取消”后再切换。',
+                            message:
+                              '当前正在修改另一个槽位，请先在右侧完成框选，或点击“取消”后再切换。',
                           });
                           return;
                         }
@@ -1322,7 +1574,10 @@ export function SlotReviewWorkspace() {
                     >
                       <Stack gap="sm">
                         <Group justify="space-between">
-                          <Badge color="teal" variant={isActive ? 'filled' : 'light'}>
+                          <Badge
+                            color="teal"
+                            variant={isActive ? 'filled' : 'light'}
+                          >
                             {item.field_category}
                           </Badge>
                           <Group gap="xs">
@@ -1339,7 +1594,8 @@ export function SlotReviewWorkspace() {
                                   notifications.show({
                                     color: 'yellow',
                                     title: '请先完成当前槽位修改',
-                                    message: '当前正在修改另一个槽位，请先完成当前框选，或先取消当前修改。',
+                                    message:
+                                      '当前正在修改另一个槽位，请先完成当前框选，或先取消当前修改。',
                                   });
                                   return;
                                 }
@@ -1347,12 +1603,18 @@ export function SlotReviewWorkspace() {
                                 setWorkspaceState((currentState) => ({
                                   ...currentState,
                                   activeItemId: item.id,
-                                  editingItemId: currentState.editingItemId === item.id ? null : item.id,
+                                  editingItemId:
+                                    currentState.editingItemId === item.id
+                                      ? null
+                                      : item.id,
                                   pendingSelectionByItemId:
                                     currentState.editingItemId === item.id
                                       ? Object.fromEntries(
-                                          Object.entries(currentState.pendingSelectionByItemId).filter(
-                                            ([currentItemId]) => currentItemId !== item.id,
+                                          Object.entries(
+                                            currentState.pendingSelectionByItemId,
+                                          ).filter(
+                                            ([currentItemId]) =>
+                                              currentItemId !== item.id,
                                           ),
                                         )
                                       : currentState.pendingSelectionByItemId,
@@ -1372,28 +1634,42 @@ export function SlotReviewWorkspace() {
                                   event.stopPropagation();
                                   setWorkspaceState((currentState) => ({
                                     ...currentState,
-                                    items: currentState.items.map((currentItem) =>
-                                      currentItem.id === item.id
-                                        ? {
-                                            ...currentItem,
-                                            original_value: currentState.pendingSelectionByItemId[item.id] ?? currentItem.original_value,
-                                            original_doc_position:
-                                              currentState.pendingSelectionByItemId[item.id] ?? currentItem.original_doc_position,
-                                          }
-                                        : currentItem,
+                                    items: currentState.items.map(
+                                      (currentItem) =>
+                                        currentItem.id === item.id
+                                          ? {
+                                              ...currentItem,
+                                              original_value:
+                                                currentState
+                                                  .pendingSelectionByItemId[
+                                                  item.id
+                                                ] ?? currentItem.original_value,
+                                              original_doc_position:
+                                                currentState
+                                                  .pendingSelectionByItemId[
+                                                  item.id
+                                                ] ??
+                                                currentItem.original_doc_position,
+                                            }
+                                          : currentItem,
                                     ),
                                     editingItemId: null,
-                                    pendingSelectionByItemId: Object.fromEntries(
-                                      Object.entries(currentState.pendingSelectionByItemId).filter(
-                                        ([currentItemId]) => currentItemId !== item.id,
+                                    pendingSelectionByItemId:
+                                      Object.fromEntries(
+                                        Object.entries(
+                                          currentState.pendingSelectionByItemId,
+                                        ).filter(
+                                          ([currentItemId]) =>
+                                            currentItemId !== item.id,
+                                        ),
                                       ),
-                                    ),
                                   }));
 
                                   notifications.show({
                                     color: 'teal',
                                     title: '槽位值已保存',
-                                    message: '新的框选内容已经正式更新到槽位抽取值和原文定位中。',
+                                    message:
+                                      '新的框选内容已经正式更新到槽位抽取值和原文定位中。',
                                   });
                                 }}
                               >
@@ -1413,7 +1689,8 @@ export function SlotReviewWorkspace() {
                                   notifications.show({
                                     color: 'yellow',
                                     title: '请先完成当前槽位修改',
-                                    message: '当前正在修改另一个槽位，请先完成或取消当前修改后再删除其它槽位。',
+                                    message:
+                                      '当前正在修改另一个槽位，请先完成或取消当前修改后再删除其它槽位。',
                                   });
                                   return;
                                 }
@@ -1427,31 +1704,42 @@ export function SlotReviewWorkspace() {
                                   null;
 
                                 setWorkspaceState((currentState) => {
-                                  const nextItems = currentState.items.filter((currentItem) => currentItem.id !== item.id);
+                                  const nextItems = currentState.items.filter(
+                                    (currentItem) => currentItem.id !== item.id,
+                                  );
                                   const nextActiveItemId =
                                     currentState.activeItemId === item.id
                                       ? nextVisibleItemId
                                       : currentState.activeItemId;
 
-                                  const nextPendingSelectionByItemId = Object.fromEntries(
-                                    Object.entries(currentState.pendingSelectionByItemId).filter(
-                                      ([currentItemId]) => currentItemId !== item.id,
-                                    ),
-                                  );
+                                  const nextPendingSelectionByItemId =
+                                    Object.fromEntries(
+                                      Object.entries(
+                                        currentState.pendingSelectionByItemId,
+                                      ).filter(
+                                        ([currentItemId]) =>
+                                          currentItemId !== item.id,
+                                      ),
+                                    );
 
                                   return {
                                     ...currentState,
                                     items: nextItems,
                                     activeItemId: nextActiveItemId,
-                                    editingItemId: currentState.editingItemId === item.id ? null : currentState.editingItemId,
-                                    pendingSelectionByItemId: nextPendingSelectionByItemId,
+                                    editingItemId:
+                                      currentState.editingItemId === item.id
+                                        ? null
+                                        : currentState.editingItemId,
+                                    pendingSelectionByItemId:
+                                      nextPendingSelectionByItemId,
                                   };
                                 });
 
                                 notifications.show({
                                   color: 'red',
                                   title: '槽位已删除',
-                                  message: '该槽位已从当前模板编辑结果中移除，点击顶部“保存模板”后将不会保留。',
+                                  message:
+                                    '该槽位已从当前模板编辑结果中移除，点击顶部“保存模板”后将不会保留。',
                                 });
                               }}
                             >
@@ -1474,12 +1762,26 @@ export function SlotReviewWorkspace() {
                               ...currentState,
                               items: currentState.items.map((currentItem) =>
                                 currentItem.id === item.id
-                                  ? { ...currentItem, meaning_to_applicant: nextMeaning }
+                                  ? {
+                                      ...currentItem,
+                                      meaning_to_applicant: nextMeaning,
+                                    }
                                   : currentItem,
                               ),
                             }));
                           }}
                         />
+                        {evidenceMatch ? (
+                          <Group gap={6}>
+                            <Badge color="blue" radius="sm" variant="light">
+                              PDF 第 {evidenceMatch.page_number} 页
+                            </Badge>
+                            <Text c="dimmed" size="xs">
+                              证据置信度：
+                              {Math.round(evidenceMatch.confidence * 100)}%
+                            </Text>
+                          </Group>
+                        ) : null}
                         {isEditing ? (
                           <Text c="yellow" size="xs">
                             修改中：请在右侧预览文本中框选新的连续文本片段，确认后点击“保存”再更新槽位。
@@ -1499,55 +1801,192 @@ export function SlotReviewWorkspace() {
           </Stack>
         </Paper>
 
-        <Paper p="lg" radius="xl" withBorder style={{ flex: '1 1 0', minWidth: 0 }}>
-          <Stack gap="md">
-            <div>
-              <Title order={4}>原文高亮预览</Title>
-              <Text c="dimmed" mt={6} size="sm">
-                {isAddingItem
-                  ? '正在手动新增槽位。请先在右侧框选一段连续文本作为槽位抽取值，再在左侧填写槽位含义并点击“保存新增”。'
-                  : editingItem
-                  ? `正在修改：${editingItem.field_category}。请先在右侧框选一段连续文本，再点击左侧“保存”才会正式写回槽位。`
-                  : activeItem
-                  ? `已定位到：${activeItem.field_category} - ${activeItem.original_value || '未填写'}`
-                  : '点击左侧槽位后，右侧会自动滚动到对应原文位置。'}
-              </Text>
-            </div>
-            <ScrollArea h={640} offsetScrollbars scrollbarSize={8} type="always" viewportRef={documentViewportRef}>
-              <div style={{ width: '100%', minWidth: '100%' }}>
-                <Paper
-                  p="lg"
-                  radius="lg"
-                  style={{
-                    width: '100%',
-                    minWidth: '100%',
-                    boxSizing: 'border-box',
-                    background: '#f7fbf9',
-                    border: '1px solid #dbe9e1',
-                    color: '#18211d',
-                    lineHeight: 1.85,
-                  }}
-                >
-                  <div
-                    className="slot-review-document"
-                    onMouseUp={handleDocumentMouseUp}
-                    ref={documentContentRef}
+        <Stack gap="xl" style={{ flex: '1 1 0', minWidth: 0 }}>
+          <Paper
+            p="lg"
+            radius="xl"
+            withBorder
+            style={{ width: '100%', minWidth: 0 }}
+          >
+            <Stack gap="md">
+              <div>
+                <Title order={4}>原文高亮预览</Title>
+                <Text c="dimmed" mt={6} size="sm">
+                  {isAddingItem
+                    ? '正在手动新增槽位。请先在右侧框选一段连续文本作为槽位抽取值，再在左侧填写槽位含义并点击“保存新增”。'
+                    : editingItem
+                      ? `正在修改：${editingItem.field_category}。请先在右侧框选一段连续文本，再点击左侧“保存”才会正式写回槽位。`
+                      : activeItem
+                        ? `已定位到：${activeItem.field_category} - ${activeItem.original_value || '未填写'}`
+                        : '点击左侧槽位后，右侧会自动滚动到对应原文位置。'}
+                </Text>
+              </div>
+              <ScrollArea
+                h={640}
+                offsetScrollbars
+                scrollbarSize={8}
+                type="always"
+                viewportRef={documentViewportRef}
+              >
+                <div style={{ width: '100%', minWidth: '100%' }}>
+                  <Paper
+                    p="lg"
+                    radius="lg"
                     style={{
                       width: '100%',
-                      fontFamily: '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
-                      fontSize: '18px',
-                      lineHeight: 2,
-                      whiteSpace: 'normal',
-                      wordBreak: 'break-word',
+                      minWidth: '100%',
+                      boxSizing: 'border-box',
+                      background: '#f7fbf9',
+                      border: '1px solid #dbe9e1',
+                      color: '#18211d',
+                      lineHeight: 1.85,
                     }}
                   >
-                    {structuredPreview ? structuredPreview : <div dangerouslySetInnerHTML={{ __html: highlightedText }} />}
+                    <div
+                      className="slot-review-document"
+                      onMouseUp={handleDocumentMouseUp}
+                      ref={documentContentRef}
+                      style={{
+                        width: '100%',
+                        fontFamily:
+                          '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
+                        fontSize: '18px',
+                        lineHeight: 2,
+                        whiteSpace: 'normal',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {structuredPreview ? (
+                        structuredPreview
+                      ) : (
+                        <div
+                          dangerouslySetInnerHTML={{ __html: highlightedText }}
+                        />
+                      )}
+                    </div>
+                  </Paper>
+                </div>
+              </ScrollArea>
+            </Stack>
+          </Paper>
+          {payload.pdfEvidence ? (
+            <Paper
+              p="lg"
+              radius="xl"
+              withBorder
+              style={{ width: '100%', minWidth: 0 }}
+            >
+              <Stack gap="md">
+                <Group align="flex-start" justify="space-between">
+                  <div>
+                    <Title order={4}>PDF 证据预览</Title>
+                    <Text c="dimmed" mt={6} size="sm">
+                      当前 PDF：{payload.pdfEvidence.pdfFileName}
+                      。点击左侧槽位后，这里会切换到 OCR 匹配到的页面。
+                    </Text>
                   </div>
-                </Paper>
-              </div>
-            </ScrollArea>
-          </Stack>
-        </Paper>
+                  {activeEvidenceMatch ? (
+                    <Badge color="blue" radius="sm" variant="filled">
+                      PDF 第 {activeEvidenceMatch.page_number} 页
+                    </Badge>
+                  ) : null}
+                </Group>
+
+                {activeEvidencePage ? (
+                  <Stack gap="sm">
+                    <ScrollArea
+                      h={520}
+                      offsetScrollbars
+                      scrollbarSize={8}
+                      type="always"
+                    >
+                      <Box
+                        style={{
+                          position: 'relative',
+                          display: 'flex',
+                          justifyContent: 'center',
+                          minWidth: 720,
+                          padding: 18,
+                          background: '#101514',
+                          borderRadius: 18,
+                        }}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          alt={`${payload.pdfEvidence.pdfFileName} 第 ${activeEvidencePage.pageNumber} 页`}
+                          src={activeEvidencePage.imageDataUrl}
+                          style={{
+                            width: '100%',
+                            maxWidth: 920,
+                            height: 'auto',
+                            borderRadius: 12,
+                            boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
+                          }}
+                        />
+                        <Box
+                          style={{
+                            position: 'absolute',
+                            top: 30,
+                            right: 30,
+                            display: 'grid',
+                            placeItems: 'center',
+                            width: 148,
+                            height: 86,
+                            border: '3px solid #f59f00',
+                            borderRadius: 999,
+                            background: 'rgba(255, 209, 102, 0.18)',
+                            boxShadow: '0 0 0 6px rgba(245, 159, 0, 0.12)',
+                            color: '#fff6dc',
+                            textAlign: 'center',
+                            pointerEvents: 'none',
+                          }}
+                        >
+                          <Text fw={800} size="xs">
+                            关联槽位
+                            <br />
+                            {activeEvidenceMatch?.field_category}
+                          </Text>
+                        </Box>
+                      </Box>
+                    </ScrollArea>
+
+                    {activeEvidenceMatch ? (
+                      <Paper
+                        p="md"
+                        radius="lg"
+                        style={{
+                          background: '#f7fbf9',
+                          border: '1px solid #dbe9e1',
+                        }}
+                      >
+                        <Text c="dimmed" size="xs">
+                          OCR 证据片段
+                        </Text>
+                        <Text mt={6} size="sm">
+                          {activeEvidenceMatch.evidence_text ||
+                            '该页已匹配到槽位值，但 OCR 未返回可展示的上下文片段。'}
+                        </Text>
+                      </Paper>
+                    ) : null}
+                  </Stack>
+                ) : (
+                  <Paper
+                    p="md"
+                    radius="lg"
+                    style={{
+                      background: '#f7fbf9',
+                      border: '1px solid #dbe9e1',
+                    }}
+                  >
+                    <Text c="dimmed" size="sm">
+                      当前选中的槽位还没有在扫描 PDF 的 OCR 文本中匹配到证据页。
+                    </Text>
+                  </Paper>
+                )}
+              </Stack>
+            </Paper>
+          ) : null}
+        </Stack>
       </Group>
 
       {isJsonPreviewDebugEnabled ? (
@@ -1566,7 +2005,13 @@ export function SlotReviewWorkspace() {
                 overflowX: 'auto',
               }}
             >
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+              <pre
+                style={{
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
                 {jsonPreview}
               </pre>
             </Paper>

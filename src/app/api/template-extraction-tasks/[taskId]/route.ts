@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
-import { templateSlotExtractionResultSchema } from '@/src/app/api/types/template-slot-extraction';
+import {
+  templatePdfEvidenceResultSchema,
+  templateSlotExtractionResultSchema,
+} from '@/src/app/api/types/template-slot-extraction';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
@@ -33,7 +36,7 @@ export async function GET(
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
-        'id, status, source_docx_name, prompt, total_paragraphs, completed_paragraphs, processing_trace, upload_text, upload_html, result, error_message, created_at, started_at, finished_at',
+        'id, status, source_docx_name, source_pdf_name, prompt, total_paragraphs, completed_paragraphs, processing_trace, upload_text, upload_html, result, pdf_evidence, error_message, created_at, started_at, finished_at',
       )
       .eq('id', taskId)
       .eq('owner_id', user.id)
@@ -58,11 +61,17 @@ export async function GET(
         ? templateSlotExtractionResultSchema.parse(task.result)
         : null
       : null;
+    const parsedPdfEvidence = task.pdf_evidence
+      ? templatePdfEvidenceResultSchema.safeParse(task.pdf_evidence).success
+        ? templatePdfEvidenceResultSchema.parse(task.pdf_evidence)
+        : null
+      : null;
 
     return NextResponse.json({
       data: {
         ...task,
         result: parsedResult,
+        pdf_evidence: parsedPdfEvidence,
       },
     });
   } catch (error) {

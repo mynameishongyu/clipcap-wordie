@@ -22,6 +22,35 @@ export const templateSlotExtractionResultSchema = z.object({
   extraction_result: z.array(extractionParagraphSchema),
 });
 
+export const templatePdfEvidencePageSchema = z.object({
+  page_number: z.number().int().positive(),
+  text: z.string(),
+});
+
+export const templatePdfEvidenceMatchSchema = z.object({
+  paragraph_result_index: z.number().int().nonnegative(),
+  item_index: z.number().int().nonnegative(),
+  sequence: z.number().int().positive(),
+  paragraph_index: z.number().int().nonnegative().nullable().optional(),
+  field_category: z.string(),
+  original_value: z.string(),
+  page_number: z.number().int().positive(),
+  evidence_text: z.string(),
+  confidence: z.number().min(0).max(1),
+  match_type: z.enum(['normalized_exact', 'raw_contains']),
+});
+
+export const templatePdfEvidenceResultSchema = z.object({
+  pdf_file_name: z.string(),
+  ocr_pages: z.array(templatePdfEvidencePageSchema),
+  matches: z.array(templatePdfEvidenceMatchSchema),
+});
+
 export type ExtractionItem = z.infer<typeof extractionItemSchema>;
 export type ExtractionParagraph = z.infer<typeof extractionParagraphSchema>;
-export type TemplateSlotExtractionResult = z.infer<typeof templateSlotExtractionResultSchema>;
+export type TemplateSlotExtractionResult = z.infer<
+  typeof templateSlotExtractionResultSchema
+>;
+export type TemplatePdfEvidenceResult = z.infer<
+  typeof templatePdfEvidenceResultSchema
+>;

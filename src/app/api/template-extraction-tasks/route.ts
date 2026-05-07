@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { logEvent } from '@/src/lib/logging/log-event';
+import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import {
   countExtractableParagraphsFromRawText,
   extractTextFromDocxBuffer,
@@ -20,6 +21,42 @@ function createUnauthorizedResponse() {
   );
 }
 
+function parsePdfVisionPages(rawValue: FormDataEntryValue | null) {
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return [] as PdfVisionPageInput[];
+  }
+
+  const parsed = JSON.parse(rawValue) as unknown;
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('pdfVisionPages must be an array.');
+  }
+
+  return parsed
+    .map((item) => {
+      const record =
+        item && typeof item === 'object'
+          ? (item as Record<string, unknown>)
+          : {};
+      const pageNumber = Number(record.page_number);
+      const imageDataUrl = String(record.image_data_url ?? '');
+
+      if (
+        !Number.isInteger(pageNumber) ||
+        pageNumber < 1 ||
+        !imageDataUrl.startsWith('data:image/')
+      ) {
+        return null;
+      }
+
+      return {
+        page_number: pageNumber,
+        image_data_url: imageDataUrl,
+      };
+    })
+    .filter((item): item is PdfVisionPageInput => Boolean(item));
+}
+
 export async function POST(request: Request) {
   const supabase = await createSupabaseServerClient();
   const {
@@ -33,6 +70,8 @@ export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
+    const pdfName = String(formData.get('pdfName') ?? '').trim();
+    const pdfVisionPages = parsePdfVisionPages(formData.get('pdfVisionPages'));
     const prompt = String(formData.get('prompt') ?? '').trim();
 
     if (!(file instanceof File)) {
@@ -87,6 +126,9 @@ export async function POST(request: Request) {
         owner_id: user.id,
         source_docx_name: file.name,
         source_docx_base64: buffer.toString('base64'),
+        source_pdf_name: pdfVisionPages.length > 0 ? pdfName || null : null,
+        source_pdf_vision_pages:
+          pdfVisionPages.length > 0 ? pdfVisionPages : null,
         prompt,
         status: 'pending',
         total_paragraphs: totalParagraphs,
@@ -112,6 +154,8 @@ export async function POST(request: Request) {
         taskId: task.id,
         prompt,
         sourceDocxName: file.name,
+        sourcePdfName: pdfVisionPages.length > 0 ? pdfName : null,
+        pdfVisionPageCount: pdfVisionPages.length,
         totalParagraphs,
       },
     });

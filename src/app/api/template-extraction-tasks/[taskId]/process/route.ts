@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
+import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
+import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
@@ -28,6 +30,36 @@ function createUnauthorizedResponse() {
   );
 }
 
+function normalizePdfVisionPages(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as PdfVisionPageInput[];
+  }
+
+  return value
+    .map((item) => {
+      const record =
+        item && typeof item === 'object'
+          ? (item as Record<string, unknown>)
+          : {};
+      const pageNumber = Number(record.page_number);
+      const imageDataUrl = String(record.image_data_url ?? '');
+
+      if (
+        !Number.isInteger(pageNumber) ||
+        pageNumber < 1 ||
+        !imageDataUrl.startsWith('data:image/')
+      ) {
+        return null;
+      }
+
+      return {
+        page_number: pageNumber,
+        image_data_url: imageDataUrl,
+      };
+    })
+    .filter((item): item is PdfVisionPageInput => Boolean(item));
+}
+
 export async function POST(
   _request: Request,
   context: { params: Promise<{ taskId: string }> },
@@ -48,7 +80,7 @@ export async function POST(
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
-        'id, owner_id, source_docx_name, source_docx_base64, prompt, status, total_paragraphs, completed_paragraphs, processing_trace',
+        'id, owner_id, source_docx_name, source_docx_base64, source_pdf_name, source_pdf_vision_pages, prompt, status, total_paragraphs, completed_paragraphs, processing_trace',
       )
       .eq('id', taskId)
       .eq('owner_id', user.id)
@@ -163,12 +195,30 @@ export async function POST(
               taskId: task.id,
               completedParagraphs,
               totalParagraphs,
-              remainingParagraphs: Math.max(0, totalParagraphs - completedParagraphs),
+              remainingParagraphs: Math.max(
+                0,
+                totalParagraphs - completedParagraphs,
+              ),
             },
           });
         }
       },
     });
+
+    const pdfVisionPages = normalizePdfVisionPages(
+      task.source_pdf_vision_pages,
+    );
+    const pdfEvidence =
+      task.source_pdf_name && pdfVisionPages.length > 0
+        ? await buildTemplatePdfEvidence({
+            pdfFileName: task.source_pdf_name,
+            extractionResult: result.extraction_result,
+            visionPages: pdfVisionPages,
+            onTrace: async (entry) => {
+              await appendProcessingTrace(admin, task.id, entry.message);
+            },
+          })
+        : null;
 
     const partialCompletionMessage =
       result.failedParagraphs > 0
@@ -191,6 +241,7 @@ export async function POST(
           document_info: result.document_info,
           extraction_result: result.extraction_result,
         },
+        pdf_evidence: pdfEvidence,
         error_message: partialCompletionMessage,
         finished_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -210,6 +261,8 @@ export async function POST(
         extractedParagraphs: result.extraction_result.length,
         succeededParagraphs: result.succeededParagraphs,
         failedParagraphs: result.failedParagraphs,
+        pdfEvidenceMatchCount: pdfEvidence?.matches.length ?? 0,
+        pdfEvidenceOcrPageCount: pdfEvidence?.ocr_pages.length ?? 0,
         uploadTextLength: result.uploadText.length,
       },
     });
@@ -239,7 +292,8 @@ export async function POST(
       .from('template_extraction_tasks')
       .update({
         status: 'failed',
-        error_message: error instanceof Error ? error.message : '槽位抽取失败，请稍后重试。',
+        error_message:
+          error instanceof Error ? error.message : '槽位抽取失败，请稍后重试。',
         finished_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
@@ -250,7 +304,10 @@ export async function POST(
       actorEmail: user.email ?? null,
       level: 'error',
       eventType: 'template_extraction_task_failed',
-      message: error instanceof Error ? error.message : 'Failed to process template extraction task.',
+      message:
+        error instanceof Error
+          ? error.message
+          : 'Failed to process template extraction task.',
       route: '/api/template-extraction-tasks/[taskId]/process',
       payload: buildErrorLogPayload(error, {
         taskId,
@@ -260,7 +317,8 @@ export async function POST(
     return NextResponse.json(
       {
         code: 'TEMPLATE_EXTRACTION_TASK_PROCESS_FAILED',
-        message: error instanceof Error ? error.message : '槽位抽取失败，请稍后重试。',
+        message:
+          error instanceof Error ? error.message : '槽位抽取失败，请稍后重试。',
       },
       { status: 500 },
     );
