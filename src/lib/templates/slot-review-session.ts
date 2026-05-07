@@ -11,7 +11,9 @@ export interface SlotReviewPdfEvidencePayload {
   pdfFileName: string;
   pages: Array<{
     pageNumber: number;
-    imageDataUrl: string;
+    imageDataUrl?: string;
+    imageUrl?: string;
+    storagePath?: string;
   }>;
   ocrPages: TemplatePdfEvidenceResult['ocr_pages'];
   matches: TemplatePdfEvidenceResult['matches'];

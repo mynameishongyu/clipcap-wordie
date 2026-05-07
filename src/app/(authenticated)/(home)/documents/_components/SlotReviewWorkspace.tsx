@@ -1914,7 +1914,10 @@ export function SlotReviewWorkspace() {
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           alt={`${payload.pdfEvidence.pdfFileName} 第 ${activeEvidencePage.pageNumber} 页`}
-                          src={activeEvidencePage.imageDataUrl}
+                          src={
+                            activeEvidencePage.imageUrl ??
+                            activeEvidencePage.imageDataUrl
+                          }
                           style={{
                             width: '100%',
                             maxWidth: 920,

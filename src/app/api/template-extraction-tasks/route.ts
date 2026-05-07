@@ -57,6 +57,56 @@ function parsePdfVisionPages(rawValue: FormDataEntryValue | null) {
     .filter((item): item is PdfVisionPageInput => Boolean(item));
 }
 
+function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return [] as Array<{
+      uploaded_page_number: number;
+      original_page_number: number;
+      storage_path: string;
+      content_type?: string;
+      size?: number;
+    }>;
+  }
+
+  const parsed = JSON.parse(rawValue) as unknown;
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('pdfVisionPageAssets must be an array.');
+  }
+
+  return parsed
+    .map((item) => {
+      const record =
+        item && typeof item === 'object'
+          ? (item as Record<string, unknown>)
+          : {};
+      const uploadedPageNumber = Number(record.uploaded_page_number);
+      const originalPageNumber = Number(record.original_page_number);
+      const storagePath = String(record.storage_path ?? '').trim();
+      const contentType = String(record.content_type ?? '').trim();
+      const size = Number(record.size);
+
+      if (
+        !Number.isInteger(uploadedPageNumber) ||
+        uploadedPageNumber < 1 ||
+        !Number.isInteger(originalPageNumber) ||
+        originalPageNumber < 1 ||
+        !storagePath
+      ) {
+        return null;
+      }
+
+      return {
+        uploaded_page_number: uploadedPageNumber,
+        original_page_number: originalPageNumber,
+        storage_path: storagePath,
+        ...(contentType ? { content_type: contentType } : {}),
+        ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+}
+
 export async function POST(request: Request) {
   let ownerId: string | null = null;
   let actorEmail: string | null = null;
@@ -77,8 +127,16 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const file = formData.get('file');
     const pdfName = String(formData.get('pdfName') ?? '').trim();
-    const pdfVisionPages = parsePdfVisionPages(formData.get('pdfVisionPages'));
+    const pdfVisionPageAssets = parsePdfVisionPageAssets(
+      formData.get('pdfVisionPageAssets'),
+    );
+    const pdfVisionPages =
+      pdfVisionPageAssets.length > 0
+        ? []
+        : parsePdfVisionPages(formData.get('pdfVisionPages'));
     const prompt = String(formData.get('prompt') ?? '').trim();
+    const hasPdfEvidence =
+      pdfVisionPageAssets.length > 0 || pdfVisionPages.length > 0;
 
     if (!(file instanceof File)) {
       return NextResponse.json(
@@ -132,9 +190,12 @@ export async function POST(request: Request) {
         owner_id: user.id,
         source_docx_name: file.name,
         source_docx_base64: buffer.toString('base64'),
-        source_pdf_name: pdfVisionPages.length > 0 ? pdfName || null : null,
-        source_pdf_vision_pages:
-          pdfVisionPages.length > 0 ? pdfVisionPages : null,
+        source_pdf_name: hasPdfEvidence ? pdfName || null : null,
+        source_pdf_vision_pages: pdfVisionPageAssets.length
+          ? pdfVisionPageAssets
+          : pdfVisionPages.length > 0
+            ? pdfVisionPages
+            : null,
         prompt,
         status: 'pending',
         total_paragraphs: totalParagraphs,
@@ -160,8 +221,9 @@ export async function POST(request: Request) {
         taskId: task.id,
         prompt,
         sourceDocxName: file.name,
-        sourcePdfName: pdfVisionPages.length > 0 ? pdfName : null,
-        pdfVisionPageCount: pdfVisionPages.length,
+        sourcePdfName: hasPdfEvidence ? pdfName : null,
+        pdfVisionPageCount: pdfVisionPageAssets.length || pdfVisionPages.length,
+        pdfVisionStorageAssetCount: pdfVisionPageAssets.length,
         totalParagraphs,
       },
     });

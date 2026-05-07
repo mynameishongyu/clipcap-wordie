@@ -4,6 +4,10 @@ import {
   logErrorEvent,
   logEvent,
 } from '@/src/lib/logging/log-event';
+import {
+  loadVisionPagesFromStoredAssets,
+  type OcrImageAsset,
+} from '@/src/lib/generation-task-items/runtime';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
 import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
@@ -62,6 +66,61 @@ function normalizePdfVisionPages(value: unknown) {
       };
     })
     .filter((item): item is PdfVisionPageInput => Boolean(item));
+}
+
+function normalizePdfVisionPageAssets(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as OcrImageAsset[];
+  }
+
+  return value
+    .map((item) => {
+      const record =
+        item && typeof item === 'object'
+          ? (item as Record<string, unknown>)
+          : {};
+      const uploadedPageNumber = Number(record.uploaded_page_number);
+      const originalPageNumber = Number(record.original_page_number);
+      const storagePath = String(record.storage_path ?? '').trim();
+
+      if (
+        !Number.isInteger(uploadedPageNumber) ||
+        uploadedPageNumber < 1 ||
+        !Number.isInteger(originalPageNumber) ||
+        originalPageNumber < 1 ||
+        !storagePath
+      ) {
+        return null;
+      }
+
+      return {
+        uploaded_page_number: uploadedPageNumber,
+        original_page_number: originalPageNumber,
+        storage_path: storagePath,
+      };
+    })
+    .filter((item): item is OcrImageAsset => Boolean(item));
+}
+
+async function resolvePdfVisionPages(input: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  sourcePdfVisionPages: unknown;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  const storedAssets = normalizePdfVisionPageAssets(input.sourcePdfVisionPages);
+
+  if (storedAssets.length > 0) {
+    await input.onTrace?.({
+      message: `[Template PDF Evidence] Downloading ${storedAssets.length} page image(s) from Supabase Storage.`,
+    });
+
+    return loadVisionPagesFromStoredAssets({
+      admin: input.admin,
+      ocrImageAssets: storedAssets,
+    });
+  }
+
+  return normalizePdfVisionPages(input.sourcePdfVisionPages);
 }
 
 export async function POST(
@@ -216,9 +275,13 @@ export async function POST(
       },
     });
 
-    const pdfVisionPages = normalizePdfVisionPages(
-      task.source_pdf_vision_pages,
-    );
+    const pdfVisionPages = await resolvePdfVisionPages({
+      admin: routeAdmin,
+      sourcePdfVisionPages: task.source_pdf_vision_pages,
+      onTrace: async (entry) => {
+        await appendProcessingTrace(routeAdmin, task.id, entry.message);
+      },
+    });
     const pdfEvidence =
       task.source_pdf_name && pdfVisionPages.length > 0
         ? await buildTemplatePdfEvidence({

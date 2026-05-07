@@ -27,8 +27,11 @@ import {
   parsePdf,
   pickVisionPageNumbers,
   renderPdfPagesForVision,
-  type PdfVisionPageInput as BrowserPdfVisionPageInput,
 } from '@/src/lib/pdf/client-pdf';
+import {
+  uploadPdfVisionPagesToSupabase,
+  type StoredPdfVisionPageAsset,
+} from '@/src/lib/pdf/client-pdf-storage';
 import { SLOT_REVIEW_SESSION_KEY } from '@/src/lib/templates/slot-review-session';
 import { openCompleteRegistrationModal } from '@/src/modals/complete-registration';
 import { openUsageGuideModal } from '@/src/modals/usage-guide';
@@ -64,7 +67,47 @@ interface CreateTemplateExtractionTaskInput {
   file: File;
   prompt: string;
   pdfName?: string;
-  pdfVisionPages?: BrowserPdfVisionPageInput[];
+  pdfVisionPageAssets?: StoredPdfVisionPageAsset[];
+}
+
+async function parseTemplateExtractionTaskResponse(response: Response) {
+  const rawText = await response.text();
+
+  if (!rawText) {
+    return {
+      payload: null as {
+        message?: string;
+        data?: TemplateExtractionTaskSummary;
+      } | null,
+      message: null as string | null,
+    };
+  }
+
+  const contentType = response.headers.get('content-type') ?? '';
+
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = JSON.parse(rawText) as {
+        message?: string;
+        data?: TemplateExtractionTaskSummary;
+      };
+
+      return {
+        payload,
+        message: typeof payload.message === 'string' ? payload.message : null,
+      };
+    } catch {
+      return {
+        payload: null,
+        message: rawText,
+      };
+    }
+  }
+
+  return {
+    payload: null,
+    message: rawText,
+  };
 }
 
 async function createTemplateExtractionTask(
@@ -74,14 +117,17 @@ async function createTemplateExtractionTask(
   formData.append('file', input.file);
   formData.append('prompt', input.prompt);
 
-  if (input.pdfName && input.pdfVisionPages?.length) {
+  if (input.pdfName && input.pdfVisionPageAssets?.length) {
     formData.append('pdfName', input.pdfName);
     formData.append(
-      'pdfVisionPages',
+      'pdfVisionPageAssets',
       JSON.stringify(
-        input.pdfVisionPages.map((page) => ({
-          page_number: page.pageNumber,
-          image_data_url: page.imageDataUrl,
+        input.pdfVisionPageAssets.map((page) => ({
+          uploaded_page_number: page.pageNumber,
+          original_page_number: page.originalPageNumber,
+          storage_path: page.storagePath,
+          content_type: page.contentType,
+          size: page.size,
         })),
       ),
     );
@@ -92,13 +138,11 @@ async function createTemplateExtractionTask(
     body: formData,
   });
 
-  const payload = (await response.json()) as {
-    message?: string;
-    data?: TemplateExtractionTaskSummary;
-  };
+  const { payload, message } =
+    await parseTemplateExtractionTaskResponse(response);
 
-  if (!response.ok || !payload.data) {
-    throw new Error(payload.message ?? '创建槽位抽取任务失败，请稍后重试。');
+  if (!response.ok || !payload?.data) {
+    throw new Error(message ?? '创建槽位抽取任务失败，请稍后重试。');
   }
 
   return payload.data;
@@ -138,7 +182,7 @@ async function startTemplateExtractionTask(taskId: string) {
   }
 }
 
-async function preparePdfVisionPages(file: File) {
+async function preparePdfVisionPageAssets(file: File) {
   browserProcessLog.info(
     `[Template Extract][PDF Evidence] Preparing scanned PDF pages for ${file.name}.`,
   );
@@ -148,15 +192,59 @@ async function preparePdfVisionPages(file: File) {
 
   browserProcessLog.info(
     `[Template Extract][PDF Evidence] Rendering ${pageNumbers.length} page(s) for OCR evidence.`,
+    {
+      pdfFileName: file.name,
+      totalTextLength: parsedPdf.totalTextLength,
+      likelyScanned: parsedPdf.likelyScanned,
+      pageNumbers,
+    },
   );
 
   const visionPages = await renderPdfPagesForVision(file, pageNumbers);
 
   browserProcessLog.info(
     `[Template Extract][PDF Evidence] Rendered ${visionPages.length} PDF page image(s) for ${file.name}.`,
+    {
+      pages: visionPages.map((page) => ({
+        pageNumber: page.pageNumber,
+        dataUrlLength: page.imageDataUrl.length,
+        dataUrlPrefix: page.imageDataUrl.slice(0, 30),
+      })),
+    },
   );
 
-  return visionPages;
+  const uploadedAssets = await uploadPdfVisionPagesToSupabase({
+    pdfFileName: file.name,
+    visionPages,
+    onLog: (message, details) => {
+      browserProcessLog.info(message, details);
+    },
+  });
+
+  if (typeof window !== 'undefined') {
+    (
+      window as typeof window & {
+        clipcapTemplatePdfEvidencePages?: StoredPdfVisionPageAsset[];
+      }
+    ).clipcapTemplatePdfEvidencePages = uploadedAssets;
+  }
+
+  browserProcessLog.info(
+    `[Template Extract][PDF Evidence] Supabase Storage assets ready for ${file.name}.`,
+    {
+      assets: uploadedAssets.map((asset) => ({
+        pageNumber: asset.pageNumber,
+        originalPageNumber: asset.originalPageNumber,
+        storagePath: asset.storagePath,
+        previewUrl: asset.previewUrl,
+        contentType: asset.contentType,
+        size: asset.size,
+      })),
+      consolePreviewVariable: 'window.clipcapTemplatePdfEvidencePages',
+    },
+  );
+
+  return uploadedAssets;
 }
 
 export function HomeHero() {
@@ -175,10 +263,10 @@ export function HomeHero() {
     typeof parseDocxInBrowser
   > | null>(null);
   const uploadDocxBase64PromiseRef = useRef<Promise<string> | null>(null);
-  const pdfVisionPagesPromiseRef = useRef<Promise<
-    BrowserPdfVisionPageInput[]
+  const pdfVisionPageAssetsPromiseRef = useRef<Promise<
+    StoredPdfVisionPageAsset[]
   > | null>(null);
-  const pdfVisionPagesRef = useRef<BrowserPdfVisionPageInput[]>([]);
+  const pdfVisionPageAssetsRef = useRef<StoredPdfVisionPageAsset[]>([]);
   const processKickoffInFlightRef = useRef(false);
   const hasHandledTaskCompletionRef = useRef(false);
   const lastExtractionTraceRef = useRef('');
@@ -353,10 +441,14 @@ export function HomeHero() {
             documentInfo: task.result.document_info,
             extractionResult: task.result.extraction_result,
             pdfEvidence:
-              task.pdf_evidence && pdfVisionPagesRef.current.length > 0
+              task.pdf_evidence && pdfVisionPageAssetsRef.current.length > 0
                 ? {
                     pdfFileName: task.pdf_evidence.pdf_file_name,
-                    pages: pdfVisionPagesRef.current,
+                    pages: pdfVisionPageAssetsRef.current.map((asset) => ({
+                      pageNumber: asset.pageNumber,
+                      imageUrl: asset.previewUrl,
+                      storagePath: asset.storagePath,
+                    })),
                     ocrPages: task.pdf_evidence.ocr_pages,
                     matches: task.pdf_evidence.matches,
                   }
@@ -547,13 +639,13 @@ export function HomeHero() {
       hasHandledTaskCompletionRef.current = false;
       parsedDocumentPromiseRef.current = parseDocxInBrowser(selectedDocxFile);
       uploadDocxBase64PromiseRef.current = readFileAsBase64(selectedDocxFile);
-      pdfVisionPagesRef.current = [];
-      pdfVisionPagesPromiseRef.current = sourcePdfFile
-        ? preparePdfVisionPages(sourcePdfFile).then((visionPages) => {
-            pdfVisionPagesRef.current = visionPages;
-            return visionPages;
-          })
-        : Promise.resolve([]);
+      pdfVisionPageAssetsRef.current = [];
+      pdfVisionPageAssetsPromiseRef.current = preparePdfVisionPageAssets(
+        sourcePdfFile,
+      ).then((assets) => {
+        pdfVisionPageAssetsRef.current = assets;
+        return assets;
+      });
 
       notifications.show({
         id: notificationId,
@@ -568,13 +660,13 @@ export function HomeHero() {
       });
 
       try {
-        const pdfVisionPages = await (pdfVisionPagesPromiseRef.current ??
-          Promise.resolve([]));
+        const pdfVisionPageAssets =
+          await (pdfVisionPageAssetsPromiseRef.current ?? Promise.resolve([]));
         const task = await createTemplateExtractionTask({
           file: selectedDocxFile,
           prompt,
-          pdfName: sourcePdfFile?.name,
-          pdfVisionPages,
+          pdfName: sourcePdfFile.name,
+          pdfVisionPageAssets,
         });
         setActiveExtractionTask(task);
         setIsSubmissionLocked(false);
