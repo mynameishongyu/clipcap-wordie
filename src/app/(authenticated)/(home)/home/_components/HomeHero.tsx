@@ -21,7 +21,6 @@ import {
   useState,
 } from 'react';
 import type { TemplateExtractionTaskResponse } from '@/src/app/api/types/template-extraction-task';
-import { isLoginGateBypassedForLocal } from '@/src/lib/auth/login-gate';
 import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { parseDocxInBrowser } from '@/src/lib/docx/parse-browser';
 import {
@@ -188,8 +187,7 @@ export function HomeHero() {
   const { isAuthenticated, registrationStatus, signOut } =
     useRegistrationGateStore();
 
-  const isLoginBypassed = isLoginGateBypassedForLocal();
-  const canUseProtectedActions = isLoginBypassed || isAuthenticated;
+  const canUseProtectedActions = isAuthenticated;
   const isProcessingTemplate =
     isSubmissionLocked ||
     (activeExtractionTask !== null &&
@@ -281,9 +279,7 @@ export function HomeHero() {
 
     if (
       canUseProtectedActions &&
-      (isLoginBypassed ||
-        registrationStatus === 'completed' ||
-        registrationStatus === 'pending')
+      (registrationStatus === 'completed' || registrationStatus === 'pending')
     ) {
       onReady?.();
       return;
@@ -620,10 +616,6 @@ export function HomeHero() {
             }}
           >
             退出
-          </Button>
-        ) : isLoginBypassed ? (
-          <Button radius="xl" variant="white" disabled>
-            开发模式
           </Button>
         ) : (
           <Button
