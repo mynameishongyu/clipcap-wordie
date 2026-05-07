@@ -4,6 +4,7 @@ import {
   templateSlotExtractionResultSchema,
 } from '@/src/app/api/types/template-slot-extraction';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
+import { logErrorEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
@@ -23,16 +24,22 @@ export async function GET(
   context: { params: Promise<{ taskId: string }> },
 ) {
   const { taskId } = await context.params;
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    return createUnauthorizedResponse();
-  }
+  let ownerId: string | null = null;
+  let actorEmail: string | null = null;
 
   try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return createUnauthorizedResponse();
+    }
+
+    ownerId = user.id;
+    actorEmail = user.email ?? null;
+
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
@@ -75,6 +82,17 @@ export async function GET(
       },
     });
   } catch (error) {
+    await logErrorEvent({
+      ownerId,
+      actorEmail,
+      eventType: 'template_extraction_task_read_failed',
+      error,
+      route: '/api/template-extraction-tasks/[taskId]',
+      payload: {
+        taskId,
+      },
+    });
+
     return NextResponse.json(
       {
         code: 'TEMPLATE_EXTRACTION_TASK_READ_FAILED',

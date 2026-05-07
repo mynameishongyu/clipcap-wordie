@@ -4,6 +4,7 @@ import {
   getCurrentProfile,
   updateProfileRegistration,
 } from '@/src/lib/data/profile-repository';
+import { logErrorEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 function createUnauthorizedResponse() {
@@ -26,19 +27,33 @@ async function getAuthenticatedUser() {
 }
 
 export async function GET() {
-  const { supabase, user } = await getAuthenticatedUser();
-
-  if (!user) {
-    return createUnauthorizedResponse();
-  }
+  let ownerId: string | null = null;
+  let actorEmail: string | null = null;
 
   try {
+    const { supabase, user } = await getAuthenticatedUser();
+
+    if (!user) {
+      return createUnauthorizedResponse();
+    }
+
+    ownerId = user.id;
+    actorEmail = user.email ?? null;
+
     const profile = await getCurrentProfile(supabase, user);
 
     return NextResponse.json({
       data: profile,
     });
   } catch (error) {
+    await logErrorEvent({
+      ownerId,
+      actorEmail,
+      eventType: 'profile_fetch_failed',
+      error,
+      route: '/api/profile',
+    });
+
     return NextResponse.json(
       {
         code: 'PROFILE_FETCH_FAILED',
@@ -50,35 +65,41 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const { supabase, user } = await getAuthenticatedUser();
-
-  if (!user) {
-    return createUnauthorizedResponse();
-  }
-
-  const body = (await request.json()) as Partial<{
-    email: string;
-    displayName: string;
-    organizationName: string;
-    useCase: string;
-  }>;
-
-  if (
-    !body.email?.trim() ||
-    !body.displayName?.trim() ||
-    !body.organizationName?.trim() ||
-    !body.useCase?.trim()
-  ) {
-    return NextResponse.json(
-      {
-        code: 'INVALID_PROFILE_REGISTRATION',
-        message: '请完整填写联系邮箱、姓名、公司或团队，以及使用场景。',
-      },
-      { status: 400 },
-    );
-  }
+  let ownerId: string | null = null;
+  let actorEmail: string | null = null;
 
   try {
+    const { supabase, user } = await getAuthenticatedUser();
+
+    if (!user) {
+      return createUnauthorizedResponse();
+    }
+
+    ownerId = user.id;
+    actorEmail = user.email ?? null;
+
+    const body = (await request.json()) as Partial<{
+      email: string;
+      displayName: string;
+      organizationName: string;
+      useCase: string;
+    }>;
+
+    if (
+      !body.email?.trim() ||
+      !body.displayName?.trim() ||
+      !body.organizationName?.trim() ||
+      !body.useCase?.trim()
+    ) {
+      return NextResponse.json(
+        {
+          code: 'INVALID_PROFILE_REGISTRATION',
+          message: '请完整填写联系邮箱、姓名、公司或团队，以及使用场景。',
+        },
+        { status: 400 },
+      );
+    }
+
     const profile = await updateProfileRegistration(supabase, user, {
       email: body.email.trim(),
       displayName: body.displayName.trim(),
@@ -90,6 +111,14 @@ export async function PATCH(request: Request) {
       data: profile,
     });
   } catch (error) {
+    await logErrorEvent({
+      ownerId,
+      actorEmail,
+      eventType: 'profile_registration_failed',
+      error,
+      route: '/api/profile',
+    });
+
     return NextResponse.json(
       {
         code: 'PROFILE_REGISTRATION_FAILED',

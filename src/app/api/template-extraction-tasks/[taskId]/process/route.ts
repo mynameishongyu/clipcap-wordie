@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
-import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
+import {
+  buildErrorLogPayload,
+  logErrorEvent,
+  logEvent,
+} from '@/src/lib/logging/log-event';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
 import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
@@ -65,25 +69,32 @@ export async function POST(
   context: { params: Promise<{ taskId: string }> },
 ) {
   const { taskId } = await context.params;
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    return createUnauthorizedResponse();
-  }
-
-  const admin = createSupabaseAdminClient();
+  let ownerId: string | null = null;
+  let actorEmail: string | null = null;
+  let admin: ReturnType<typeof createSupabaseAdminClient> | null = null;
 
   try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return createUnauthorizedResponse();
+    }
+
+    ownerId = user.id;
+    actorEmail = user.email ?? null;
+    admin = createSupabaseAdminClient();
+    const routeAdmin = admin;
+
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
         'id, owner_id, source_docx_name, source_docx_base64, source_pdf_name, source_pdf_vision_pages, prompt, status, total_paragraphs, completed_paragraphs, processing_trace',
       )
       .eq('id', taskId)
-      .eq('owner_id', user.id)
+      .eq('owner_id', ownerId)
       .maybeSingle();
 
     if (error) {
@@ -118,7 +129,7 @@ export async function POST(
       });
     }
 
-    await admin
+    await routeAdmin
       .from('template_extraction_tasks')
       .update({
         status: 'running',
@@ -132,14 +143,14 @@ export async function POST(
       .eq('id', task.id);
 
     await appendProcessingTrace(
-      admin,
+      routeAdmin,
       task.id,
       `槽位抽取路由：/api/template-extraction-tasks/${task.id}/process`,
     );
 
     await logEvent({
-      ownerId: user.id,
-      actorEmail: user.email ?? null,
+      ownerId,
+      actorEmail,
       level: 'info',
       eventType: 'template_extraction_task_started',
       message: `Started template extraction task for ${task.source_docx_name}.`,
@@ -159,7 +170,7 @@ export async function POST(
       fileName: task.source_docx_name,
       prompt: task.prompt ?? '',
       onTrace: async (entry) => {
-        await appendProcessingTrace(admin, task.id, entry.message);
+        await appendProcessingTrace(routeAdmin, task.id, entry.message);
       },
       onParagraphComplete: async ({ completedParagraphs, totalParagraphs }) => {
         if (completedParagraphs === lastPersistedCompletedParagraphs) {
@@ -168,7 +179,7 @@ export async function POST(
 
         lastPersistedCompletedParagraphs = completedParagraphs;
 
-        await admin
+        await routeAdmin
           .from('template_extraction_tasks')
           .update({
             total_paragraphs: totalParagraphs,
@@ -185,8 +196,8 @@ export async function POST(
           lastLoggedCompletedParagraphs = completedParagraphs;
 
           await logEvent({
-            ownerId: user.id,
-            actorEmail: user.email ?? null,
+            ownerId,
+            actorEmail,
             level: 'info',
             eventType: 'template_extraction_task_progress',
             message: `Template extraction task progressed to ${completedParagraphs}/${totalParagraphs} paragraphs.`,
@@ -215,7 +226,7 @@ export async function POST(
             extractionResult: result.extraction_result,
             visionPages: pdfVisionPages,
             onTrace: async (entry) => {
-              await appendProcessingTrace(admin, task.id, entry.message);
+              await appendProcessingTrace(routeAdmin, task.id, entry.message);
             },
           })
         : null;
@@ -226,10 +237,14 @@ export async function POST(
         : null;
 
     if (partialCompletionMessage) {
-      await appendProcessingTrace(admin, task.id, partialCompletionMessage);
+      await appendProcessingTrace(
+        routeAdmin,
+        task.id,
+        partialCompletionMessage,
+      );
     }
 
-    await admin
+    await routeAdmin
       .from('template_extraction_tasks')
       .update({
         status: 'completed',
@@ -249,8 +264,8 @@ export async function POST(
       .eq('id', task.id);
 
     await logEvent({
-      ownerId: user.id,
-      actorEmail: user.email ?? null,
+      ownerId,
+      actorEmail,
       level: 'info',
       eventType: 'template_extraction_task_completed',
       message: `Completed template extraction task for ${task.source_docx_name}.`,
@@ -274,44 +289,73 @@ export async function POST(
       },
     });
   } catch (error) {
-    await appendProcessingTrace(
-      admin,
-      taskId,
-      `槽位抽取失败：${error instanceof Error ? error.message : String(error)}`,
-    );
-    await appendProcessingTrace(
-      admin,
-      taskId,
-      `[RouteErrorDetails][TemplateExtraction] ${JSON.stringify(
-        buildErrorLogPayload(error, {
+    if (admin) {
+      try {
+        await appendProcessingTrace(
+          admin,
           taskId,
-        }),
-      )}`,
-    );
-    await admin
-      .from('template_extraction_tasks')
-      .update({
-        status: 'failed',
-        error_message:
-          error instanceof Error ? error.message : '槽位抽取失败，请稍后重试。',
-        finished_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', taskId);
+          `槽位抽取失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+        await appendProcessingTrace(
+          admin,
+          taskId,
+          `[RouteErrorDetails][TemplateExtraction] ${JSON.stringify(
+            buildErrorLogPayload(error, {
+              taskId,
+            }),
+          )}`,
+        );
+      } catch (traceError) {
+        await logErrorEvent({
+          ownerId,
+          actorEmail,
+          eventType: 'template_extraction_task_trace_write_failed',
+          error: traceError,
+          route: '/api/template-extraction-tasks/[taskId]/process',
+          payload: {
+            taskId,
+            originalError: buildErrorLogPayload(error),
+          },
+        });
+      }
 
-    await logEvent({
-      ownerId: user.id,
-      actorEmail: user.email ?? null,
-      level: 'error',
+      try {
+        await admin
+          .from('template_extraction_tasks')
+          .update({
+            status: 'failed',
+            error_message:
+              error instanceof Error
+                ? error.message
+                : '槽位抽取失败，请稍后重试。',
+            finished_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', taskId);
+      } catch (updateError) {
+        await logErrorEvent({
+          ownerId,
+          actorEmail,
+          eventType: 'template_extraction_task_failed_status_update_failed',
+          error: updateError,
+          route: '/api/template-extraction-tasks/[taskId]/process',
+          payload: {
+            taskId,
+            originalError: buildErrorLogPayload(error),
+          },
+        });
+      }
+    }
+
+    await logErrorEvent({
+      ownerId,
+      actorEmail,
       eventType: 'template_extraction_task_failed',
-      message:
-        error instanceof Error
-          ? error.message
-          : 'Failed to process template extraction task.',
+      error,
       route: '/api/template-extraction-tasks/[taskId]/process',
-      payload: buildErrorLogPayload(error, {
+      payload: {
         taskId,
-      }),
+      },
     });
 
     return NextResponse.json(

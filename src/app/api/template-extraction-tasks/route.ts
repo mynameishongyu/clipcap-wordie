@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
-import { logEvent } from '@/src/lib/logging/log-event';
+import { logErrorEvent, logEvent } from '@/src/lib/logging/log-event';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import {
   countExtractableParagraphsFromRawText,
@@ -58,16 +58,22 @@ function parsePdfVisionPages(rawValue: FormDataEntryValue | null) {
 }
 
 export async function POST(request: Request) {
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    return createUnauthorizedResponse();
-  }
+  let ownerId: string | null = null;
+  let actorEmail: string | null = null;
 
   try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return createUnauthorizedResponse();
+    }
+
+    ownerId = user.id;
+    actorEmail = user.email ?? null;
+
     const formData = await request.formData();
     const file = formData.get('file');
     const pdfName = String(formData.get('pdfName') ?? '').trim();
@@ -144,8 +150,8 @@ export async function POST(request: Request) {
     }
 
     await logEvent({
-      ownerId: user.id,
-      actorEmail: user.email ?? null,
+      ownerId,
+      actorEmail,
       level: 'info',
       eventType: 'template_extraction_task_created',
       message: `Created template extraction task for ${file.name}.`,
@@ -166,12 +172,11 @@ export async function POST(request: Request) {
   } catch (error) {
     const rawMessage = getRawErrorMessage(error);
 
-    await logEvent({
-      ownerId: user.id,
-      actorEmail: user.email ?? null,
-      level: 'error',
+    await logErrorEvent({
+      ownerId,
+      actorEmail,
       eventType: 'template_extraction_task_create_failed',
-      message: rawMessage,
+      error,
       route: '/api/template-extraction-tasks',
     });
 

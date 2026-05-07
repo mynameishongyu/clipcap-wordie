@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { logErrorEvent } from '@/src/lib/logging/log-event';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
 
 export const runtime = 'nodejs';
@@ -49,10 +50,18 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    await logErrorEvent({
+      actorEmail: null,
+      eventType: 'template_slot_extraction_failed',
+      error,
+      route: '/api/templates/extract-slots',
+    });
+
     return NextResponse.json(
       {
         code: 'TEMPLATE_SLOT_EXTRACTION_FAILED',
-        message: error instanceof Error ? error.message : '槽位识别失败，请稍后重试。',
+        message:
+          error instanceof Error ? error.message : '槽位识别失败，请稍后重试。',
       },
       { status: 500 },
     );
