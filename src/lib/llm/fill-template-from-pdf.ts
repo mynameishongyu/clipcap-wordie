@@ -1,13 +1,10 @@
 import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
+import { getTextLlmModel, getVisionLlmModel } from '@/src/lib/llm/env';
 import {
-  getTextLlmApiKey,
-  getTextLlmBaseUrl,
-  getTextLlmModel,
-  getVisionLlmApiKey,
-  getVisionLlmBaseUrl,
-  getVisionLlmModel,
-} from '@/src/lib/llm/env';
+  buildChatCompletionBody,
+  getLlmRuntimeConfig,
+} from '@/src/lib/llm/provider';
 
 export interface GenerationSlotSchemaItem {
   slot_key: string;
@@ -52,7 +49,10 @@ const generationExtractedItemSchema = z.object({
 
 const generationPdfFillResultSchema = z.object({
   document_summary: z.string().nullable().optional(),
-  extracted_items: z.array(generationExtractedItemSchema).optional().default([]),
+  extracted_items: z
+    .array(generationExtractedItemSchema)
+    .optional()
+    .default([]),
 });
 
 const PDF_SLOT_FILL_TEXT_TIMEOUT_BASE_MS = 120000;
@@ -75,9 +75,6 @@ const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
 const LLM_CONNECT_TIMEOUT_MS = 60000;
 const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
-const KIMI_K25_INSTANT_THINKING_CONFIG = {
-  type: 'disabled',
-} as const;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
   connect: {
@@ -211,7 +208,8 @@ function findResultForSlot(
   const normalizedSlotName = normalizeSlotIdentifier(slot.field_category);
 
   const bySlotKey = results.find(
-    (candidate) => normalizeSlotIdentifier(candidate.slot_key) === normalizedSlotKey,
+    (candidate) =>
+      normalizeSlotIdentifier(candidate.slot_key) === normalizedSlotKey,
   );
 
   if (bySlotKey) {
@@ -219,7 +217,8 @@ function findResultForSlot(
   }
 
   const byExactName = results.find(
-    (candidate) => normalizeSlotIdentifier(candidate.slot_name) === normalizedSlotName,
+    (candidate) =>
+      normalizeSlotIdentifier(candidate.slot_name) === normalizedSlotName,
   );
 
   if (byExactName) {
@@ -227,7 +226,9 @@ function findResultForSlot(
   }
 
   const byLooseName = results.find((candidate) => {
-    const normalizedCandidateName = normalizeSlotIdentifier(candidate.slot_name);
+    const normalizedCandidateName = normalizeSlotIdentifier(
+      candidate.slot_name,
+    );
 
     return (
       Boolean(normalizedCandidateName) &&
@@ -245,16 +246,6 @@ function findResultForSlot(
   }
 
   return null;
-}
-
-function resolveChatCompletionsUrl(baseUrl: string) {
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
-
-  if (normalizedBaseUrl.endsWith('/chat/completions')) {
-    return normalizedBaseUrl;
-  }
-
-  return `${normalizedBaseUrl}/chat/completions`;
 }
 
 function formatElapsedMs(ms: number) {
@@ -276,7 +267,10 @@ function estimateDataUrlBytes(dataUrl: string) {
       ? 1
       : 0;
 
-  return Math.max(0, Math.floor((base64Payload.length * 3) / 4) - paddingLength);
+  return Math.max(
+    0,
+    Math.floor((base64Payload.length * 3) / 4) - paddingLength,
+  );
 }
 
 function formatBytes(bytes: number) {
@@ -382,7 +376,10 @@ function describeNetworkError(error: unknown) {
       causeParts.push(`host=${causeRecord.host}`);
     }
 
-    if (typeof causeRecord.message === 'string' && causeRecord.message !== error.message) {
+    if (
+      typeof causeRecord.message === 'string' &&
+      causeRecord.message !== error.message
+    ) {
       causeParts.push(`cause=${causeRecord.message}`);
     }
 
@@ -440,7 +437,8 @@ function getTextRequestTimeoutMs(input: {
   const computedTimeout =
     PDF_SLOT_FILL_TEXT_TIMEOUT_BASE_MS +
     input.pageCount * PDF_SLOT_FILL_TEXT_TIMEOUT_PER_PAGE_MS +
-    Math.ceil(input.charCount / 1000) * PDF_SLOT_FILL_TEXT_TIMEOUT_PER_1000_CHARS_MS +
+    Math.ceil(input.charCount / 1000) *
+      PDF_SLOT_FILL_TEXT_TIMEOUT_PER_1000_CHARS_MS +
     (input.attempt - 1) * 30000;
 
   return Math.min(computedTimeout, PDF_SLOT_FILL_TEXT_TIMEOUT_MAX_MS);
@@ -489,7 +487,11 @@ function getSlotSemanticHint(slotName: string) {
     return 'Target field is a Chinese identity card number or certificate number.';
   }
 
-  if (slotName.includes('电话') || slotName.includes('手机') || slotName.includes('联系')) {
+  if (
+    slotName.includes('电话') ||
+    slotName.includes('手机') ||
+    slotName.includes('联系')
+  ) {
     return 'Target field is a contact phone number or mobile number.';
   }
 
@@ -505,13 +507,25 @@ function getSlotSemanticHint(slotName: string) {
 }
 
 function getSlotKeywords(slotName: string) {
-  const base = [slotName, '被申请人', '被告', '借款人', '乙方', '客户', '共同借款人'];
+  const base = [
+    slotName,
+    '被申请人',
+    '被告',
+    '借款人',
+    '乙方',
+    '客户',
+    '共同借款人',
+  ];
 
   if (slotName.includes('身份证')) {
     return [...base, '身份证', '公民身份号码', '身份证号', '证件号码'];
   }
 
-  if (slotName.includes('电话') || slotName.includes('手机') || slotName.includes('联系')) {
+  if (
+    slotName.includes('电话') ||
+    slotName.includes('手机') ||
+    slotName.includes('联系')
+  ) {
     return [...base, '电话', '手机', '联系电话', '联系方式', '手机号'];
   }
 
@@ -520,7 +534,15 @@ function getSlotKeywords(slotName: string) {
   }
 
   if (slotName.includes('住址') || slotName.includes('地址')) {
-    return [...base, '住址', '地址', '住所地', '联系地址', '通讯地址', '户籍地址'];
+    return [
+      ...base,
+      '住址',
+      '地址',
+      '住所地',
+      '联系地址',
+      '通讯地址',
+      '户籍地址',
+    ];
   }
 
   return base;
@@ -558,10 +580,17 @@ function buildSlotContexts(slotName: string, pages: PdfPageInput[]) {
       score: scorePageForSlot(slotName, page),
     }))
     .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score || left.page.page_number - right.page.page_number);
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.page.page_number - right.page.page_number,
+    );
 
-  const sourcePages = rankedPages.length > 0 ? rankedPages.map((item) => item.page) : pages;
-  const orderedPages = [...sourcePages].sort((left, right) => left.page_number - right.page_number);
+  const sourcePages =
+    rankedPages.length > 0 ? rankedPages.map((item) => item.page) : pages;
+  const orderedPages = [...sourcePages].sort(
+    (left, right) => left.page_number - right.page_number,
+  );
   const contexts: Array<{ pageNumbers: number[]; chunkText: string }> = [];
   let currentPages: number[] = [];
   let currentText = '';
@@ -615,60 +644,64 @@ async function extractSlotWithTextModel(input: {
     );
 
     try {
-      const upstream = await undiciFetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+      const llmConfig = getLlmRuntimeConfig('text');
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${getTextLlmApiKey()}`,
+          Authorization: `Bearer ${llmConfig.apiKey}`,
         },
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: getTextLlmModel(),
-          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a PDF slot filling assistant. Extract only the current slot from the provided PDF text chunk. Return JSON only.',
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                document_name: input.documentName,
-                slot_key: input.slot.slot_key,
-                slot_name: input.slot.field_category,
-                slot_hint:
-                  input.slot.meaning_to_applicant || getSlotSemanticHint(input.slot.field_category),
-                strict_requirement:
-                  'Return the exact same slot_key in results[0].slot_key. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
-                page_numbers: input.pageNumbers,
-                content: input.chunkText,
-                output_schema: {
-                  results: [
-                    {
-                      slot_key: input.slot.slot_key,
-                      slot_name: input.slot.field_category,
-                      final_value: 'final extracted value',
-                      matches: [
-                        {
-                          value: 'matched value',
-                          snippet: 'short supporting quote from the PDF text',
-                          page_number: 1,
-                        },
-                      ],
-                    },
-                  ],
-                },
-              }),
-            },
-          ],
-        }),
+        body: JSON.stringify(
+          buildChatCompletionBody(llmConfig, {
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a PDF slot filling assistant. Extract only the current slot from the provided PDF text chunk. Return JSON only.',
+              },
+              {
+                role: 'user',
+                content: JSON.stringify({
+                  document_name: input.documentName,
+                  slot_key: input.slot.slot_key,
+                  slot_name: input.slot.field_category,
+                  slot_hint:
+                    input.slot.meaning_to_applicant ||
+                    getSlotSemanticHint(input.slot.field_category),
+                  strict_requirement:
+                    'Return the exact same slot_key in results[0].slot_key. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
+                  page_numbers: input.pageNumbers,
+                  content: input.chunkText,
+                  output_schema: {
+                    results: [
+                      {
+                        slot_key: input.slot.slot_key,
+                        slot_name: input.slot.field_category,
+                        final_value: 'final extracted value',
+                        matches: [
+                          {
+                            value: 'matched value',
+                            snippet: 'short supporting quote from the PDF text',
+                            page_number: 1,
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                }),
+              },
+            ],
+          }),
+        ),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
-        throw new Error(`Text model request failed (${upstream.status}): ${details}`);
+        throw new Error(
+          `Text model request failed (${upstream.status}): ${details}`,
+        );
       }
 
       const payload = (await upstream.json()) as {
@@ -709,7 +742,11 @@ async function extractSlotWithTextModel(input: {
         };
       }
 
-      const extractedValue = resolveExtractedValue(input.slot, firstResult, firstMatch);
+      const extractedValue = resolveExtractedValue(
+        input.slot,
+        firstResult,
+        firstMatch,
+      );
 
       return {
         document_summary: '',
@@ -733,15 +770,21 @@ async function extractSlotWithTextModel(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'text-slot-fill',
         documentName: input.documentName,
-        model: getTextLlmModel(),
-        baseUrl: getTextLlmBaseUrl(),
+        model: getLlmRuntimeConfig('text').model,
+        baseUrl: getLlmRuntimeConfig('text').baseUrl,
         attempt,
       });
-      const shouldRetry = attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryTextRequest(error);
+      const shouldRetry =
+        attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryTextRequest(error);
 
       if (!shouldRetry) {
-        if (normalizedError instanceof DOMException && normalizedError.name === 'AbortError') {
-          throw new Error('Text slot extraction timed out after multiple attempts.');
+        if (
+          normalizedError instanceof DOMException &&
+          normalizedError.name === 'AbortError'
+        ) {
+          throw new Error(
+            'Text slot extraction timed out after multiple attempts.',
+          );
         }
 
         throw normalizedError;
@@ -779,17 +822,18 @@ async function extractTextFromVisionPages(input: {
       pageNumber: page.page_number,
       bytes: estimateDataUrlBytes(page.image_data_url),
     }));
-    const totalImageBytes = pageSizeSummary.reduce((sum, entry) => sum + entry.bytes, 0);
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      requestTimeoutMs,
+    const totalImageBytes = pageSizeSummary.reduce(
+      (sum, entry) => sum + entry.bytes,
+      0,
     );
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
     let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
     let budgetAbortTriggered = false;
 
     try {
       const batchLabel =
-        typeof input.batchIndex === 'number' && typeof input.totalBatches === 'number'
+        typeof input.batchIndex === 'number' &&
+        typeof input.totalBatches === 'number'
           ? `batch ${input.batchIndex + 1}/${input.totalBatches}`
           : 'batch';
       const startingBudgetSnapshot = getProcessBudgetSnapshot({
@@ -810,12 +854,14 @@ async function extractTextFromVisionPages(input: {
         `[PDF Fill][OCR] Starting ${batchLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, pages: ${input.visionPages
           .map((page) => page.page_number)
-          .join(',')}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}, page image sizes: ${pageSizeSummary
+          .join(
+            ',',
+          )}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}, page image sizes: ${pageSizeSummary
           .map((entry) => `${entry.pageNumber}=${formatBytes(entry.bytes)}`)
           .join('; ')}${formatProcessBudgetSuffix({
-            processStartedAtMs: input.processStartedAtMs,
-            processHardTimeoutMs: input.processHardTimeoutMs,
-          })}).`;
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
       console.info(batchStartedMessage);
       await input.onTrace?.({ message: batchStartedMessage });
       heartbeatIntervalId = setInterval(() => {
@@ -849,10 +895,12 @@ async function extractTextFromVisionPages(input: {
 
         const heartbeatMessage =
           `[PDF Fill][OCR] Waiting on ${batchLabel} for ${input.documentName} ` +
-          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix({
-            processStartedAtMs: input.processStartedAtMs,
-            processHardTimeoutMs: input.processHardTimeoutMs,
-          })}).`;
+          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
+            {
+              processStartedAtMs: input.processStartedAtMs,
+              processHardTimeoutMs: input.processHardTimeoutMs,
+            },
+          )}).`;
         console.info(heartbeatMessage);
         void input.onTrace?.({ message: heartbeatMessage });
       }, 15000);
@@ -865,8 +913,7 @@ async function extractTextFromVisionPages(input: {
       content.push({
         type: 'text',
         text: JSON.stringify({
-          task:
-            'Please OCR every provided PDF page image into clean plain text. Return JSON only. Keep page_number exactly as provided. Preserve visible text order as much as possible. Do not summarize. Do not omit visible numbers, dates, money amounts, ID numbers, account numbers, contract numbers, page numbers, or table cell values. For screenshot-like pages and management-system pages, carefully transcribe every visible field label and its numeric value, even when the value is short, isolated, or appears inside a table row.',
+          task: 'Please OCR every provided PDF page image into clean plain text. Return JSON only. Keep page_number exactly as provided. Preserve visible text order as much as possible. Do not summarize. Do not omit visible numbers, dates, money amounts, ID numbers, account numbers, contract numbers, page numbers, or table cell values. For screenshot-like pages and management-system pages, carefully transcribe every visible field label and its numeric value, even when the value is short, isolated, or appears inside a table row.',
           document_name: input.documentName,
           page_numbers: input.visionPages.map((page) => page.page_number),
           strict_requirements: [
@@ -896,34 +943,37 @@ async function extractTextFromVisionPages(input: {
         });
       });
 
-      const upstream = await undiciFetch(resolveChatCompletionsUrl(getVisionLlmBaseUrl()), {
+      const llmConfig = getLlmRuntimeConfig('vision');
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${getVisionLlmApiKey()}`,
+          Authorization: `Bearer ${llmConfig.apiKey}`,
         },
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: getVisionLlmModel(),
-          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are an OCR assistant for scanned PDF pages, screenshots, and financial system interfaces. Return JSON only. Be extremely careful with small digits, dates, amounts, identifiers, and table values. Never omit visible numeric content.',
-            },
-            {
-              role: 'user',
-              content,
-            },
-          ],
-        }),
+        body: JSON.stringify(
+          buildChatCompletionBody(llmConfig, {
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are an OCR assistant for scanned PDF pages, screenshots, and financial system interfaces. Return JSON only. Be extremely careful with small digits, dates, amounts, identifiers, and table values. Never omit visible numeric content.',
+              },
+              {
+                role: 'user',
+                content,
+              },
+            ],
+          }),
+        ),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
-        throw new Error(`Vision model request failed (${upstream.status}): ${details}`);
+        throw new Error(
+          `Vision model request failed (${upstream.status}): ${details}`,
+        );
       }
 
       const payload = (await upstream.json()) as {
@@ -946,36 +996,44 @@ async function extractTextFromVisionPages(input: {
         }>;
       }>(rawContent);
       const originalPageNumberByUploadedPageNumber = new Map(
-        input.visionPages.map((page) => [page.page_number, page.original_page_number ?? page.page_number]),
+        input.visionPages.map((page) => [
+          page.page_number,
+          page.original_page_number ?? page.page_number,
+        ]),
       );
 
       const ocrPages = (normalized.pages ?? [])
         .filter(
           (page): page is { page_number: number; text: string } =>
-            typeof page.page_number === 'number' && typeof page.text === 'string',
+            typeof page.page_number === 'number' &&
+            typeof page.text === 'string',
         )
         .map((page) => ({
           page_number: page.page_number,
           text: page.text.trim(),
           original_page_number:
-            originalPageNumberByUploadedPageNumber.get(page.page_number) ?? page.page_number,
+            originalPageNumberByUploadedPageNumber.get(page.page_number) ??
+            page.page_number,
         }));
 
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchCompletedMessage =
         `[PDF Fill][OCR] Completed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix({
-          processStartedAtMs: input.processStartedAtMs,
-          processHardTimeoutMs: input.processHardTimeoutMs,
-        })}).`;
+        `(attempt ${attempt}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
+          {
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          },
+        )}).`;
       console.info(batchCompletedMessage);
       await input.onTrace?.({ message: batchCompletedMessage });
-        for (const page of ocrPages) {
-          const pageTraceDataMessage =
-            `[PDF Fill][OCR][PageData ${page.page_number}] ${stringifyTraceJson({
-              original_page_number: page.original_page_number ?? page.page_number,
-              text: page.text,
-            })}`;
+      for (const page of ocrPages) {
+        const pageTraceDataMessage = `[PDF Fill][OCR][PageData ${page.page_number}] ${stringifyTraceJson(
+          {
+            original_page_number: page.original_page_number ?? page.page_number,
+            text: page.text,
+          },
+        )}`;
         console.info(pageTraceDataMessage);
         await input.onTrace?.({ message: pageTraceDataMessage });
       }
@@ -985,23 +1043,27 @@ async function extractTextFromVisionPages(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-ocr',
         documentName: input.documentName,
-        model: getVisionLlmModel(),
-        baseUrl: getVisionLlmBaseUrl(),
+        model: getLlmRuntimeConfig('vision').model,
+        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
         attempt,
       });
-      const shouldRetry = attempt < MAX_VISION_REQUEST_RETRIES && shouldRetryVisionRequest(error);
+      const shouldRetry =
+        attempt < MAX_VISION_REQUEST_RETRIES && shouldRetryVisionRequest(error);
       const batchLabel =
-        typeof input.batchIndex === 'number' && typeof input.totalBatches === 'number'
+        typeof input.batchIndex === 'number' &&
+        typeof input.totalBatches === 'number'
           ? `batch ${input.batchIndex + 1}/${input.totalBatches}`
           : 'batch';
 
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchFailedMessage =
         `[PDF Fill][OCR] Failed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}, reason: ${getErrorMessage(normalizedError)}${formatProcessBudgetSuffix({
-          processStartedAtMs: input.processStartedAtMs,
-          processHardTimeoutMs: input.processHardTimeoutMs,
-        })}).`;
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}, reason: ${getErrorMessage(normalizedError)}${formatProcessBudgetSuffix(
+          {
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          },
+        )}).`;
       console.error(batchFailedMessage, normalizedError);
       await input.onTrace?.({ message: batchFailedMessage });
 
@@ -1012,8 +1074,13 @@ async function extractTextFromVisionPages(input: {
           );
         }
 
-        if (normalizedError instanceof DOMException && normalizedError.name === 'AbortError') {
-          throw new Error('Vision model processing timed out after multiple attempts.');
+        if (
+          normalizedError instanceof DOMException &&
+          normalizedError.name === 'AbortError'
+        ) {
+          throw new Error(
+            'Vision model processing timed out after multiple attempts.',
+          );
         }
 
         throw normalizedError;
@@ -1039,29 +1106,56 @@ function mergeSlotResults(
     document_summary: '',
     extracted_items: slots.map((slot) => {
       const slotMatches = results.flatMap((result) =>
-        result.extracted_items.filter((item) => item.slot_key === slot.slot_key),
+        result.extracted_items.filter(
+          (item) => item.slot_key === slot.slot_key,
+        ),
       );
-      const preferLatestEvidence = `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-        '日期',
-      ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('金额') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('截止') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('截至') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('本息') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('本金') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('利息') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('违约金') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('手续费') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('费用') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('欠款') ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('逾期') ||
+      const preferLatestEvidence =
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '日期',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '金额',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '截止',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '截至',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '本息',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '本金',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '利息',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '违约金',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '手续费',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '费用',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '欠款',
+        ) ||
+        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
+          '逾期',
+        ) ||
         `${slot.field_category} ${slot.meaning_to_applicant}`.includes('还款');
       const preferredMatch =
         slotMatches
           .filter((item) => item.original_value.trim())
           .sort((left, right) => {
             const leftMaxPage =
-              left.evidence_page_numbers.length > 0 ? Math.max(...left.evidence_page_numbers) : 0;
+              left.evidence_page_numbers.length > 0
+                ? Math.max(...left.evidence_page_numbers)
+                : 0;
             const rightMaxPage =
               right.evidence_page_numbers.length > 0
                 ? Math.max(...right.evidence_page_numbers)
@@ -1095,7 +1189,9 @@ function mergeSlotResults(
           new Set(
             results
               .flatMap((result) =>
-                result.extracted_items.filter((item) => item.slot_key === slot.slot_key),
+                result.extracted_items.filter(
+                  (item) => item.slot_key === slot.slot_key,
+                ),
               )
               .flatMap((item) => item.evidence_page_numbers ?? []),
           ),
@@ -1122,9 +1218,16 @@ function buildVisionPageBatches(visionPages: PdfVisionPageInput[]) {
   return batches;
 }
 
-function isDateSlot(slot: Pick<GenerationSlotSchemaItem, 'field_category' | 'meaning_to_applicant'>) {
+function isDateSlot(
+  slot: Pick<
+    GenerationSlotSchemaItem,
+    'field_category' | 'meaning_to_applicant'
+  >,
+) {
   const combined = `${slot.field_category} ${slot.meaning_to_applicant ?? ''}`;
-  return /日期|年月日|出生|签署|签署日|签订|放款|开户|到期|截止|还款/.test(combined);
+  return /日期|年月日|出生|签署|签署日|签订|放款|开户|到期|截止|还款/.test(
+    combined,
+  );
 }
 
 function normalizeDateValue(value: string) {
@@ -1154,11 +1257,15 @@ function normalizeDateValue(value: string) {
 }
 
 function resolveExtractedValue(
-  slot: Pick<GenerationSlotSchemaItem, 'field_category' | 'meaning_to_applicant'>,
+  slot: Pick<
+    GenerationSlotSchemaItem,
+    'field_category' | 'meaning_to_applicant'
+  >,
   result: ModelResultCandidate | null,
   firstMatch?: ModelMatch,
 ) {
-  const rawValue = result?.final_value?.trim() || firstMatch?.value?.trim() || '';
+  const rawValue =
+    result?.final_value?.trim() || firstMatch?.value?.trim() || '';
 
   if (!rawValue) {
     return '';
@@ -1171,7 +1278,10 @@ function resolveExtractedValue(
   return rawValue;
 }
 
-function resolveEvidenceSnippet(extractedValue: string, firstMatch?: ModelMatch) {
+function resolveEvidenceSnippet(
+  extractedValue: string,
+  firstMatch?: ModelMatch,
+) {
   const snippet = firstMatch?.snippet?.trim() || '';
 
   if (!snippet) {
@@ -1203,11 +1313,16 @@ function getErrorMessage(error: unknown) {
   return String(error);
 }
 
-function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>) {
+function buildTraceErrorDetails(
+  error: unknown,
+  extra?: Record<string, unknown>,
+) {
   if (error instanceof Error) {
     const cause = (error as Error & { cause?: unknown }).cause;
     const causeRecord =
-      cause && typeof cause === 'object' ? (cause as Record<string, unknown>) : null;
+      cause && typeof cause === 'object'
+        ? (cause as Record<string, unknown>)
+        : null;
 
     return {
       errorName: error.name,
@@ -1219,14 +1334,26 @@ function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>)
           : causeRecord && typeof causeRecord.message === 'string'
             ? causeRecord.message
             : null,
-      errorCode: causeRecord && typeof causeRecord.code === 'string' ? causeRecord.code : null,
+      errorCode:
+        causeRecord && typeof causeRecord.code === 'string'
+          ? causeRecord.code
+          : null,
       errorErrno:
-        causeRecord && typeof causeRecord.errno === 'number' ? causeRecord.errno : null,
+        causeRecord && typeof causeRecord.errno === 'number'
+          ? causeRecord.errno
+          : null,
       errorSyscall:
-        causeRecord && typeof causeRecord.syscall === 'string' ? causeRecord.syscall : null,
+        causeRecord && typeof causeRecord.syscall === 'string'
+          ? causeRecord.syscall
+          : null,
       errorAddress:
-        causeRecord && typeof causeRecord.address === 'string' ? causeRecord.address : null,
-      errorPort: causeRecord && typeof causeRecord.port === 'number' ? causeRecord.port : null,
+        causeRecord && typeof causeRecord.address === 'string'
+          ? causeRecord.address
+          : null,
+      errorPort:
+        causeRecord && typeof causeRecord.port === 'number'
+          ? causeRecord.port
+          : null,
       ...(extra ?? {}),
     };
   }
@@ -1256,7 +1383,10 @@ function getProcessBudgetSnapshot(input: {
   }
 
   const totalElapsedMs = Math.max(0, Date.now() - input.processStartedAtMs);
-  const remainingBudgetMs = Math.max(0, input.processHardTimeoutMs - totalElapsedMs);
+  const remainingBudgetMs = Math.max(
+    0,
+    input.processHardTimeoutMs - totalElapsedMs,
+  );
 
   return {
     totalElapsedMs,
@@ -1370,10 +1500,12 @@ async function extractAllSlotsWithTextModel(input: {
       });
       const requestStartedMessage =
         `[PDF Fill][Text] Starting ${requestLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix({
-          processStartedAtMs: input.processStartedAtMs,
-          processHardTimeoutMs: input.processHardTimeoutMs,
-        })}).`;
+        `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix(
+          {
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          },
+        )}).`;
       console.info(requestStartedMessage);
       await input.onTrace?.({ message: requestStartedMessage });
       heartbeatIntervalId = setInterval(() => {
@@ -1407,69 +1539,75 @@ async function extractAllSlotsWithTextModel(input: {
 
         const heartbeatMessage =
           `[PDF Fill][Text] Waiting on ${requestLabel} for ${input.documentName} ` +
-          `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix({
-            processStartedAtMs: input.processStartedAtMs,
-            processHardTimeoutMs: input.processHardTimeoutMs,
-          })}).`;
+          `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix(
+            {
+              processStartedAtMs: input.processStartedAtMs,
+              processHardTimeoutMs: input.processHardTimeoutMs,
+            },
+          )}).`;
         console.info(heartbeatMessage);
         void input.onTrace?.({ message: heartbeatMessage });
       }, 15000);
 
-      const upstream = await undiciFetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+      const llmConfig = getLlmRuntimeConfig('text');
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${getTextLlmApiKey()}`,
+          Authorization: `Bearer ${llmConfig.apiKey}`,
         },
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: getTextLlmModel(),
-          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                document_name: input.documentName,
-                slot_names: input.slots.map((slot) => slot.field_category),
-                slot_definitions: input.slots.map((slot) => ({
-                  slot_key: slot.slot_key,
-                  slot_name: slot.field_category,
-                  slot_meaning:
-                    slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-                })),
-                strict_requirement:
-                  'Return the exact same slot_key copied from slot_definitions. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
-                page_numbers: input.pageNumbers,
-                content: input.chunkText,
-                output_schema: {
-                  results: input.slots.map((slot) => ({
+        body: JSON.stringify(
+          buildChatCompletionBody(llmConfig, {
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
+              },
+              {
+                role: 'user',
+                content: JSON.stringify({
+                  document_name: input.documentName,
+                  slot_names: input.slots.map((slot) => slot.field_category),
+                  slot_definitions: input.slots.map((slot) => ({
                     slot_key: slot.slot_key,
                     slot_name: slot.field_category,
-                    final_value: 'final extracted value',
-                    matches: [
-                      {
-                        value: 'matched value',
-                        snippet: 'short supporting quote from the PDF text',
-                        page_number: 1,
-                      },
-                    ],
+                    slot_meaning:
+                      slot.meaning_to_applicant ||
+                      getSlotSemanticHint(slot.field_category),
                   })),
-                },
-              }),
-            },
-          ],
-        }),
+                  strict_requirement:
+                    'Return the exact same slot_key copied from slot_definitions. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+                  page_numbers: input.pageNumbers,
+                  content: input.chunkText,
+                  output_schema: {
+                    results: input.slots.map((slot) => ({
+                      slot_key: slot.slot_key,
+                      slot_name: slot.field_category,
+                      final_value: 'final extracted value',
+                      matches: [
+                        {
+                          value: 'matched value',
+                          snippet: 'short supporting quote from the PDF text',
+                          page_number: 1,
+                        },
+                      ],
+                    })),
+                  },
+                }),
+              },
+            ],
+          }),
+        ),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
         const details = await upstream.text();
-        throw new Error(`Text model request failed (${upstream.status}): ${details}`);
+        throw new Error(
+          `Text model request failed (${upstream.status}): ${details}`,
+        );
       }
 
       const payload = (await upstream.json()) as {
@@ -1510,7 +1648,11 @@ async function extractAllSlotsWithTextModel(input: {
             return [];
           }
 
-          const extractedValue = resolveExtractedValue(slot, firstResult, firstMatch);
+          const extractedValue = resolveExtractedValue(
+            slot,
+            firstResult,
+            firstMatch,
+          );
 
           return [
             {
@@ -1522,7 +1664,9 @@ async function extractAllSlotsWithTextModel(input: {
               evidence_page_numbers:
                 firstResult?.matches
                   ?.map((match) => match?.page_number)
-                  .filter((value): value is number => typeof value === 'number') ??
+                  .filter(
+                    (value): value is number => typeof value === 'number',
+                  ) ??
                 (typeof firstMatch?.page_number === 'number'
                   ? [firstMatch.page_number]
                   : input.pageNumbers),
@@ -1535,10 +1679,12 @@ async function extractAllSlotsWithTextModel(input: {
       const requestElapsedMs = Date.now() - requestStartedAt;
       const requestCompletedMessage =
         `[PDF Fill][Text] Completed ${requestLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}) with ${result.extracted_items.filter((item) => hasFilledValue(item.original_value)).length}/${input.slots.length} filled slots in ${formatElapsedMs(requestElapsedMs)}${formatProcessBudgetSuffix({
-          processStartedAtMs: input.processStartedAtMs,
-          processHardTimeoutMs: input.processHardTimeoutMs,
-        })}).`;
+        `(attempt ${attempt}) with ${result.extracted_items.filter((item) => hasFilledValue(item.original_value)).length}/${input.slots.length} filled slots in ${formatElapsedMs(requestElapsedMs)}${formatProcessBudgetSuffix(
+          {
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          },
+        )}).`;
       console.info(requestCompletedMessage);
       await input.onTrace?.({ message: requestCompletedMessage });
 
@@ -1547,22 +1693,25 @@ async function extractAllSlotsWithTextModel(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'text-slot-fill',
         documentName: input.documentName,
-        model: getTextLlmModel(),
-        baseUrl: getTextLlmBaseUrl(),
+        model: getLlmRuntimeConfig('text').model,
+        baseUrl: getLlmRuntimeConfig('text').baseUrl,
         attempt,
       });
       const requestLabel = input.requestLabel ?? 'full-text slot request';
       const requestElapsedMs = Date.now() - requestStartedAt;
       const requestFailedMessage =
         `[PDF Fill][Text] Failed ${requestLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}) after ${formatElapsedMs(requestElapsedMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix({
-          processStartedAtMs: input.processStartedAtMs,
-          processHardTimeoutMs: input.processHardTimeoutMs,
-        })}, reason: ${getErrorMessage(normalizedError)}).`;
+        `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}) after ${formatElapsedMs(requestElapsedMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix(
+          {
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          },
+        )}, reason: ${getErrorMessage(normalizedError)}).`;
       console.error(requestFailedMessage, normalizedError);
       await input.onTrace?.({ message: requestFailedMessage });
       const shouldRetry =
-        attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryTextRequest(normalizedError);
+        attempt < MAX_TEXT_REQUEST_RETRIES &&
+        shouldRetryTextRequest(normalizedError);
 
       if (!shouldRetry || budgetAbortTriggered) {
         if (budgetAbortTriggered) {
@@ -1571,8 +1720,13 @@ async function extractAllSlotsWithTextModel(input: {
           );
         }
 
-        if (normalizedError instanceof DOMException && normalizedError.name === 'AbortError') {
-          throw new Error('Text slot extraction timed out after multiple attempts.');
+        if (
+          normalizedError instanceof DOMException &&
+          normalizedError.name === 'AbortError'
+        ) {
+          throw new Error(
+            'Text slot extraction timed out after multiple attempts.',
+          );
         }
 
         throw normalizedError;
@@ -1597,7 +1751,10 @@ export async function fillSlotsFromTextPages(params: {
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
   processReserveMs?: number;
-  onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
+  onProgress?: (progress: {
+    completedSlots: number;
+    totalSlots: number;
+  }) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const allPageNumbers = [...params.pages]
@@ -1613,7 +1770,8 @@ export async function fillSlotsFromTextPages(params: {
     slot_definitions: params.slots.map((slot) => ({
       slot_key: slot.slot_key,
       slot_name: slot.field_category,
-      slot_meaning: slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
+      slot_meaning:
+        slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
     })),
     content: fullDocumentText,
   };
@@ -1658,7 +1816,10 @@ export async function extractPdfTextFromVisionPages(params: {
   processHardTimeoutMs?: number;
   processReserveMs?: number;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
-  onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
+  onProgress?: (progress: {
+    completedSlots: number;
+    totalSlots: number;
+  }) => Promise<void> | void;
 }) {
   const visionPageBatches = buildVisionPageBatches(params.visionPages);
   await params.onProgress?.({
@@ -1686,8 +1847,10 @@ export async function extractPdfTextFromVisionPages(params: {
           batchIndex,
           totalBatches: visionPageBatches.length,
           processStartedAtMs: params.processStartedAtMs,
-          processHardTimeoutMs: params.processHardTimeoutMs ?? PROCESS_HARD_TIMEOUT_MS,
-          processReserveMs: params.processReserveMs ?? PROCESS_OCR_SLOT_FILL_RESERVE_MS,
+          processHardTimeoutMs:
+            params.processHardTimeoutMs ?? PROCESS_HARD_TIMEOUT_MS,
+          processReserveMs:
+            params.processReserveMs ?? PROCESS_OCR_SLOT_FILL_RESERVE_MS,
           onTrace: params.onTrace,
         }),
     });
@@ -1733,7 +1896,9 @@ export async function extractPdfTextFromVisionPages(params: {
     }
 
     if (successfulOcrBatchResults.length === 0) {
-      throw new Error('All OCR batches failed; no OCR text could be extracted.');
+      throw new Error(
+        'All OCR batches failed; no OCR text could be extracted.',
+      );
     }
 
     ocrBatchResults = successfulOcrBatchResults;
@@ -1772,7 +1937,9 @@ export async function extractPdfTextFromVisionPages(params: {
   await params.onTrace?.({ message: mergedOcrMessage });
 
   if (ocrPages.length === 0) {
-    throw new Error('Vision OCR returned no usable text for the selected PDF pages.');
+    throw new Error(
+      'Vision OCR returned no usable text for the selected PDF pages.',
+    );
   }
 
   return ocrPages;
@@ -1801,7 +1968,10 @@ async function runWithConcurrency<TInput, TOutput>(params: {
         return;
       }
 
-      results[currentIndex] = await worker(items[currentIndex] as TInput, currentIndex);
+      results[currentIndex] = await worker(
+        items[currentIndex] as TInput,
+        currentIndex,
+      );
     }
   }
 
@@ -1872,7 +2042,10 @@ export async function fillTemplateSlotsFromPdf(params: {
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
-  onProgress?: (progress: { completedSlots: number; totalSlots: number }) => Promise<void> | void;
+  onProgress?: (progress: {
+    completedSlots: number;
+    totalSlots: number;
+  }) => Promise<void> | void;
 }) {
   if (params.slots.length === 0) {
     return {

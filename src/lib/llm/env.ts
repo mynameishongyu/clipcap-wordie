@@ -8,6 +8,11 @@ function getRequiredEnv(name: string) {
   return value;
 }
 
+export function getOptionalEnv(name: string) {
+  const value = process.env[name];
+  return value && value.trim() ? value : undefined;
+}
+
 export function getTextLlmApiKey() {
   return getRequiredEnv('TEXT_LLM_API_KEY');
 }

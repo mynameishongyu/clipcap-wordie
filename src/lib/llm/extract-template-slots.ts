@@ -4,11 +4,11 @@ import {
   templateSlotExtractionResultSchema,
   type TemplateSlotExtractionResult,
 } from '@/src/app/api/types/template-slot-extraction';
+import { getTextLlmModel } from '@/src/lib/llm/env';
 import {
-  getTextLlmApiKey,
-  getTextLlmBaseUrl,
-  getTextLlmModel,
-} from '@/src/lib/llm/env';
+  buildChatCompletionBody,
+  getLlmRuntimeConfig,
+} from '@/src/lib/llm/provider';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
 const EXTRACTION_TIMEOUT_MS = 120000;
@@ -17,9 +17,6 @@ const MIN_PARAGRAPH_CHARACTER_COUNT = 6;
 const TEMPLATE_EXTRACTION_LLM_CONCURRENCY = 6;
 const EXTRACTION_WAIT_HEARTBEAT_MS = 15000;
 const TEMPLATE_EXTRACTION_LLM_CONNECT_TIMEOUT_MS = 60000;
-const KIMI_K25_INSTANT_THINKING_CONFIG = {
-  type: 'disabled',
-} as const;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const templateExtractionFetchDispatcher = new Agent({
   connect: {
@@ -104,16 +101,6 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function resolveChatCompletionsUrl(baseUrl: string) {
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
-
-  if (normalizedBaseUrl.endsWith('/chat/completions')) {
-    return normalizedBaseUrl;
-  }
-
-  return `${normalizedBaseUrl}/chat/completions`;
-}
-
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
   const withoutCodeFence = trimmed
@@ -144,11 +131,16 @@ function stringifyTraceJson(value: unknown) {
   return JSON.stringify(value);
 }
 
-function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>) {
+function buildTraceErrorDetails(
+  error: unknown,
+  extra?: Record<string, unknown>,
+) {
   if (error instanceof Error) {
     const cause = (error as Error & { cause?: unknown }).cause;
     const causeRecord =
-      cause && typeof cause === 'object' ? (cause as Record<string, unknown>) : null;
+      cause && typeof cause === 'object'
+        ? (cause as Record<string, unknown>)
+        : null;
 
     return {
       errorName: error.name,
@@ -160,14 +152,26 @@ function buildTraceErrorDetails(error: unknown, extra?: Record<string, unknown>)
           : causeRecord && typeof causeRecord.message === 'string'
             ? causeRecord.message
             : null,
-      errorCode: causeRecord && typeof causeRecord.code === 'string' ? causeRecord.code : null,
+      errorCode:
+        causeRecord && typeof causeRecord.code === 'string'
+          ? causeRecord.code
+          : null,
       errorErrno:
-        causeRecord && typeof causeRecord.errno === 'number' ? causeRecord.errno : null,
+        causeRecord && typeof causeRecord.errno === 'number'
+          ? causeRecord.errno
+          : null,
       errorSyscall:
-        causeRecord && typeof causeRecord.syscall === 'string' ? causeRecord.syscall : null,
+        causeRecord && typeof causeRecord.syscall === 'string'
+          ? causeRecord.syscall
+          : null,
       errorAddress:
-        causeRecord && typeof causeRecord.address === 'string' ? causeRecord.address : null,
-      errorPort: causeRecord && typeof causeRecord.port === 'number' ? causeRecord.port : null,
+        causeRecord && typeof causeRecord.address === 'string'
+          ? causeRecord.address
+          : null,
+      errorPort:
+        causeRecord && typeof causeRecord.port === 'number'
+          ? causeRecord.port
+          : null,
       ...(extra ?? {}),
     };
   }
@@ -221,7 +225,10 @@ function describeNetworkError(error: unknown) {
       causeParts.push(`host=${causeRecord.host}`);
     }
 
-    if (typeof causeRecord.message === 'string' && causeRecord.message !== error.message) {
+    if (
+      typeof causeRecord.message === 'string' &&
+      causeRecord.message !== error.message
+    ) {
       causeParts.push(`cause=${causeRecord.message}`);
     }
 
@@ -247,7 +254,10 @@ async function requestTextLlmJson(input: {
 
   for (let attempt = 0; attempt <= EXTRACTION_MAX_RETRIES; attempt += 1) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS);
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      EXTRACTION_TIMEOUT_MS,
+    );
     const requestStartedAt = Date.now();
     let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -265,28 +275,29 @@ async function requestTextLlmJson(input: {
         void input.onTrace?.({ message: waitingMessage });
       }, EXTRACTION_WAIT_HEARTBEAT_MS);
 
-      const upstream = await undiciFetch(resolveChatCompletionsUrl(getTextLlmBaseUrl()), {
+      const llmConfig = getLlmRuntimeConfig('text');
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${getTextLlmApiKey()}`,
+          Authorization: `Bearer ${llmConfig.apiKey}`,
         },
         dispatcher: templateExtractionFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify({
-          model: getTextLlmModel(),
-          thinking: KIMI_K25_INSTANT_THINKING_CONFIG,
-          messages: [
-            {
-              role: 'system',
-              content: EXTRACTION_SYSTEM_PROMPT,
-            },
-            {
-              role: 'user',
-              content: input.prompt,
-            },
-          ],
-        }),
+        body: JSON.stringify(
+          buildChatCompletionBody(llmConfig, {
+            messages: [
+              {
+                role: 'system',
+                content: EXTRACTION_SYSTEM_PROMPT,
+              },
+              {
+                role: 'user',
+                content: input.prompt,
+              },
+            ],
+          }),
+        ),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -306,19 +317,26 @@ async function requestTextLlmJson(input: {
             message:
               `[Template Extract][LLM][ErrorDetails][Paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs}] ` +
               stringifyTraceJson(
-                buildTraceErrorDetails(new Error(`Text LLM request failed (${upstream.status}): ${details}`), {
-                  fileName: input.fileName,
-                  paragraphIndex: input.paragraphIndex,
-                  totalParagraphs: input.totalParagraphs,
-                  paragraphTitle: input.paragraphTitle,
-                }),
+                buildTraceErrorDetails(
+                  new Error(
+                    `Text LLM request failed (${upstream.status}): ${details}`,
+                  ),
+                  {
+                    fileName: input.fileName,
+                    paragraphIndex: input.paragraphIndex,
+                    totalParagraphs: input.totalParagraphs,
+                    paragraphTitle: input.paragraphTitle,
+                  },
+                ),
               ),
           });
           await wait(1000 * (attempt + 1));
           continue;
         }
 
-        throw new Error(`Text LLM request failed (${upstream.status}): ${details}`);
+        throw new Error(
+          `Text LLM request failed (${upstream.status}): ${details}`,
+        );
       }
 
       const payload = (await upstream.json()) as {
@@ -342,7 +360,8 @@ async function requestTextLlmJson(input: {
 
       return normalizeJsonText(rawContent);
     } catch (error) {
-      const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+      const isTimeout =
+        error instanceof DOMException && error.name === 'AbortError';
       lastError = error;
       const failedMessage =
         `[Template Extract][LLM] Failed paragraph ${input.paragraphIndex + 1}/${input.totalParagraphs} ` +
@@ -362,7 +381,10 @@ async function requestTextLlmJson(input: {
           ),
       });
 
-      if ((isTimeout || error instanceof TypeError) && attempt < EXTRACTION_MAX_RETRIES) {
+      if (
+        (isTimeout || error instanceof TypeError) &&
+        attempt < EXTRACTION_MAX_RETRIES
+      ) {
         await wait(1000 * (attempt + 1));
         continue;
       }
@@ -376,7 +398,7 @@ async function requestTextLlmJson(input: {
     }
   }
 
-  throw (lastError ?? new Error('Template slot extraction failed.'));
+  throw lastError ?? new Error('Template slot extraction failed.');
 }
 
 export async function extractTextFromDocxBuffer(buffer: Buffer) {
@@ -407,7 +429,9 @@ function countMeaningfulCharacters(paragraphText: string) {
   return paragraphText.replace(/\s+/g, '').length;
 }
 
-export function extractParagraphsFromRawText(uploadText: string): ExtractedParagraph[] {
+export function extractParagraphsFromRawText(
+  uploadText: string,
+): ExtractedParagraph[] {
   return uploadText
     .split(/\n{2,}/)
     .map((paragraphText) => paragraphText.trim())
@@ -421,12 +445,15 @@ export function extractParagraphsFromRawText(uploadText: string): ExtractedParag
 
 export function filterExtractableParagraphs(paragraphs: ExtractedParagraph[]) {
   return paragraphs.filter(
-    (paragraph) => countMeaningfulCharacters(paragraph.paragraph_text) >= MIN_PARAGRAPH_CHARACTER_COUNT,
+    (paragraph) =>
+      countMeaningfulCharacters(paragraph.paragraph_text) >=
+      MIN_PARAGRAPH_CHARACTER_COUNT,
   );
 }
 
 export function countExtractableParagraphsFromRawText(uploadText: string) {
-  return filterExtractableParagraphs(extractParagraphsFromRawText(uploadText)).length;
+  return filterExtractableParagraphs(extractParagraphsFromRawText(uploadText))
+    .length;
 }
 
 async function extractSlotsForParagraph(params: {
@@ -454,7 +481,9 @@ async function extractSlotsForParagraph(params: {
     paragraphIndex: params.paragraph.paragraph_index,
     totalParagraphs: params.totalParagraphs,
     paragraphTitle: params.paragraph.paragraph_title,
-    paragraphCharCount: countMeaningfulCharacters(params.paragraph.paragraph_text),
+    paragraphCharCount: countMeaningfulCharacters(
+      params.paragraph.paragraph_text,
+    ),
     concurrency: params.concurrency,
     onTrace: params.onTrace,
   });
@@ -469,7 +498,8 @@ async function extractSlotsForParagraph(params: {
   return {
     paragraph_index: params.paragraph.paragraph_index,
     paragraph_title:
-      extractedParagraph.paragraph_title?.trim() || params.paragraph.paragraph_title,
+      extractedParagraph.paragraph_title?.trim() ||
+      params.paragraph.paragraph_title,
     items: extractedParagraph.items.map((item) => ({
       ...item,
       field_category: normalizeSlotCategoryLabel(item.field_category),
@@ -487,7 +517,10 @@ async function extractParagraphsConcurrently(params: {
 }) {
   let completedParagraphs = 0;
   const totalParagraphs = params.paragraphs.length;
-  const concurrency = Math.max(1, Math.min(TEMPLATE_EXTRACTION_LLM_CONCURRENCY, totalParagraphs));
+  const concurrency = Math.max(
+    1,
+    Math.min(TEMPLATE_EXTRACTION_LLM_CONCURRENCY, totalParagraphs),
+  );
 
   const startedMessage =
     `[Template Extract] LLM paragraph extraction started for ${params.fileName} ` +
@@ -550,7 +583,8 @@ async function extractParagraphsConcurrently(params: {
 
   if (extractedParagraphs.length === 0) {
     const allFailedError =
-      failedResults[0]?.reason ?? new Error('All template extraction paragraph requests failed.');
+      failedResults[0]?.reason ??
+      new Error('All template extraction paragraph requests failed.');
     throw allFailedError;
   }
 
@@ -570,13 +604,15 @@ async function extractParagraphsConcurrently(params: {
 
 export async function extractTemplateSlotsFromDocx(
   params: ExtractTemplateSlotsFromDocxParams,
-): Promise<TemplateSlotExtractionResult & {
-  uploadText: string;
-  uploadHtml: string;
-  totalParagraphs: number;
-  succeededParagraphs: number;
-  failedParagraphs: number;
-}> {
+): Promise<
+  TemplateSlotExtractionResult & {
+    uploadText: string;
+    uploadHtml: string;
+    totalParagraphs: number;
+    succeededParagraphs: number;
+    failedParagraphs: number;
+  }
+> {
   const uploadText = await extractTextFromDocxBuffer(params.buffer);
   const uploadHtml = await extractHtmlFromDocxBuffer(params.buffer);
 
@@ -606,7 +642,10 @@ export async function extractTemplateSlotsFromDocx(
         paragraph_count: extractableParagraphs.length,
         concurrency: Math.max(
           1,
-          Math.min(TEMPLATE_EXTRACTION_LLM_CONCURRENCY, extractableParagraphs.length),
+          Math.min(
+            TEMPLATE_EXTRACTION_LLM_CONCURRENCY,
+            extractableParagraphs.length,
+          ),
         ),
         extra_prompt: params.prompt,
       }),
@@ -621,7 +660,9 @@ export async function extractTemplateSlotsFromDocx(
   });
 
   const extractedParagraphs = paragraphExtraction.extractedParagraphs;
-  extractedParagraphs.sort((left, right) => left.paragraph_index - right.paragraph_index);
+  extractedParagraphs.sort(
+    (left, right) => left.paragraph_index - right.paragraph_index,
+  );
 
   let nextSequence = 1;
   const normalizedExtractionResult = extractedParagraphs.map((paragraph) => ({

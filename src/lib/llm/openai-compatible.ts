@@ -1,24 +1,23 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import {
-  getTextLlmApiKey,
-  getTextLlmBaseUrl,
-  getVisionLlmApiKey,
-  getVisionLlmBaseUrl,
-} from '@/src/lib/llm/env';
+import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
 
 export function createTextLlmClient() {
+  const config = getLlmRuntimeConfig('text');
+
   return createOpenAICompatible({
-    apiKey: getTextLlmApiKey(),
-    baseURL: getTextLlmBaseUrl(),
+    apiKey: config.apiKey,
+    baseURL: config.baseUrl,
     name: 'text-llm',
     supportsStructuredOutputs: true,
   });
 }
 
 export function createVisionLlmClient() {
+  const config = getLlmRuntimeConfig('vision');
+
   return createOpenAICompatible({
-    apiKey: getVisionLlmApiKey(),
-    baseURL: getVisionLlmBaseUrl(),
+    apiKey: config.apiKey,
+    baseURL: config.baseUrl,
     name: 'vision-llm',
     supportsStructuredOutputs: true,
   });
