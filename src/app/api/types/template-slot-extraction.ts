@@ -27,6 +27,13 @@ export const templatePdfEvidencePageSchema = z.object({
   text: z.string(),
 });
 
+export const templatePdfEvidenceBboxSchema = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  width: z.number().min(0).max(1),
+  height: z.number().min(0).max(1),
+});
+
 export const templatePdfEvidenceMatchSchema = z.object({
   paragraph_result_index: z.number().int().nonnegative(),
   item_index: z.number().int().nonnegative(),
@@ -35,9 +42,10 @@ export const templatePdfEvidenceMatchSchema = z.object({
   field_category: z.string(),
   original_value: z.string(),
   page_number: z.number().int().positive(),
+  bbox: templatePdfEvidenceBboxSchema.nullable().optional(),
   evidence_text: z.string(),
   confidence: z.number().min(0).max(1),
-  match_type: z.enum(['normalized_exact', 'raw_contains']),
+  match_type: z.enum(['normalized_exact', 'raw_contains', 'vision_bbox']),
 });
 
 export const templatePdfEvidenceResultSchema = z.object({

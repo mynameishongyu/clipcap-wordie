@@ -1882,7 +1882,7 @@ export function SlotReviewWorkspace() {
                     <Title order={4}>PDF 证据预览</Title>
                     <Text c="dimmed" mt={6} size="sm">
                       当前 PDF：{payload.pdfEvidence.pdfFileName}
-                      。点击左侧槽位后，这里会切换到 OCR 匹配到的页面。
+                      。点击左侧槽位后，这里会切换到视觉模型定位到的页面并画出位置。
                     </Text>
                   </div>
                   {activeEvidenceMatch ? (
@@ -1911,44 +1911,72 @@ export function SlotReviewWorkspace() {
                           borderRadius: 18,
                         }}
                       >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          alt={`${payload.pdfEvidence.pdfFileName} 第 ${activeEvidencePage.pageNumber} 页`}
-                          src={
-                            activeEvidencePage.imageUrl ??
-                            activeEvidencePage.imageDataUrl
-                          }
-                          style={{
-                            width: '100%',
-                            maxWidth: 920,
-                            height: 'auto',
-                            borderRadius: 12,
-                            boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
-                          }}
-                        />
                         <Box
                           style={{
-                            position: 'absolute',
-                            top: 30,
-                            right: 30,
-                            display: 'grid',
-                            placeItems: 'center',
-                            width: 148,
-                            height: 86,
-                            border: '3px solid #f59f00',
-                            borderRadius: 999,
-                            background: 'rgba(255, 209, 102, 0.18)',
-                            boxShadow: '0 0 0 6px rgba(245, 159, 0, 0.12)',
-                            color: '#fff6dc',
-                            textAlign: 'center',
-                            pointerEvents: 'none',
+                            position: 'relative',
+                            width: '100%',
+                            maxWidth: 920,
                           }}
                         >
-                          <Text fw={800} size="xs">
-                            关联槽位
-                            <br />
-                            {activeEvidenceMatch?.field_category}
-                          </Text>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            alt={`${payload.pdfEvidence.pdfFileName} 第 ${activeEvidencePage.pageNumber} 页`}
+                            src={
+                              activeEvidencePage.imageUrl ??
+                              activeEvidencePage.imageDataUrl
+                            }
+                            style={{
+                              width: '100%',
+                              height: 'auto',
+                              display: 'block',
+                              borderRadius: 12,
+                              boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
+                            }}
+                          />
+                          {activeEvidenceMatch?.bbox ? (
+                            <Box
+                              style={{
+                                position: 'absolute',
+                                left: `${activeEvidenceMatch.bbox.x * 100}%`,
+                                top: `${activeEvidenceMatch.bbox.y * 100}%`,
+                                width: `${activeEvidenceMatch.bbox.width * 100}%`,
+                                height: `${activeEvidenceMatch.bbox.height * 100}%`,
+                                minWidth: 18,
+                                minHeight: 14,
+                                border: '3px solid #f59f00',
+                                borderRadius: 999,
+                                background: 'rgba(255, 209, 102, 0.18)',
+                                boxShadow:
+                                  '0 0 0 6px rgba(245, 159, 0, 0.14), 0 0 26px rgba(245, 159, 0, 0.32)',
+                                pointerEvents: 'none',
+                              }}
+                            />
+                          ) : (
+                            <Box
+                              style={{
+                                position: 'absolute',
+                                top: 12,
+                                right: 12,
+                                display: 'grid',
+                                placeItems: 'center',
+                                width: 148,
+                                height: 86,
+                                border: '3px solid #f59f00',
+                                borderRadius: 999,
+                                background: 'rgba(255, 209, 102, 0.18)',
+                                boxShadow: '0 0 0 6px rgba(245, 159, 0, 0.12)',
+                                color: '#fff6dc',
+                                textAlign: 'center',
+                                pointerEvents: 'none',
+                              }}
+                            >
+                              <Text fw={800} size="xs">
+                                关联槽位
+                                <br />
+                                {activeEvidenceMatch?.field_category}
+                              </Text>
+                            </Box>
+                          )}
                         </Box>
                       </Box>
                     </ScrollArea>
@@ -1963,11 +1991,11 @@ export function SlotReviewWorkspace() {
                         }}
                       >
                         <Text c="dimmed" size="xs">
-                          OCR 证据片段
+                          视觉定位证据
                         </Text>
                         <Text mt={6} size="sm">
                           {activeEvidenceMatch.evidence_text ||
-                            '该页已匹配到槽位值，但 OCR 未返回可展示的上下文片段。'}
+                            '该页已定位到槽位值，但视觉模型未返回可展示的上下文片段。'}
                         </Text>
                       </Paper>
                     ) : null}
@@ -1982,7 +2010,7 @@ export function SlotReviewWorkspace() {
                     }}
                   >
                     <Text c="dimmed" size="sm">
-                      当前选中的槽位还没有在扫描 PDF 的 OCR 文本中匹配到证据页。
+                      当前选中的槽位还没有在扫描 PDF 图片中定位到证据位置。
                     </Text>
                   </Paper>
                 )}

@@ -191,7 +191,7 @@ async function preparePdfVisionPageAssets(file: File) {
   const pageNumbers = pickVisionPageNumbers(parsedPdf);
 
   browserProcessLog.info(
-    `[Template Extract][PDF Evidence] Rendering ${pageNumbers.length} page(s) for OCR evidence.`,
+    `[Template Extract][PDF Evidence] Rendering ${pageNumbers.length} page(s) for visual location evidence.`,
     {
       pdfFileName: file.name,
       totalTextLength: parsedPdf.totalTextLength,
@@ -245,6 +245,20 @@ async function preparePdfVisionPageAssets(file: File) {
   );
 
   return uploadedAssets;
+}
+
+function getLatestProcessingTraceLine(trace: string) {
+  const latestLine = trace
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+
+  if (!latestLine) {
+    return '';
+  }
+
+  return latestLine.replace(/^\[[^\]]+\]\s*/, '').slice(0, 180);
 }
 
 export function HomeHero() {
@@ -350,6 +364,13 @@ export function HomeHero() {
         ? `${activeExtractionTask.completed_paragraphs}/${activeExtractionTask.total_paragraphs} 段`
         : '正在准备段落';
 
+    const latestTraceLine = getLatestProcessingTraceLine(
+      activeExtractionTask.processing_trace,
+    );
+    const stageText = latestTraceLine
+      ? `当前阶段：${latestTraceLine}`
+      : `当前进度 ${progressText}`;
+
     notifications.update({
       id: 'template-slot-extraction',
       loading: true,
@@ -357,7 +378,7 @@ export function HomeHero() {
       withCloseButton: false,
       color: 'teal',
       title: '正在处理模板',
-      message: `正在调用 LLM 识别槽位，请稍候。已处理 ${processingSeconds} 秒，当前进度 ${progressText}。`,
+      message: `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒，DOCX 进度 ${progressText}。${stageText}。`,
     });
   }, [activeExtractionTask, isProcessingTemplate, processingSeconds]);
 
@@ -655,7 +676,7 @@ export function HomeHero() {
         color: 'teal',
         title: '正在创建抽取任务',
         message: sourcePdfFile
-          ? '模板与扫描 PDF 已上传，正在准备 OCR 证据并创建槽位抽取任务，请稍候。'
+          ? '模板与扫描 PDF 已上传，正在准备视觉定位页图并创建槽位抽取任务，请稍候。'
           : '模板已上传，正在创建槽位抽取任务，请稍候。',
       });
 
