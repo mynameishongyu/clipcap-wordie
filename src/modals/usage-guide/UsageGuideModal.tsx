@@ -11,33 +11,37 @@ export function UsageGuideModal({}: ContextModalProps<UsageGuideInnerProps>) {
       <Stack gap="xs">
         <Title order={3}>使用说明</Title>
         <Text c="dimmed" size="sm">
-          先上传 DOCX 模板识别槽位，再进入槽位编辑页面检查、修改、删除或手动新增槽位。
+          槽位抽取需要同时上传 DOCX 模板和扫描 PDF。系统会先识别 DOCX
+          中的槽位，再把槽位值关联到 PDF 的对应页面。
         </Text>
       </Stack>
 
       <List spacing="md" size="sm">
         <List.Item>
           <Text span fw={700}>
-            1. 上传 DOCX 模板并开始识别
+            1. 上传 DOCX 模板和扫描 PDF
           </Text>
           <Text c="dimmed" component="div" mt={4}>
-            上传 `.docx` 模板后点击“开始识别槽位”，系统会先解析文档，再调用大模型逐段抽取槽位结果。
+            DOCX 用来定义需要抽取的槽位内容，PDF
+            用来做页面证据定位。两个文件都上传后，才可以点击“开始识别槽位”。
           </Text>
         </List.Item>
         <List.Item>
           <Text span fw={700}>
-            2. 检查系统默认抽取内容
+            2. 识别 DOCX 槽位并关联 PDF 页面
           </Text>
           <Text c="dimmed" component="div" mt={4}>
-            基础抽取内容包括：姓名、身份证号、民族、性别、出生日期、住址、联系电话、金额、百分数、日期、利率、分期。
+            系统会调用文本模型抽取 DOCX 槽位，并调用视觉模型 OCR 扫描
+            PDF，再把姓名、性别、日期、金额等槽位值匹配到 PDF 页。
           </Text>
         </List.Item>
         <List.Item>
           <Text span fw={700}>
-            3. 如需其它槽位，可在输入框补充说明
+            3. 在槽位编辑页检查和调整
           </Text>
           <Text c="dimmed" component="div" mt={4}>
-            你可以在首页输入框里补充“还需要抽取哪些字段/槽位”，例如合同编号、车牌号、担保方式等，系统会把这些要求一起带给模型。
+            进入编辑页后，可以检查、修改、删除或手动新增槽位；左侧槽位会展示关联到的
+            PDF 页，右侧可查看 DOCX 原文和 PDF 证据预览。
           </Text>
         </List.Item>
       </List>

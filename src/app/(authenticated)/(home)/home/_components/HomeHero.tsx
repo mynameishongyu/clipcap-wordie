@@ -195,6 +195,8 @@ export function HomeHero() {
         activeExtractionTask.status === 'running'));
   const canEditPrompt = canUseProtectedActions && !isProcessingTemplate;
   const hasUploadedDocx = Boolean(selectedDocxFile);
+  const hasUploadedPdf = Boolean(selectedPdfFile);
+  const canStartSlotDetection = hasUploadedDocx && hasUploadedPdf;
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -528,6 +530,16 @@ export function HomeHero() {
         return;
       }
 
+      if (!selectedPdfFile) {
+        notifications.show({
+          color: 'yellow',
+          title: '请先上传扫描 PDF 证据',
+          message:
+            '开始识别槽位前，需要同时上传 PDF 扫描件，用于把 DOCX 槽位关联到 PDF 页面。',
+        });
+        return;
+      }
+
       const notificationId = 'template-slot-extraction';
       const sourcePdfFile = selectedPdfFile;
       setProcessingSeconds(0);
@@ -643,7 +655,7 @@ export function HomeHero() {
             批量从 PDF 中提取数据，自动填充你的文档模板
           </Title>
           <Text c="#d4cdc1" size="lg" ta="center">
-            上传 DOCX 模板定义槽位，再从 PDF 材料中批量抽取内容并完成自动填充。
+            上传 DOCX 模板定义槽位，并上传扫描 PDF 作为页面定位证据。
           </Text>
           <Button
             radius="xl"
@@ -778,8 +790,8 @@ export function HomeHero() {
                 </Group>
 
                 <Text c="#7a7365" size="sm">
-                  先上传 DOCX 模板定义槽位结构；如需关联扫描件页面，可同时上传
-                  PDF 作为证据。
+                  请同时上传 DOCX 模板和扫描 PDF，系统会先抽取 DOCX
+                  槽位，再把槽位值关联到 PDF 页面。
                 </Text>
                 {selectedDocxName ? (
                   <Text size="sm">已选择 DOCX：{selectedDocxName}</Text>
@@ -791,7 +803,7 @@ export function HomeHero() {
 
               <Button
                 color="teal"
-                disabled={!hasUploadedDocx || isProcessingTemplate}
+                disabled={!canStartSlotDetection || isProcessingTemplate}
                 loading={isProcessingTemplate}
                 radius="xl"
                 size="lg"
