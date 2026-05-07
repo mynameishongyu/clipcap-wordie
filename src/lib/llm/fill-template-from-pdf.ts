@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
-import { getTextLlmModel, getVisionLlmModel } from '@/src/lib/llm/env';
+import {
+  getOptionalEnv,
+  getTextLlmModel,
+  getVisionLlmModel,
+} from '@/src/lib/llm/env';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
@@ -67,8 +71,8 @@ const PDF_SLOT_FILL_VISION_TIMEOUT_MAX_MS = 300000;
 const MAX_VISION_REQUEST_RETRIES = 2;
 const MAX_TEXT_PAGES_PER_CHUNK = 8;
 const MAX_TEXT_CHARS_PER_CHUNK = 12000;
-const MAX_VISION_PAGES_PER_REQUEST = 2;
-const MAX_VISION_OCR_BATCH_CONCURRENCY = 6;
+const DEFAULT_VISION_OCR_PAGES_PER_REQUEST = 2;
+const DEFAULT_VISION_OCR_BATCH_CONCURRENCY = 6;
 const MAX_TEXT_SLOT_BATCH_CONCURRENCY = 2;
 const MAX_TEXT_SLOTS_PER_REQUEST = 10;
 const PROCESS_HARD_TIMEOUT_MS = 300000;
@@ -81,6 +85,36 @@ const llmFetchDispatcher = new Agent({
     timeout: LLM_CONNECT_TIMEOUT_MS,
   },
 });
+
+function getConfiguredPositiveInteger(name: string, fallback: number) {
+  const rawValue = getOptionalEnv(name);
+
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer when configured.`);
+  }
+
+  return parsed;
+}
+
+function getVisionOcrPagesPerRequest() {
+  return getConfiguredPositiveInteger(
+    'VISION_OCR_PAGES_PER_REQUEST',
+    DEFAULT_VISION_OCR_PAGES_PER_REQUEST,
+  );
+}
+
+function getVisionOcrBatchConcurrency() {
+  return getConfiguredPositiveInteger(
+    'VISION_OCR_BATCH_CONCURRENCY',
+    DEFAULT_VISION_OCR_BATCH_CONCURRENCY,
+  );
+}
 
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
@@ -856,7 +890,7 @@ async function extractTextFromVisionPages(input: {
           .map((page) => page.page_number)
           .join(
             ',',
-          )}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}, page image sizes: ${pageSizeSummary
+          )}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${getVisionOcrBatchConcurrency()}, each_concurrency_size: ${getVisionOcrPagesPerRequest()}, current_batch_size: ${input.visionPages.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}, page image sizes: ${pageSizeSummary
           .map((entry) => `${entry.pageNumber}=${formatBytes(entry.bytes)}`)
           .join('; ')}${formatProcessBudgetSuffix({
           processStartedAtMs: input.processStartedAtMs,
@@ -895,7 +929,7 @@ async function extractTextFromVisionPages(input: {
 
         const heartbeatMessage =
           `[PDF Fill][OCR] Waiting on ${batchLabel} for ${input.documentName} ` +
-          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
+          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${getVisionOcrBatchConcurrency()}, each_concurrency_size: ${getVisionOcrPagesPerRequest()}, current_batch_size: ${input.visionPages.length}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
             {
               processStartedAtMs: input.processStartedAtMs,
               processHardTimeoutMs: input.processHardTimeoutMs,
@@ -1019,7 +1053,7 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchCompletedMessage =
         `[PDF Fill][OCR] Completed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
+        `(attempt ${attempt}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${getVisionOcrBatchConcurrency()}, each_concurrency_size: ${getVisionOcrPagesPerRequest()}, current_batch_size: ${input.visionPages.length}) with ${ocrPages.length} OCR text pages in ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
           {
             processStartedAtMs: input.processStartedAtMs,
             processHardTimeoutMs: input.processHardTimeoutMs,
@@ -1058,7 +1092,7 @@ async function extractTextFromVisionPages(input: {
       const batchElapsedMs = Date.now() - batchStartedAt;
       const batchFailedMessage =
         `[PDF Fill][OCR] Failed ${batchLabel} for ${input.documentName} ` +
-        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}, current_batch_size: ${input.visionPages.length}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}, reason: ${getErrorMessage(normalizedError)}${formatProcessBudgetSuffix(
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, vision pages: ${input.totalVisionPages ?? input.visionPages.length}, concurrency: ${getVisionOcrBatchConcurrency()}, each_concurrency_size: ${getVisionOcrPagesPerRequest()}, current_batch_size: ${input.visionPages.length}) after ${formatElapsedMs(batchElapsedMs)}, total image size: ${formatBytes(totalImageBytes)}, reason: ${getErrorMessage(normalizedError)}${formatProcessBudgetSuffix(
           {
             processStartedAtMs: input.processStartedAtMs,
             processHardTimeoutMs: input.processHardTimeoutMs,
@@ -1209,7 +1243,7 @@ function hasFilledValue(value: string | null | undefined) {
 
 function buildVisionPageBatches(visionPages: PdfVisionPageInput[]) {
   const batches: PdfVisionPageInput[][] = [];
-  const batchSize = MAX_VISION_PAGES_PER_REQUEST;
+  const batchSize = getVisionOcrPagesPerRequest();
 
   for (let index = 0; index < visionPages.length; index += batchSize) {
     batches.push(visionPages.slice(index, index + batchSize));
@@ -1830,7 +1864,7 @@ export async function extractPdfTextFromVisionPages(params: {
   const ocrStartedAt = Date.now();
   const ocrStartedMessage =
     `[PDF Fill] OCR started for ${params.pdfFileName} ` +
-    `(vision pages: ${params.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}).`;
+    `(vision pages: ${params.visionPages.length}, concurrency: ${getVisionOcrBatchConcurrency()}, each_concurrency_size: ${getVisionOcrPagesPerRequest()}).`;
   console.info(ocrStartedMessage);
   await params.onTrace?.({ message: ocrStartedMessage });
   let ocrBatchResults: PdfPageInput[][];
@@ -1838,7 +1872,7 @@ export async function extractPdfTextFromVisionPages(params: {
   try {
     const settledOcrBatchResults = await runWithConcurrencySettled({
       items: visionPageBatches,
-      concurrency: MAX_VISION_OCR_BATCH_CONCURRENCY,
+      concurrency: getVisionOcrBatchConcurrency(),
       worker: async (visionPageBatch, batchIndex) =>
         extractTextFromVisionPages({
           documentName: params.pdfFileName,
@@ -1905,7 +1939,7 @@ export async function extractPdfTextFromVisionPages(params: {
     const ocrElapsedMs = Date.now() - ocrStartedAt;
     const ocrCompletedMessage =
       `[PDF Fill] OCR completed for ${params.pdfFileName} in ${formatElapsedMs(ocrElapsedMs)} ` +
-      `(vision pages: ${params.visionPages.length}, concurrency: ${MAX_VISION_OCR_BATCH_CONCURRENCY}, each_concurrency_size: ${MAX_VISION_PAGES_PER_REQUEST}).`;
+      `(vision pages: ${params.visionPages.length}, concurrency: ${getVisionOcrBatchConcurrency()}, each_concurrency_size: ${getVisionOcrPagesPerRequest()}).`;
     console.info(ocrCompletedMessage);
     await params.onTrace?.({ message: ocrCompletedMessage });
   } catch (error) {

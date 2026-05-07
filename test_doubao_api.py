@@ -4,7 +4,7 @@ from openai import OpenAI
 # BASE_URL = "https://api.moonshot.cn/v1"
 # MODEL = "kimi-k2.5"
 
-API_KEY = "AIzaSyDHTeMEpCVomZfWbUfwIkFmwu_OZQYXDgM"
+API_KEY = ""
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 MODEL = "gemini-2.5-flash"
 
