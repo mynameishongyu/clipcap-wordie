@@ -349,11 +349,6 @@ export function HomeHero() {
       return;
     }
 
-    const progressText =
-      activeExtractionTask.total_paragraphs > 0
-        ? `${activeExtractionTask.completed_paragraphs}/${activeExtractionTask.total_paragraphs} 段`
-        : '正在准备段落';
-
     notifications.update({
       id: 'template-slot-extraction',
       loading: true,
@@ -361,7 +356,7 @@ export function HomeHero() {
       withCloseButton: false,
       color: 'teal',
       title: '正在处理模板',
-      message: `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒，DOCX 进度 ${progressText}。`,
+      message: `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒。`,
     });
   }, [activeExtractionTask, isProcessingTemplate, processingSeconds]);
 
@@ -525,9 +520,18 @@ export function HomeHero() {
 
       if (
         line.includes('[Template Extract][LLM] Failed') ||
-        line.includes('槽位抽取失败')
+        line.includes('槽位抽取失败') ||
+        (line.includes('[Template PDF Locate]') &&
+          (line.includes('failed') ||
+            line.includes('failure') ||
+            line.includes('skipped')))
       ) {
         browserProcessLog.error(line);
+        continue;
+      }
+
+      if (line.includes('[Template PDF Locate]')) {
+        browserProcessLog.info(line);
         continue;
       }
 

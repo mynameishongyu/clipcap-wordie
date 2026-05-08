@@ -36,6 +36,10 @@ interface VisionLocateCandidate {
   confidence?: number;
 }
 
+interface VisionLocateModelResponse {
+  matches?: VisionLocateCandidate[];
+}
+
 const visionLocateFetchDispatcher = new Agent({
   connect: {
     timeout: 30_000,
@@ -43,6 +47,7 @@ const visionLocateFetchDispatcher = new Agent({
 });
 
 const TEMPLATE_PDF_LOCATE_REQUEST_TIMEOUT_MS = 180_000;
+const TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS = 90_000;
 
 function getTemplatePdfLocatePagesPerRequest() {
   const rawValue = getOptionalEnv('TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST');
@@ -72,17 +77,248 @@ function normalizeJsonText(rawContent: string) {
   return fencedMatch?.[1]?.trim() ?? trimmed;
 }
 
-function parseModelJson<T>(rawContent: string): T {
+function tryParseJson<T>(rawContent: string) {
+  try {
+    return {
+      data: JSON.parse(rawContent) as T,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      data: null,
+      error,
+    };
+  }
+}
+
+function extractJsonObjectCandidate(rawContent: string) {
+  const firstBraceIndex = rawContent.indexOf('{');
+  const lastBraceIndex = rawContent.lastIndexOf('}');
+
+  if (
+    firstBraceIndex < 0 ||
+    lastBraceIndex < 0 ||
+    lastBraceIndex <= firstBraceIndex
+  ) {
+    return rawContent;
+  }
+
+  return rawContent.slice(firstBraceIndex, lastBraceIndex + 1);
+}
+
+function balanceJsonClosers(rawContent: string) {
+  let inString = false;
+  let escaped = false;
+  const stack: Array<'}' | ']'> = [];
+
+  for (const character of rawContent) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (character === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (character === '{') {
+      stack.push('}');
+      continue;
+    }
+
+    if (character === '[') {
+      stack.push(']');
+      continue;
+    }
+
+    if (character === '}' || character === ']') {
+      const expected = stack.at(-1);
+
+      if (expected === character) {
+        stack.pop();
+      }
+    }
+  }
+
+  const withoutDanglingSeparator = rawContent.replace(/[\s,，]+$/u, '');
+
+  return `${withoutDanglingSeparator}${stack.reverse().join('')}`;
+}
+
+function buildLocalJsonRepairCandidates(rawContent: string) {
   const normalized = normalizeJsonText(rawContent);
+  const extracted = extractJsonObjectCandidate(normalized);
+  const normalizedPunctuation = extracted.replace(/，/gu, ',').replace(/：/gu, ':');
+  const withoutTrailingCommas = normalizedPunctuation.replace(
+    /,\s*([}\]])/gu,
+    '$1',
+  );
+
+  return Array.from(
+    new Set([
+      normalized,
+      extracted,
+      normalizedPunctuation,
+      withoutTrailingCommas,
+      balanceJsonClosers(withoutTrailingCommas),
+    ]),
+  );
+}
+
+function buildJsonParseFailureMessage(error: unknown, rawContent: string) {
+  const preview = normalizeJsonText(rawContent).slice(0, 240);
+  const reason = error instanceof Error ? error.message : String(error);
+
+  return `Vision location JSON parse failed: ${reason}. Snippet: ${preview}`;
+}
+
+function parseModelJsonWithLocalRepair<T>(rawContent: string) {
+  let lastError: unknown = null;
+  const candidates = buildLocalJsonRepairCandidates(rawContent);
+
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    const parsed = tryParseJson<T>(candidate);
+
+    if (!parsed.error) {
+      return {
+        data: parsed.data as T,
+        usedRepair: candidateIndex > 0,
+      };
+    }
+
+    lastError = parsed.error;
+  }
+
+  throw new Error(buildJsonParseFailureMessage(lastError, rawContent));
+}
+
+async function repairVisionLocationJsonWithLlm(input: {
+  rawContent: string;
+  parseError: Error;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  const llmConfig = getLlmRuntimeConfig('text');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS);
+
+  const startedMessage =
+    '[Template PDF Locate] Local JSON repair failed; requesting one LLM JSON repair pass.';
+  console.info(startedMessage);
+  await input.onTrace?.({ message: startedMessage });
 
   try {
-    return JSON.parse(normalized) as T;
-  } catch (error) {
-    const preview = normalized.slice(0, 240);
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Vision location JSON parse failed: ${reason}. Snippet: ${preview}`,
+    const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${llmConfig.apiKey}`,
+      },
+      dispatcher: visionLocateFetchDispatcher,
+      signal: controller.signal,
+      body: JSON.stringify(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You repair malformed JSON. Return compact valid JSON only. Do not add markdown, comments, explanations, or fields that were not implied by the input.',
+            },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                task:
+                  'Repair this malformed vision-location response into JSON that can be parsed by JSON.parse. Preserve all valid matches. If a trailing match is incomplete, drop only that incomplete match. Output exactly {"matches":[...]} and nothing else.',
+                parse_error: input.parseError.message,
+                required_schema:
+                  '{"matches":[{"slot_key":"string","page_number":number,"bbox":{"x":number,"y":number,"width":number,"height":number},"evidence_text":"string","confidence":number}]}',
+                malformed_json: input.rawContent,
+              }),
+            },
+          ],
+        }),
+      ),
+    } as UndiciFetchInit);
+
+    if (!upstream.ok) {
+      const details = await upstream.text();
+      throw new Error(
+        `Vision location JSON repair request failed (${upstream.status}): ${details}`,
+      );
+    }
+
+    const payload = (await upstream.json()) as {
+      choices?: Array<{
+        message?: {
+          content?: string;
+        };
+      }>;
+    };
+    const repairedContent = payload?.choices?.[0]?.message?.content;
+
+    if (typeof repairedContent !== 'string' || !repairedContent.trim()) {
+      throw new Error('Vision location JSON repair returned empty content.');
+    }
+
+    const repaired = parseModelJsonWithLocalRepair<VisionLocateModelResponse>(
+      repairedContent,
     );
+    const completedMessage =
+      `[Template PDF Locate] LLM JSON repair completed with ${repaired.data.matches?.length ?? 0} match(es).`;
+    console.info(completedMessage);
+    await input.onTrace?.({ message: completedMessage });
+
+    return repaired.data;
+  } catch (error) {
+    const failedMessage =
+      `[Template PDF Locate] LLM JSON repair failed: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(failedMessage);
+    await input.onTrace?.({ message: failedMessage });
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function parseVisionLocationResponse(input: {
+  rawContent: string;
+  pageBatchIndex: number;
+  totalPageBatches: number;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  try {
+    const parsed = parseModelJsonWithLocalRepair<VisionLocateModelResponse>(
+      input.rawContent,
+    );
+
+    if (parsed.usedRepair) {
+      const repairedMessage =
+        `[Template PDF Locate] Local JSON repair completed for visual location batch ${input.pageBatchIndex + 1}/${input.totalPageBatches} ` +
+        `with ${parsed.data.matches?.length ?? 0} match(es).`;
+      console.info(repairedMessage);
+      await input.onTrace?.({ message: repairedMessage });
+    }
+
+    return parsed.data;
+  } catch (error) {
+    const parseError = error instanceof Error ? error : new Error(String(error));
+
+    return repairVisionLocationJsonWithLlm({
+      rawContent: input.rawContent,
+      parseError,
+      onTrace: input.onTrace,
+    });
   }
 }
 
@@ -183,11 +419,17 @@ async function locateSlotsInPageBatch(input: {
       {
         type: 'text',
         text: JSON.stringify({
-          task: 'Locate the provided DOCX slot values directly on these PDF page images. Do not OCR the whole page. Return JSON only.',
+          task: 'Locate the provided DOCX slot values directly on these PDF page images. Do not OCR the whole page. Return compact valid JSON only.',
           document_name: input.pdfFileName,
           page_numbers: pageNumbers,
           coordinate_system:
             'bbox values must be normalized ratios relative to the full image: x, y, width, height are all between 0 and 1.',
+          json_output_rules: [
+            'Return exactly one compact JSON object and nothing else.',
+            'The response must start with {"matches": and must be directly parseable by JSON.parse.',
+            'Do not use markdown fences, comments, explanations, line prefixes, trailing commas, single quotes, Chinese punctuation as JSON delimiters, NaN, Infinity, or undefined.',
+            'If there are no confident matches, return {"matches":[]}.',
+          ],
           strict_requirements: [
             'Only return a match when the visual page image contains the exact value or a visually equivalent value.',
             'The bbox must enclose only the slot value text itself. Do not include field labels such as name, gender, birth date, address, amount, phone, ID number, or nearby form labels.',
@@ -258,7 +500,7 @@ async function locateSlotsInPageBatch(input: {
             {
               role: 'system',
               content:
-                'You are a precise visual document layout locator. Return JSON only. Locate exact visible slot values in scanned PDF page images and provide tight normalized bounding boxes around only the value text.',
+                'You are a precise visual document layout locator. Return compact valid JSON only, with no markdown or explanations. Locate exact visible slot values in scanned PDF page images and provide tight normalized bounding boxes around only the value text.',
             },
             {
               role: 'user',
@@ -289,9 +531,12 @@ async function locateSlotsInPageBatch(input: {
       return [] as VisionLocateCandidate[];
     }
 
-    const normalized = parseModelJson<{ matches?: VisionLocateCandidate[] }>(
+    const normalized = await parseVisionLocationResponse({
       rawContent,
-    );
+      pageBatchIndex: input.pageBatchIndex,
+      totalPageBatches: input.totalPageBatches,
+      onTrace: input.onTrace,
+    });
     const completedMessage =
       `[Template PDF Locate] Completed visual location batch ${input.pageBatchIndex + 1}/${input.totalPageBatches} ` +
       `for ${input.pdfFileName} with ${normalized.matches?.length ?? 0} raw match(es).`;
@@ -332,14 +577,25 @@ export async function buildTemplatePdfEvidence(input: {
   >();
 
   for (const [pageBatchIndex, pageBatch] of pageBatches.entries()) {
-    const rawMatches = await locateSlotsInPageBatch({
-      pdfFileName: input.pdfFileName,
-      pageBatch,
-      pageBatchIndex,
-      totalPageBatches: pageBatches.length,
-      slots,
-      onTrace: input.onTrace,
-    });
+    let rawMatches: VisionLocateCandidate[];
+
+    try {
+      rawMatches = await locateSlotsInPageBatch({
+        pdfFileName: input.pdfFileName,
+        pageBatch,
+        pageBatchIndex,
+        totalPageBatches: pageBatches.length,
+        slots,
+        onTrace: input.onTrace,
+      });
+    } catch (error) {
+      const failedMessage =
+        `[Template PDF Locate] Visual location batch ${pageBatchIndex + 1}/${pageBatches.length} skipped after failure: ` +
+        `${error instanceof Error ? error.message : String(error)}`;
+      console.error(failedMessage);
+      await input.onTrace?.({ message: failedMessage });
+      continue;
+    }
 
     rawMatches.forEach((candidate) => {
       const slotKey = String(candidate.slot_key ?? '');
