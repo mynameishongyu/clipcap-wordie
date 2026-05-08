@@ -775,6 +775,56 @@ function normalizeParagraphText(value: string) {
   return value.replace(/\s+/g, '');
 }
 
+function getItemDocumentOffset(
+  item: EditableExtractionItem,
+  paragraphTexts: string[],
+  fullText: string,
+) {
+  const value = item.original_value.trim();
+
+  if (!value) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  if (
+    typeof item.paragraph_index === 'number' &&
+    item.paragraph_index >= 0 &&
+    item.paragraph_index < paragraphTexts.length
+  ) {
+    const paragraphText = paragraphTexts[item.paragraph_index] ?? '';
+    const paragraphOffset = paragraphText.indexOf(value);
+
+    if (paragraphOffset >= 0) {
+      return item.paragraph_index * 1_000_000 + paragraphOffset;
+    }
+  }
+
+  const directOffset = fullText.indexOf(value);
+
+  return directOffset >= 0 ? directOffset : Number.MAX_SAFE_INTEGER;
+}
+
+function sortItemsByDocumentPosition(
+  items: EditableExtractionItem[],
+  paragraphTexts: string[],
+  fullText: string,
+) {
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      offset: getItemDocumentOffset(item, paragraphTexts, fullText),
+    }))
+    .sort((left, right) => {
+      if (left.offset !== right.offset) {
+        return left.offset - right.offset;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
 function buildStructuredParagraphIndexMap(
   rawParagraphTexts: string[],
   structuredParagraphTexts: string[],
@@ -837,7 +887,7 @@ function resolveStructuredPreviewItems(
     structuredParagraphTexts,
   );
 
-  return items.flatMap((item) => {
+  const resolvedItems = items.flatMap((item) => {
     const originalValue = item.original_value.trim();
     const mappedParagraphIndex =
       typeof item.paragraph_index === 'number'
@@ -882,13 +932,20 @@ function resolveStructuredPreviewItems(
 
     return [];
   });
+
+  return sortItemsByDocumentPosition(
+    resolvedItems,
+    structuredParagraphTexts,
+    structuredParagraphTexts.join('\n\n'),
+  );
 }
 
 function filterPlainPreviewItems(
   uploadText: string,
   items: EditableExtractionItem[],
 ) {
-  return items.filter((item) => {
+  const paragraphTexts = extractParagraphTextsFromUploadText(uploadText);
+  const filteredItems = items.filter((item) => {
     const originalValue = item.original_value.trim();
 
     if (!originalValue) {
@@ -897,6 +954,8 @@ function filterPlainPreviewItems(
 
     return uploadText.includes(originalValue);
   });
+
+  return sortItemsByDocumentPosition(filteredItems, paragraphTexts, uploadText);
 }
 
 function parseSlotItemIdentity(item: EditableExtractionItem) {
