@@ -45,7 +45,12 @@ export const templatePdfEvidenceMatchSchema = z.object({
   bbox: templatePdfEvidenceBboxSchema.nullable().optional(),
   evidence_text: z.string(),
   confidence: z.number().min(0).max(1),
-  match_type: z.enum(['normalized_exact', 'raw_contains', 'vision_bbox']),
+  match_type: z.enum([
+    'normalized_exact',
+    'raw_contains',
+    'vision_bbox',
+    'manual_bbox',
+  ]),
 });
 
 export const templatePdfEvidenceResultSchema = z.object({

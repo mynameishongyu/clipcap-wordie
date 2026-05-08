@@ -24,11 +24,13 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent,
   type ReactNode,
 } from 'react';
 import type {
   ExtractionItem,
   ExtractionParagraph,
+  TemplatePdfEvidenceResult,
 } from '@/src/app/api/types/template-slot-extraction';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
@@ -49,6 +51,30 @@ import type {
 interface EditableExtractionItem extends ExtractionItem {
   id: string;
   paragraphTitle: string;
+}
+
+type PdfEvidenceMatch = TemplatePdfEvidenceResult['matches'][number];
+
+interface PdfBbox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface PdfDragState {
+  pageNumber: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+}
+
+interface PdfLocationEditState {
+  itemId: string;
+  draftPageNumber: number | null;
+  draftBbox: PdfBbox | null;
+  drag: PdfDragState | null;
 }
 
 interface SlotReviewWorkspaceState {
@@ -871,6 +897,49 @@ function filterPlainPreviewItems(
   });
 }
 
+function parseSlotItemIdentity(item: EditableExtractionItem) {
+  const [paragraphResultIndexRaw, itemIndexRaw, sequenceRaw] =
+    item.id.split('-');
+  const paragraphResultIndex = Number(paragraphResultIndexRaw);
+  const itemIndex = Number(itemIndexRaw);
+  const sequence = Number(sequenceRaw);
+
+  if (
+    !Number.isInteger(paragraphResultIndex) ||
+    !Number.isInteger(itemIndex) ||
+    !Number.isInteger(sequence)
+  ) {
+    return null;
+  }
+
+  return {
+    paragraphResultIndex,
+    itemIndex,
+    sequence,
+  };
+}
+
+function isPdfEvidenceMatchForItem(
+  match: PdfEvidenceMatch,
+  item: EditableExtractionItem,
+) {
+  const identity = parseSlotItemIdentity(item);
+
+  if (
+    identity &&
+    match.paragraph_result_index === identity.paragraphResultIndex &&
+    match.item_index === identity.itemIndex &&
+    match.sequence === identity.sequence
+  ) {
+    return true;
+  }
+
+  return (
+    normalizeSlotCategoryLabel(match.field_category) === item.field_category &&
+    match.original_value.trim() === item.original_value.trim()
+  );
+}
+
 function findPdfEvidenceMatchForItem(
   item: EditableExtractionItem | null,
   payload: SlotReviewSessionPayload | null,
@@ -879,35 +948,79 @@ function findPdfEvidenceMatchForItem(
     return null;
   }
 
-  const [paragraphResultIndexRaw, itemIndexRaw, sequenceRaw] =
-    item.id.split('-');
-  const paragraphResultIndex = Number(paragraphResultIndexRaw);
-  const itemIndex = Number(itemIndexRaw);
-  const sequence = Number(sequenceRaw);
-  const keyedMatch =
-    Number.isInteger(paragraphResultIndex) &&
-    Number.isInteger(itemIndex) &&
-    Number.isInteger(sequence)
-      ? payload.pdfEvidence.matches.find(
-          (match) =>
-            match.paragraph_result_index === paragraphResultIndex &&
-            match.item_index === itemIndex &&
-            match.sequence === sequence,
-        )
-      : null;
-
-  if (keyedMatch) {
-    return keyedMatch;
-  }
-
   return (
-    payload.pdfEvidence.matches.find(
-      (match) =>
-        normalizeSlotCategoryLabel(match.field_category) ===
-          item.field_category &&
-        match.original_value.trim() === item.original_value.trim(),
+    payload.pdfEvidence.matches.find((match) =>
+      isPdfEvidenceMatchForItem(match, item),
     ) ?? null
   );
+}
+
+function clampPdfCoordinate(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function buildPdfBboxFromPoints(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+): PdfBbox {
+  const x = Math.min(startX, currentX);
+  const y = Math.min(startY, currentY);
+  const width = Math.abs(currentX - startX);
+  const height = Math.abs(currentY - startY);
+
+  return {
+    x: clampPdfCoordinate(x),
+    y: clampPdfCoordinate(y),
+    width: clampPdfCoordinate(width),
+    height: clampPdfCoordinate(height),
+  };
+}
+
+function getNormalizedPdfPointerPosition(
+  event: MouseEvent<HTMLElement>,
+) {
+  const rect = event.currentTarget.getBoundingClientRect();
+
+  return {
+    x: clampPdfCoordinate((event.clientX - rect.left) / rect.width),
+    y: clampPdfCoordinate((event.clientY - rect.top) / rect.height),
+  };
+}
+
+function buildManualPdfEvidenceMatch(input: {
+  item: EditableExtractionItem;
+  pageNumber: number;
+  bbox: PdfBbox;
+  existingMatch: PdfEvidenceMatch | null;
+}): PdfEvidenceMatch {
+  const identity = parseSlotItemIdentity(input.item);
+
+  return {
+    paragraph_result_index:
+      input.existingMatch?.paragraph_result_index ??
+      identity?.paragraphResultIndex ??
+      0,
+    item_index: input.existingMatch?.item_index ?? identity?.itemIndex ?? 0,
+    sequence: input.item.sequence,
+    paragraph_index: input.item.paragraph_index ?? null,
+    field_category: input.item.field_category,
+    original_value: input.item.original_value,
+    page_number: input.pageNumber,
+    bbox: input.bbox,
+    evidence_text: input.item.original_value || '用户手动框选定位',
+    confidence: 1,
+    match_type: 'manual_bbox',
+  };
+}
+
+function persistSlotReviewPayloadToSession(payload: SlotReviewSessionPayload) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.sessionStorage.setItem(SLOT_REVIEW_SESSION_KEY, JSON.stringify(payload));
 }
 
 function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
@@ -982,8 +1095,12 @@ export function SlotReviewWorkspace() {
       pendingNewItemParagraphIndex: null,
       pendingNewItemMeaning: '',
     });
+  const [pdfLocationEditState, setPdfLocationEditState] =
+    useState<PdfLocationEditState | null>(null);
   const documentViewportRef = useRef<HTMLDivElement | null>(null);
   const documentContentRef = useRef<HTMLDivElement | null>(null);
+  const pdfViewportRef = useRef<HTMLDivElement | null>(null);
+  const pdfPageRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const {
     payload,
     items,
@@ -1164,15 +1281,6 @@ export function SlotReviewWorkspace() {
     () => findPdfEvidenceMatchForItem(activeItem, payload),
     [activeItem, payload],
   );
-  const activeEvidencePage = useMemo(
-    () =>
-      activeEvidenceMatch
-        ? (payload?.pdfEvidence?.pages.find(
-            (page) => page.pageNumber === activeEvidenceMatch.page_number,
-          ) ?? null)
-        : null,
-    [activeEvidenceMatch, payload],
-  );
   const editingItem = useMemo(
     () => visibleItems.find((item) => item.id === editingItemId) ?? null,
     [editingItemId, visibleItems],
@@ -1180,6 +1288,46 @@ export function SlotReviewWorkspace() {
   const pendingEditingSelection = editingItemId
     ? (pendingSelectionByItemId[editingItemId] ?? '')
     : '';
+
+  const scrollPdfPageIntoView = (
+    pageNumber: number,
+    bbox?: PdfBbox | null,
+  ) => {
+    const viewport = pdfViewportRef.current;
+    const targetPage = pdfPageRefs.current[pageNumber];
+
+    if (!viewport || !targetPage) {
+      targetPage?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+      return;
+    }
+
+    const bboxCenterOffset = bbox
+      ? targetPage.offsetHeight * (bbox.y + bbox.height / 2)
+      : targetPage.offsetHeight / 2;
+    const nextScrollTop = Math.max(
+      0,
+      targetPage.offsetTop + bboxCenterOffset - viewport.clientHeight / 2,
+    );
+
+    viewport.scrollTo({
+      top: nextScrollTop,
+      behavior: 'smooth',
+    });
+  };
+
+  useEffect(() => {
+    if (!activeEvidenceMatch) {
+      return;
+    }
+
+    scrollPdfPageIntoView(
+      activeEvidenceMatch.page_number,
+      activeEvidenceMatch.bbox,
+    );
+  }, [activeEvidenceMatch]);
 
   const handleDocumentMouseUp = () => {
     if ((!editingItemId && !isAddingItem) || !documentContentRef.current) {
@@ -1241,6 +1389,196 @@ export function SlotReviewWorkspace() {
       message: isAddingItem
         ? '当前只是暂存新槽位的候选值，填写槽位含义后点击“保存新增”才会真正加入模板。'
         : '当前只是暂存候选值，点击槽位上的“保存”后才会真正更新槽位抽取值。',
+    });
+  };
+
+  const handleStartPdfLocationEdit = () => {
+    if (!payload?.pdfEvidence) {
+      notifications.show({
+        color: 'yellow',
+        title: '当前没有 PDF 证据',
+        message: '只上传 DOCX 的模板没有 PDF 页图，无法调整 PDF 定位。',
+      });
+      return;
+    }
+
+    if (!activeItem) {
+      notifications.show({
+        color: 'yellow',
+        title: '请先选择槽位',
+        message: '请先在右侧槽位清单中选择需要调整 PDF 定位的槽位。',
+      });
+      return;
+    }
+
+    setPdfLocationEditState({
+      itemId: activeItem.id,
+      draftPageNumber: activeEvidenceMatch?.page_number ?? null,
+      draftBbox: activeEvidenceMatch?.bbox ?? null,
+      drag: null,
+    });
+
+    const targetPageNumber =
+      activeEvidenceMatch?.page_number ?? payload.pdfEvidence.pages[0]?.pageNumber;
+
+    if (targetPageNumber) {
+      window.setTimeout(() => {
+        scrollPdfPageIntoView(targetPageNumber, activeEvidenceMatch?.bbox);
+      }, 0);
+    }
+  };
+
+  const handlePdfPageMouseDown = (
+    event: MouseEvent<HTMLElement>,
+    pageNumber: number,
+  ) => {
+    if (!pdfLocationEditState || pdfLocationEditState.itemId !== activeItemId) {
+      return;
+    }
+
+    event.preventDefault();
+    const startPoint = getNormalizedPdfPointerPosition(event);
+
+    setPdfLocationEditState((currentState) =>
+      currentState
+        ? {
+            ...currentState,
+            draftPageNumber: pageNumber,
+            draftBbox: buildPdfBboxFromPoints(
+              startPoint.x,
+              startPoint.y,
+              startPoint.x,
+              startPoint.y,
+            ),
+            drag: {
+              pageNumber,
+              startX: startPoint.x,
+              startY: startPoint.y,
+              currentX: startPoint.x,
+              currentY: startPoint.y,
+            },
+          }
+        : currentState,
+    );
+  };
+
+  const handlePdfPageMouseMove = (
+    event: MouseEvent<HTMLElement>,
+    pageNumber: number,
+  ) => {
+    if (
+      !pdfLocationEditState?.drag ||
+      pdfLocationEditState.drag.pageNumber !== pageNumber
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextPoint = getNormalizedPdfPointerPosition(event);
+
+    setPdfLocationEditState((currentState) => {
+      if (!currentState?.drag || currentState.drag.pageNumber !== pageNumber) {
+        return currentState;
+      }
+
+      return {
+        ...currentState,
+        draftPageNumber: pageNumber,
+        draftBbox: buildPdfBboxFromPoints(
+          currentState.drag.startX,
+          currentState.drag.startY,
+          nextPoint.x,
+          nextPoint.y,
+        ),
+        drag: {
+          ...currentState.drag,
+          currentX: nextPoint.x,
+          currentY: nextPoint.y,
+        },
+      };
+    });
+  };
+
+  const handlePdfPageMouseUp = () => {
+    setPdfLocationEditState((currentState) =>
+      currentState ? { ...currentState, drag: null } : currentState,
+    );
+  };
+
+  const handleSavePdfLocationEdit = () => {
+    if (
+      !pdfLocationEditState ||
+      !pdfLocationEditState.draftPageNumber ||
+      !pdfLocationEditState.draftBbox ||
+      !activeItem
+    ) {
+      notifications.show({
+        color: 'yellow',
+        title: '请先在 PDF 上框选位置',
+        message: '进入调整模式后，请在任意 PDF 页面上拖拽画出槽位证据位置。',
+      });
+      return;
+    }
+
+    if (
+      pdfLocationEditState.draftBbox.width < 0.005 ||
+      pdfLocationEditState.draftBbox.height < 0.005
+    ) {
+      notifications.show({
+        color: 'yellow',
+        title: '框选范围太小',
+        message: '请拖拽出一个更清晰的框选范围后再保存。',
+      });
+      return;
+    }
+
+    setWorkspaceState((currentState) => {
+      if (!currentState.payload?.pdfEvidence) {
+        return currentState;
+      }
+
+      const currentItem =
+        currentState.items.find((item) => item.id === activeItem.id) ??
+        activeItem;
+      const existingMatch =
+        currentState.payload.pdfEvidence.matches.find((match) =>
+          isPdfEvidenceMatchForItem(match, currentItem),
+        ) ?? null;
+      const nextMatch = buildManualPdfEvidenceMatch({
+        item: currentItem,
+        pageNumber: pdfLocationEditState.draftPageNumber!,
+        bbox: pdfLocationEditState.draftBbox!,
+        existingMatch,
+      });
+      const didReplaceMatch = currentState.payload.pdfEvidence.matches.some(
+        (match) => isPdfEvidenceMatchForItem(match, currentItem),
+      );
+      const nextMatches = didReplaceMatch
+        ? currentState.payload.pdfEvidence.matches.map((match) =>
+            isPdfEvidenceMatchForItem(match, currentItem) ? nextMatch : match,
+          )
+        : [...currentState.payload.pdfEvidence.matches, nextMatch];
+      const nextPayload: SlotReviewSessionPayload = {
+        ...currentState.payload,
+        pdfEvidence: {
+          ...currentState.payload.pdfEvidence,
+          matches: nextMatches,
+        },
+      };
+
+      persistSlotReviewPayloadToSession(nextPayload);
+
+      return {
+        ...currentState,
+        payload: nextPayload,
+      };
+    });
+
+    setPdfLocationEditState(null);
+    notifications.show({
+      color: 'teal',
+      title: 'PDF 定位已更新',
+      message: '新的页码和框选位置已保存到当前槽位核查结果中。',
     });
   };
 
@@ -1325,13 +1663,6 @@ export function SlotReviewWorkspace() {
   }
 
   const pdfEvidencePages = payload.pdfEvidence?.pages ?? [];
-  const displayedEvidencePage =
-    activeEvidencePage ?? pdfEvidencePages[0] ?? null;
-  const displayedEvidenceMatch =
-    displayedEvidencePage &&
-    activeEvidenceMatch?.page_number === displayedEvidencePage.pageNumber
-      ? activeEvidenceMatch
-      : null;
   const docxPreviewDescription = isAddingItem
     ? '正在手动新增槽位。请先在左侧 DOCX 预览中框选一段连续文本作为槽位抽取值，再在右侧填写槽位含义并点击“保存新增”。'
     : editingItem
@@ -1431,7 +1762,7 @@ export function SlotReviewWorkspace() {
               {isAddingItem ? '取消新增槽位' : '手动新增槽位'}
             </Button>
             <ScrollArea
-              h={680}
+              h={560}
               offsetScrollbars
               scrollbarSize={8}
               type="always"
@@ -1601,6 +1932,7 @@ export function SlotReviewWorkspace() {
                           ...currentState,
                           activeItemId: item.id,
                         }));
+                        setPdfLocationEditState(null);
                       }}
                     >
                       <Stack gap="sm">
@@ -1839,7 +2171,7 @@ export function SlotReviewWorkspace() {
             withBorder
             style={{
               flex: '1 1 380px',
-              minWidth: 340,
+              minWidth: 320,
               order: 1,
               background: '#fffef9',
             }}
@@ -1852,7 +2184,7 @@ export function SlotReviewWorkspace() {
                 </Text>
               </div>
               <ScrollArea
-                h={680}
+                h={560}
                 offsetScrollbars
                 scrollbarSize={8}
                 type="always"
@@ -1905,8 +2237,8 @@ export function SlotReviewWorkspace() {
               radius="xl"
               withBorder
               style={{
-                flex: '1.25 1 460px',
-                minWidth: 360,
+                flex: '1 1 420px',
+                minWidth: 340,
                 order: 2,
                 background: '#fffaf0',
               }}
@@ -1917,106 +2249,228 @@ export function SlotReviewWorkspace() {
                     <Title order={4}>PDF 证据定位</Title>
                     <Text c="dimmed" mt={6} size="sm">
                       当前 PDF：{payload.pdfEvidence.pdfFileName}
-                      。选中右侧槽位后，这里会切换到视觉模型定位页并画出位置。
+                      。这里会展示所有上传页，选中槽位后自动滚动到对应页并高亮位置。
                     </Text>
                   </div>
-                  {displayedEvidencePage ? (
-                    <Badge color="blue" radius="sm" variant="filled">
-                      PDF 第 {displayedEvidencePage.pageNumber} 页
-                    </Badge>
-                  ) : null}
+                  <Group gap="xs" justify="flex-end">
+                    {activeEvidenceMatch ? (
+                      <Badge color="blue" radius="sm" variant="filled">
+                        PDF 第 {activeEvidenceMatch.page_number} 页
+                      </Badge>
+                    ) : null}
+                    {pdfLocationEditState ? (
+                      <>
+                        <Badge color="orange" radius="sm" variant="light">
+                          调整定位中
+                        </Badge>
+                        <Button
+                          color="teal"
+                          disabled={!pdfLocationEditState.draftBbox}
+                          radius="xl"
+                          size="compact-sm"
+                          variant="filled"
+                          onClick={handleSavePdfLocationEdit}
+                        >
+                          保存定位
+                        </Button>
+                        <Button
+                          color="gray"
+                          radius="xl"
+                          size="compact-sm"
+                          variant="subtle"
+                          onClick={() => setPdfLocationEditState(null)}
+                        >
+                          取消
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        color="orange"
+                        disabled={!activeItem}
+                        radius="xl"
+                        size="compact-sm"
+                        variant="light"
+                        onClick={handleStartPdfLocationEdit}
+                      >
+                        调整当前槽位定位
+                      </Button>
+                    )}
+                  </Group>
                 </Group>
 
-                {displayedEvidencePage ? (
+                {pdfLocationEditState ? (
+                  <Paper
+                    p="sm"
+                    radius="lg"
+                    style={{
+                      background: '#fff8e8',
+                      border: '1px solid #ffe0a3',
+                    }}
+                  >
+                    <Text c="orange" size="sm">
+                      请在正确的 PDF 页面上拖拽画框。保存后会把当前槽位关联到该页和新的框选位置。
+                    </Text>
+                  </Paper>
+                ) : null}
+
+                {pdfEvidencePages.length > 0 ? (
                   <Stack gap="sm">
                     <ScrollArea
-                      h={680}
+                      h={560}
                       offsetScrollbars
                       scrollbarSize={8}
                       type="always"
+                      viewportRef={pdfViewportRef}
                     >
-                      <Box
-                        style={{
-                          position: 'relative',
-                          display: 'flex',
-                          justifyContent: 'center',
-                          minWidth: 720,
-                          padding: 18,
-                          background: '#101514',
-                          borderRadius: 18,
-                        }}
-                      >
-                        <Box
-                          style={{
-                            position: 'relative',
-                            width: '100%',
-                            maxWidth: 920,
-                          }}
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            alt={`${payload.pdfEvidence.pdfFileName} 第 ${displayedEvidencePage.pageNumber} 页`}
-                            src={
-                              displayedEvidencePage.imageUrl ??
-                              displayedEvidencePage.imageDataUrl
-                            }
-                            style={{
-                              width: '100%',
-                              height: 'auto',
-                              display: 'block',
-                              borderRadius: 12,
-                              boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
-                            }}
-                          />
-                          {displayedEvidenceMatch?.bbox ? (
+                      <Stack gap="md">
+                        {pdfEvidencePages.map((page) => {
+                          const savedMatch =
+                            activeEvidenceMatch?.page_number ===
+                            page.pageNumber
+                              ? activeEvidenceMatch
+                              : null;
+                          const draftBbox =
+                            pdfLocationEditState?.itemId === activeItemId &&
+                            pdfLocationEditState.draftPageNumber ===
+                              page.pageNumber
+                              ? pdfLocationEditState.draftBbox
+                              : null;
+                          const visibleBbox = draftBbox ?? savedMatch?.bbox;
+                          const isEditingPage =
+                            Boolean(pdfLocationEditState) &&
+                            pdfLocationEditState?.itemId === activeItemId;
+
+                          return (
                             <Box
-                              style={{
-                                position: 'absolute',
-                                left: `${displayedEvidenceMatch.bbox.x * 100}%`,
-                                top: `${displayedEvidenceMatch.bbox.y * 100}%`,
-                                width: `${displayedEvidenceMatch.bbox.width * 100}%`,
-                                height: `${displayedEvidenceMatch.bbox.height * 100}%`,
-                                minWidth: 18,
-                                minHeight: 14,
-                                border: '3px solid #f59f00',
-                                borderRadius: 999,
-                                background: 'rgba(255, 209, 102, 0.18)',
-                                boxShadow:
-                                  '0 0 0 6px rgba(245, 159, 0, 0.14), 0 0 26px rgba(245, 159, 0, 0.32)',
-                                pointerEvents: 'none',
+                              key={page.pageNumber}
+                              ref={(node) => {
+                                pdfPageRefs.current[page.pageNumber] = node;
                               }}
-                            />
-                          ) : displayedEvidenceMatch ? (
-                            <Box
                               style={{
-                                position: 'absolute',
-                                top: 12,
-                                right: 12,
-                                display: 'grid',
-                                placeItems: 'center',
-                                width: 148,
-                                height: 86,
-                                border: '3px solid #f59f00',
-                                borderRadius: 999,
-                                background: 'rgba(255, 209, 102, 0.18)',
-                                boxShadow: '0 0 0 6px rgba(245, 159, 0, 0.12)',
-                                color: '#fff6dc',
-                                textAlign: 'center',
-                                pointerEvents: 'none',
+                                position: 'relative',
+                                display: 'flex',
+                                justifyContent: 'center',
+                                minWidth: 560,
+                                padding: 14,
+                                background: '#101514',
+                                borderRadius: 18,
                               }}
                             >
-                              <Text fw={800} size="xs">
-                                关联槽位
-                                <br />
-                                {displayedEvidenceMatch.field_category}
-                              </Text>
+                              <Badge
+                                color={
+                                  savedMatch || draftBbox ? 'blue' : 'gray'
+                                }
+                                radius="sm"
+                                style={{
+                                  position: 'absolute',
+                                  left: 18,
+                                  top: 18,
+                                  zIndex: 3,
+                                }}
+                                variant="filled"
+                              >
+                                PDF 第 {page.pageNumber} 页
+                              </Badge>
+                              <Box
+                                style={{
+                                  position: 'relative',
+                                  width: '100%',
+                                  maxWidth: 760,
+                                  cursor: isEditingPage
+                                    ? 'crosshair'
+                                    : undefined,
+                                  userSelect: isEditingPage
+                                    ? 'none'
+                                    : undefined,
+                                }}
+                                onMouseDown={(event) =>
+                                  handlePdfPageMouseDown(
+                                    event,
+                                    page.pageNumber,
+                                  )
+                                }
+                                onMouseLeave={handlePdfPageMouseUp}
+                                onMouseMove={(event) =>
+                                  handlePdfPageMouseMove(
+                                    event,
+                                    page.pageNumber,
+                                  )
+                                }
+                                onMouseUp={handlePdfPageMouseUp}
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  alt={`${payload.pdfEvidence?.pdfFileName ?? 'PDF'} 第 ${page.pageNumber} 页`}
+                                  draggable={false}
+                                  src={page.imageUrl ?? page.imageDataUrl}
+                                  style={{
+                                    width: '100%',
+                                    height: 'auto',
+                                    display: 'block',
+                                    borderRadius: 12,
+                                    boxShadow:
+                                      '0 18px 50px rgba(0, 0, 0, 0.32)',
+                                    pointerEvents: 'none',
+                                  }}
+                                />
+                                {visibleBbox ? (
+                                  <Box
+                                    style={{
+                                      position: 'absolute',
+                                      left: `${visibleBbox.x * 100}%`,
+                                      top: `${visibleBbox.y * 100}%`,
+                                      width: `${visibleBbox.width * 100}%`,
+                                      height: `${visibleBbox.height * 100}%`,
+                                      minWidth: 18,
+                                      minHeight: 14,
+                                      border: draftBbox
+                                        ? '3px dashed #12b886'
+                                        : '3px solid #f59f00',
+                                      borderRadius: 999,
+                                      background: draftBbox
+                                        ? 'rgba(18, 184, 134, 0.16)'
+                                        : 'rgba(255, 209, 102, 0.18)',
+                                      boxShadow: draftBbox
+                                        ? '0 0 0 6px rgba(18, 184, 134, 0.12), 0 0 26px rgba(18, 184, 134, 0.28)'
+                                        : '0 0 0 6px rgba(245, 159, 0, 0.14), 0 0 26px rgba(245, 159, 0, 0.32)',
+                                      pointerEvents: 'none',
+                                    }}
+                                  />
+                                ) : savedMatch ? (
+                                  <Box
+                                    style={{
+                                      position: 'absolute',
+                                      top: 12,
+                                      right: 12,
+                                      display: 'grid',
+                                      placeItems: 'center',
+                                      width: 148,
+                                      height: 86,
+                                      border: '3px solid #f59f00',
+                                      borderRadius: 999,
+                                      background: 'rgba(255, 209, 102, 0.18)',
+                                      boxShadow:
+                                        '0 0 0 6px rgba(245, 159, 0, 0.12)',
+                                      color: '#fff6dc',
+                                      textAlign: 'center',
+                                      pointerEvents: 'none',
+                                    }}
+                                  >
+                                    <Text fw={800} size="xs">
+                                      关联槽位
+                                      <br />
+                                      {savedMatch.field_category}
+                                    </Text>
+                                  </Box>
+                                ) : null}
+                              </Box>
                             </Box>
-                          ) : null}
-                        </Box>
-                      </Box>
+                          );
+                        })}
+                      </Stack>
                     </ScrollArea>
 
-                    {displayedEvidenceMatch ? (
+                    {activeEvidenceMatch ? (
                       <Paper
                         p="md"
                         radius="lg"
@@ -2029,12 +2483,12 @@ export function SlotReviewWorkspace() {
                           视觉定位证据
                         </Text>
                         <Text mt={6} size="sm">
-                          {displayedEvidenceMatch.evidence_text ||
+                          {activeEvidenceMatch.evidence_text ||
                             '该页已定位到槽位值，但视觉模型未返回可展示的上下文片段。'}
                         </Text>
                         <Text c="dimmed" mt={6} size="xs">
                           置信度：
-                          {Math.round(displayedEvidenceMatch.confidence * 100)}
+                          {Math.round(activeEvidenceMatch.confidence * 100)}
                           %
                         </Text>
                       </Paper>

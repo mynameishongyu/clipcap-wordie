@@ -252,20 +252,6 @@ async function preparePdfVisionPageAssets(file: File) {
   return uploadedAssets;
 }
 
-function getLatestProcessingTraceLine(trace: string) {
-  const latestLine = trace
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .at(-1);
-
-  if (!latestLine) {
-    return '';
-  }
-
-  return latestLine.replace(/^\[[^\]]+\]\s*/, '').slice(0, 180);
-}
-
 export function HomeHero() {
   const [prompt, setPrompt] = useState('');
   const [selectedDocxName, setSelectedDocxName] = useState('');
@@ -368,13 +354,6 @@ export function HomeHero() {
         ? `${activeExtractionTask.completed_paragraphs}/${activeExtractionTask.total_paragraphs} 段`
         : '正在准备段落';
 
-    const latestTraceLine = getLatestProcessingTraceLine(
-      activeExtractionTask.processing_trace,
-    );
-    const stageText = latestTraceLine
-      ? `当前阶段：${latestTraceLine}`
-      : `当前进度 ${progressText}`;
-
     notifications.update({
       id: 'template-slot-extraction',
       loading: true,
@@ -382,7 +361,7 @@ export function HomeHero() {
       withCloseButton: false,
       color: 'teal',
       title: '正在处理模板',
-      message: `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒，DOCX 进度 ${progressText}。${stageText}。`,
+      message: `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒，DOCX 进度 ${progressText}。`,
     });
   }, [activeExtractionTask, isProcessingTemplate, processingSeconds]);
 
