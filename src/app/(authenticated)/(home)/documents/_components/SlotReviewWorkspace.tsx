@@ -1906,11 +1906,12 @@ export function SlotReviewWorkspace() {
               'linear-gradient(180deg, rgba(37, 37, 37, 0.98), rgba(29, 29, 29, 0.98))',
             borderColor: 'rgba(255, 255, 255, 0.14)',
             flex: '0 0 340px',
+            height: 'calc(100vh - 210px)',
             minWidth: 320,
             order: 3,
           }}
         >
-          <Stack gap="lg">
+          <Stack gap="lg" h="100%">
             <Group align="flex-start" justify="space-between">
               <div>
                 <Title c="#fffaf0" order={4}>
@@ -1965,9 +1966,9 @@ export function SlotReviewWorkspace() {
               {isAddingItem ? '取消新增槽位' : '手动新增槽位'}
             </Button>
             <ScrollArea
-              h={560}
               offsetScrollbars
               scrollbarSize={8}
+              style={{ flex: 1 }}
               type="always"
             >
               <Stack gap="md">
