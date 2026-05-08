@@ -668,6 +668,10 @@ async function locateSlotsInPageBatch(input: {
             'For phone numbers, compare digit sequences after removing spaces, hyphens, parentheses, and country-code formatting. Do not return a different phone number just because it is near a phone label.',
             'For ID numbers, dates, and amounts, the visible value must match the input value after normalizing common formatting such as spaces, commas, Chinese date units, and currency symbols.',
             'If the page contains the same label but a different value, omit that slot from matches.',
+            'Spatial consistency is mandatory: the bbox must physically surround the exact visible text reported in evidence_text.',
+            'Do not return a correct evidence_text with a bbox around another nearby value, another phone number, another signature block, a stamp, a label, or blank space.',
+            'Before returning a match, visually re-check the proposed bbox: if the text inside the bbox is not the same value as evidence_text/original_value, omit the match.',
+            'If you can read the value somewhere on the page but cannot confidently draw a tight bbox around that same visible text, omit the match instead of guessing a bbox.',
             'The bbox must enclose only the slot value text itself. Do not include field labels such as name, gender, birth date, address, amount, phone, ID number, or nearby form labels.',
             'Do not include adjacent rows, adjacent columns, explanatory text, table borders, stamps, photos, icons, or blank whitespace unless the value text itself visually requires it.',
             'For each match, return the tightest practical bounding box around the visible value text, not around the entire row, card, table cell, or page.',
@@ -683,6 +687,8 @@ async function locateSlotsInPageBatch(input: {
             'For a birth date, box only the date value, not the "出生" label or the address line below it.',
             'For an address, box only the address text, not the "住址" label, birth date line, ID number line, or photo.',
             'For original_value "18803308383", never return evidence_text "0311-66568703" because it is a different phone number.',
+            'For original_value "18103108407", never return evidence_text "18103108407" with a bbox around the left-side company phone/stamp area if the visible number is actually on the right-side person phone area.',
+            'For pages with multiple phone labels, the bbox must cover the exact phone number characters, not merely the nearest phone label or a different phone line.',
           ],
           slots: input.slots.map((slot) => ({
             slot_key: slot.slot_key,
@@ -737,7 +743,7 @@ async function locateSlotsInPageBatch(input: {
             {
               role: 'system',
               content:
-                'You are a precise visual document layout locator. Return compact valid JSON only, with no markdown or explanations. Locate exact visible slot values in scanned PDF page images and provide tight normalized bounding boxes around only the value text.',
+                'You are a precise visual document layout locator. Return compact valid JSON only, with no markdown or explanations. Locate exact visible slot values in scanned PDF page images and provide tight normalized bounding boxes around the same visible text reported in evidence_text. If bbox and evidence_text are not spatially the same text, omit the match.',
             },
             {
               role: 'user',

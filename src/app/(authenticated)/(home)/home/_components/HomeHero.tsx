@@ -345,9 +345,11 @@ export function HomeHero() {
   }, [isProcessingTemplate]);
 
   useEffect(() => {
-    if (!isProcessingTemplate || !activeExtractionTask) {
+    if (!isProcessingTemplate) {
       return;
     }
+
+    const isCreatingExtractionTask = !activeExtractionTask;
 
     notifications.update({
       id: 'template-slot-extraction',
@@ -355,10 +357,19 @@ export function HomeHero() {
       autoClose: false,
       withCloseButton: false,
       color: 'teal',
-      title: '正在处理模板',
-      message: `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒。`,
+      title: isCreatingExtractionTask ? '正在创建抽取任务' : '正在处理模板',
+      message: isCreatingExtractionTask
+        ? selectedPdfFile
+          ? `模板与扫描 PDF 已上传，正在准备视觉定位页图并创建槽位抽取任务，请稍候。已处理 ${processingSeconds} 秒。`
+          : `模板已上传，正在创建槽位抽取任务，请稍候。已处理 ${processingSeconds} 秒。`
+        : `正在调用 LLM/视觉模型处理槽位，请稍候。已处理 ${processingSeconds} 秒。`,
     });
-  }, [activeExtractionTask, isProcessingTemplate, processingSeconds]);
+  }, [
+    activeExtractionTask,
+    isProcessingTemplate,
+    processingSeconds,
+    selectedPdfFile,
+  ]);
 
   const requireRegistration = (sourceAction: string, onReady?: () => void) => {
     if (sourceAction.includes('DOCX')) {
