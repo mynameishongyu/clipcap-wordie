@@ -888,7 +888,7 @@ export function HomeHero() {
 
             <Group justify="space-between" align="flex-end" wrap="wrap">
               <Stack gap={8}>
-                <Group gap="sm">
+                <Group align="center" gap="sm" wrap="wrap">
                   <Button
                     component="label"
                     htmlFor="home-docx-upload-input"
@@ -907,16 +907,18 @@ export function HomeHero() {
                   >
                     上传扫描 PDF 证据
                   </Button>
+                  <Button
+                    color="teal"
+                    disabled={!canStartSlotDetection || isProcessingTemplate}
+                    loading={isProcessingTemplate}
+                    radius="xl"
+                    size="lg"
+                    onClick={handleStartSlotDetection}
+                  >
+                    开始识别槽位
+                  </Button>
                 </Group>
 
-                <Text c="#7a7365" size="sm" style={{ display: 'none' }}>
-                  请同时上传 DOCX 模板和扫描 PDF，系统会先抽取 DOCX
-                  槽位，再把槽位值关联到 PDF 页面。
-                </Text>
-                <Text c="#7a7365" size="sm">
-                  只上传 DOCX 时，系统会抽取模板槽位并生成槽位含义；同时上传扫描 PDF
-                  时，会额外把槽位值关联到 PDF 页面位置。
-                </Text>
                 {selectedDocxName ? (
                   <Text size="sm">已选择 DOCX：{selectedDocxName}</Text>
                 ) : null}
@@ -925,16 +927,6 @@ export function HomeHero() {
                 ) : null}
               </Stack>
 
-              <Button
-                color="teal"
-                disabled={!canStartSlotDetection || isProcessingTemplate}
-                loading={isProcessingTemplate}
-                radius="xl"
-                size="lg"
-                onClick={handleStartSlotDetection}
-              >
-                开始识别槽位
-              </Button>
             </Group>
           </Stack>
         </Paper>
