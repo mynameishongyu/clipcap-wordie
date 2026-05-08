@@ -2173,6 +2173,36 @@ export function SlotReviewWorkspace() {
                             {item.field_category}
                           </Badge>
                           <Group gap="xs">
+                            {payload.pdfEvidence ? (
+                              <Button
+                                color="orange"
+                                disabled={isLockedByOtherEditing}
+                                radius="xl"
+                                size="compact-xs"
+                                variant={
+                                  pdfLocationEditState?.itemId === item.id
+                                    ? 'filled'
+                                    : 'subtle'
+                                }
+                                onClick={(event) => {
+                                  event.stopPropagation();
+
+                                  if (isLockedByOtherEditing) {
+                                    notifications.show({
+                                      color: 'yellow',
+                                      title: '请先完成当前槽位修改',
+                                      message:
+                                        '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
+                                    });
+                                    return;
+                                  }
+
+                                  handleStartPdfLocationEdit(item);
+                                }}
+                              >
+                                调定位
+                              </Button>
+                            ) : null}
                             <Button
                               color={isEditing ? 'yellow' : 'gray'}
                               disabled={isLockedByOtherEditing}
@@ -2380,79 +2410,19 @@ export function SlotReviewWorkspace() {
                           }}
                         />
                         {evidenceMatch ? (
-                          <Group gap={6} justify="space-between">
-                            <Group gap={6}>
-                              <Badge color="blue" radius="sm" variant="light">
-                                PDF 第 {evidenceMatch.page_number} 页
-                              </Badge>
-                              <Text c="dimmed" size="xs">
-                                证据置信度：
-                                {Math.round(evidenceMatch.confidence * 100)}%
-                              </Text>
-                            </Group>
-                            <Button
-                              color="orange"
-                              disabled={isLockedByOtherEditing}
-                              radius="xl"
-                              size="compact-xs"
-                              variant={
-                                pdfLocationEditState?.itemId === item.id
-                                  ? 'filled'
-                                  : 'light'
-                              }
-                              onClick={(event) => {
-                                event.stopPropagation();
-
-                                if (isLockedByOtherEditing) {
-                                  notifications.show({
-                                    color: 'yellow',
-                                    title: '请先完成当前槽位修改',
-                                    message:
-                                      '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
-                                  });
-                                  return;
-                                }
-
-                                handleStartPdfLocationEdit(item);
-                              }}
-                            >
-                              调定位
-                            </Button>
+                          <Group gap={6}>
+                            <Badge color="blue" radius="sm" variant="light">
+                              PDF 第 {evidenceMatch.page_number} 页
+                            </Badge>
+                            <Text c="dimmed" size="xs">
+                              证据置信度：
+                              {Math.round(evidenceMatch.confidence * 100)}%
+                            </Text>
                           </Group>
                         ) : payload.pdfEvidence ? (
-                          <Group gap={6} justify="space-between">
-                            <Badge color="gray" radius="sm" variant="light">
-                              未定位 PDF
-                            </Badge>
-                            <Button
-                              color="orange"
-                              disabled={isLockedByOtherEditing}
-                              radius="xl"
-                              size="compact-xs"
-                              variant={
-                                pdfLocationEditState?.itemId === item.id
-                                  ? 'filled'
-                                  : 'light'
-                              }
-                              onClick={(event) => {
-                                event.stopPropagation();
-
-                                if (isLockedByOtherEditing) {
-                                  notifications.show({
-                                    color: 'yellow',
-                                    title: '请先完成当前槽位修改',
-                                    message:
-                                      '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
-                                  });
-                                  return;
-                                }
-
-                                handleStartPdfLocationEdit(item);
-                              }}
-                            >
-                              调定位
-                            </Button>
-                          </Group>
+                          <Badge color="gray" radius="sm" variant="light">
+                            未定位 PDF
+                          </Badge>
                         ) : null}
                         {isEditing ? (
                           <Text c="yellow" size="xs">
