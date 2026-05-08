@@ -530,6 +530,14 @@ export function HomeHero() {
         continue;
       }
 
+      if (
+        line.includes('[Template PDF Locate]') &&
+        line.includes('Rejected visual match')
+      ) {
+        browserProcessLog.warn(line);
+        continue;
+      }
+
       if (line.includes('[Template PDF Locate]')) {
         browserProcessLog.info(line);
         continue;

@@ -364,6 +364,238 @@ function normalizeConfidence(value: unknown) {
   return clamp01(numericValue);
 }
 
+function normalizeLooseText(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s,，。.:：;；、'"“”‘’()\[\]（）【】<>《》_\-—/\\]+/gu, '');
+}
+
+function normalizeDigits(value: string) {
+  return value.replace(/\D/gu, '');
+}
+
+function normalizeIdentityValue(value: string) {
+  return value.replace(/[^0-9x]/giu, '').toUpperCase();
+}
+
+function getPhoneVariants(value: string) {
+  const digits = normalizeDigits(value);
+  const variants = new Set<string>();
+
+  if (digits) {
+    variants.add(digits);
+  }
+
+  if (digits.startsWith('86') && digits.length > 11) {
+    variants.add(digits.slice(2));
+  }
+
+  if (digits.startsWith('0086') && digits.length > 13) {
+    variants.add(digits.slice(4));
+  }
+
+  return variants;
+}
+
+function hasMatchingVariant(leftValues: Set<string>, rightValues: Set<string>) {
+  for (const leftValue of leftValues) {
+    for (const rightValue of rightValues) {
+      if (
+        leftValue &&
+        rightValue &&
+        (leftValue.includes(rightValue) || rightValue.includes(leftValue))
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function getDateCandidates(value: string) {
+  const candidates = new Set<string>();
+  const datePattern = /(\d{4})\D{0,4}(\d{1,2})\D{0,4}(\d{1,2})/gu;
+  let match: RegExpExecArray | null;
+
+  while ((match = datePattern.exec(value)) !== null) {
+    const [, year, month, day] = match;
+    const numericMonth = Number(month);
+    const numericDay = Number(day);
+
+    if (
+      year &&
+      numericMonth >= 1 &&
+      numericMonth <= 12 &&
+      numericDay >= 1 &&
+      numericDay <= 31
+    ) {
+      candidates.add(
+        `${year}${String(numericMonth).padStart(2, '0')}${String(numericDay).padStart(2, '0')}`,
+      );
+    }
+  }
+
+  const digits = normalizeDigits(value);
+
+  for (let index = 0; index <= digits.length - 8; index += 1) {
+    const candidate = digits.slice(index, index + 8);
+    const year = Number(candidate.slice(0, 4));
+    const month = Number(candidate.slice(4, 6));
+    const day = Number(candidate.slice(6, 8));
+
+    if (year >= 1900 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      candidates.add(candidate);
+    }
+  }
+
+  return candidates;
+}
+
+function getAmountCandidates(value: string) {
+  const normalized = value.replace(/,/gu, '');
+  const candidates = new Set<string>();
+  const amountPattern = /-?\d+(?:\.\d+)?/gu;
+  let match: RegExpExecArray | null;
+
+  while ((match = amountPattern.exec(normalized)) !== null) {
+    const numericValue = Number(match[0]);
+
+    if (Number.isFinite(numericValue)) {
+      candidates.add(numericValue.toFixed(2));
+      candidates.add(String(numericValue));
+    }
+  }
+
+  return candidates;
+}
+
+function isDateLikeSlot(slot: TemplatePdfLocateSlot) {
+  const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
+
+  return (
+    /日期|时间|出生|签订|签署|截止|支付日|年月日/u.test(metadata) ||
+    getDateCandidates(slot.original_value).size > 0
+  );
+}
+
+function isIdentityLikeSlot(slot: TemplatePdfLocateSlot) {
+  const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
+  const identityValue = normalizeIdentityValue(slot.original_value);
+
+  return (
+    /身份证|证件|公民身份|身份号码|id\s*number/iu.test(metadata) ||
+    /^\d{15}$|^\d{17}[\dX]$/u.test(identityValue)
+  );
+}
+
+function isAmountLikeSlot(slot: TemplatePdfLocateSlot) {
+  const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
+
+  return (
+    /金额|本金|利息|违约金|手续费|费用|价格|价款|人民币|元|款/u.test(
+      metadata,
+    ) ||
+    /[¥￥元]|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d{2}/u.test(
+      slot.original_value,
+    )
+  );
+}
+
+function isPhoneLikeSlot(slot: TemplatePdfLocateSlot) {
+  const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
+  const digits = normalizeDigits(slot.original_value);
+
+  return (
+    /电话|手机|联系方式|联系电话|联系号码|phone|mobile|tel/iu.test(
+      metadata,
+    ) ||
+    (digits.length >= 7 && digits.length <= 13 && !isDateLikeSlot(slot))
+  );
+}
+
+function validateVisionEvidenceValue(input: {
+  slot: TemplatePdfLocateSlot;
+  candidate: VisionLocateCandidate;
+}) {
+  const evidenceText =
+    typeof input.candidate.evidence_text === 'string'
+      ? input.candidate.evidence_text.trim()
+      : '';
+  const originalValue = input.slot.original_value.trim();
+
+  if (!originalValue) {
+    return { valid: true, reason: 'empty_original_value' };
+  }
+
+  if (isIdentityLikeSlot(input.slot)) {
+    const originalIdentity = normalizeIdentityValue(originalValue);
+    const evidenceIdentity = normalizeIdentityValue(evidenceText);
+
+    return {
+      valid:
+        Boolean(evidenceIdentity) &&
+        (evidenceIdentity.includes(originalIdentity) ||
+          originalIdentity.includes(evidenceIdentity)),
+      reason: 'identity_value_mismatch',
+    };
+  }
+
+  if (isDateLikeSlot(input.slot)) {
+    const originalDates = getDateCandidates(originalValue);
+    const evidenceDates = getDateCandidates(evidenceText);
+
+    return {
+      valid: originalDates.size > 0 && hasMatchingVariant(originalDates, evidenceDates),
+      reason: 'date_value_mismatch',
+    };
+  }
+
+  if (isAmountLikeSlot(input.slot)) {
+    const originalAmounts = getAmountCandidates(originalValue);
+    const evidenceAmounts = getAmountCandidates(evidenceText);
+
+    return {
+      valid:
+        originalAmounts.size > 0 &&
+        hasMatchingVariant(originalAmounts, evidenceAmounts),
+      reason: 'amount_value_mismatch',
+    };
+  }
+
+  if (isPhoneLikeSlot(input.slot)) {
+    const originalPhones = getPhoneVariants(originalValue);
+    const evidencePhones = getPhoneVariants(evidenceText);
+
+    return {
+      valid:
+        originalPhones.size > 0 &&
+        hasMatchingVariant(originalPhones, evidencePhones),
+      reason: 'phone_digits_mismatch',
+    };
+  }
+
+  if (!evidenceText) {
+    return { valid: true, reason: 'empty_evidence_text_for_generic_slot' };
+  }
+
+  const normalizedOriginal = normalizeLooseText(originalValue);
+  const normalizedEvidence = normalizeLooseText(evidenceText);
+  const minimumUsefulEvidenceLength = Math.min(
+    normalizedOriginal.length,
+    Math.max(2, Math.ceil(normalizedOriginal.length * 0.35)),
+  );
+
+  return {
+    valid:
+      normalizedEvidence.includes(normalizedOriginal) ||
+      (normalizedEvidence.length >= minimumUsefulEvidenceLength &&
+        normalizedOriginal.includes(normalizedEvidence)),
+    reason: 'evidence_text_value_mismatch',
+  };
+}
+
 function buildLocateSlots(extractionResult: ExtractionParagraph[]) {
   return extractionResult.flatMap((paragraph, paragraphResultIndex) =>
     paragraph.items.flatMap((item, itemIndex) => {
@@ -432,6 +664,10 @@ async function locateSlotsInPageBatch(input: {
           ],
           strict_requirements: [
             'Only return a match when the visual page image contains the exact value or a visually equivalent value.',
+            'A matching field label or matching field type is not enough. The visible value must match original_value after normalizing formatting.',
+            'For phone numbers, compare digit sequences after removing spaces, hyphens, parentheses, and country-code formatting. Do not return a different phone number just because it is near a phone label.',
+            'For ID numbers, dates, and amounts, the visible value must match the input value after normalizing common formatting such as spaces, commas, Chinese date units, and currency symbols.',
+            'If the page contains the same label but a different value, omit that slot from matches.',
             'The bbox must enclose only the slot value text itself. Do not include field labels such as name, gender, birth date, address, amount, phone, ID number, or nearby form labels.',
             'Do not include adjacent rows, adjacent columns, explanatory text, table borders, stamps, photos, icons, or blank whitespace unless the value text itself visually requires it.',
             'For each match, return the tightest practical bounding box around the visible value text, not around the entire row, card, table cell, or page.',
@@ -446,6 +682,7 @@ async function locateSlotsInPageBatch(input: {
             'For a gender value, box only "男" or "女", not the "性别" label or the neighboring nationality value.',
             'For a birth date, box only the date value, not the "出生" label or the address line below it.',
             'For an address, box only the address text, not the "住址" label, birth date line, ID number line, or photo.',
+            'For original_value "18803308383", never return evidence_text "0311-66568703" because it is a different phone number.',
           ],
           slots: input.slots.map((slot) => ({
             slot_key: slot.slot_key,
@@ -597,7 +834,7 @@ export async function buildTemplatePdfEvidence(input: {
       continue;
     }
 
-    rawMatches.forEach((candidate) => {
+    for (const candidate of rawMatches) {
       const slotKey = String(candidate.slot_key ?? '');
       const slot = slotByKey.get(slotKey);
       const pageNumber = Number(candidate.page_number);
@@ -609,7 +846,18 @@ export async function buildTemplatePdfEvidence(input: {
         !pageNumberSet.has(pageNumber) ||
         !bbox
       ) {
-        return;
+        continue;
+      }
+
+      const validation = validateVisionEvidenceValue({ slot, candidate });
+
+      if (!validation.valid) {
+        const rejectedMessage =
+          `[Template PDF Locate] Rejected visual match for ${slot.field_category} because ${validation.reason}: ` +
+          `original="${slot.original_value}", evidence="${typeof candidate.evidence_text === 'string' ? candidate.evidence_text.trim() : ''}", page=${pageNumber}.`;
+        console.warn(rejectedMessage);
+        await input.onTrace?.({ message: rejectedMessage });
+        continue;
       }
 
       const nextMatch = {
@@ -633,7 +881,7 @@ export async function buildTemplatePdfEvidence(input: {
       if (!previousMatch || nextMatch.confidence > previousMatch.confidence) {
         matchesBySlotKey.set(slotKey, nextMatch);
       }
-    });
+    }
   }
 
   const matches = Array.from(matchesBySlotKey.values());
