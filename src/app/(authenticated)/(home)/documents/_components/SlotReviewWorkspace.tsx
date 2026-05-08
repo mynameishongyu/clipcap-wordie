@@ -2540,11 +2540,6 @@ export function SlotReviewWorkspace() {
                     </Text>
                   </div>
                   <Group gap="xs" justify="flex-end">
-                    {activeEvidenceMatch ? (
-                      <Badge color="blue" radius="sm" variant="filled">
-                        PDF 第 {activeEvidenceMatch.page_number} 页
-                      </Badge>
-                    ) : null}
                     {pdfLocationEditState ? (
                       <>
                         <Badge color="orange" radius="sm" variant="light">
