@@ -1509,7 +1509,7 @@ export function SlotReviewWorkspace() {
     });
   };
 
-  const handleStartPdfLocationEdit = () => {
+  const handleStartPdfLocationEdit = (targetItem = activeItem) => {
     if (!payload?.pdfEvidence) {
       notifications.show({
         color: 'yellow',
@@ -1519,7 +1519,7 @@ export function SlotReviewWorkspace() {
       return;
     }
 
-    if (!activeItem) {
+    if (!targetItem) {
       notifications.show({
         color: 'yellow',
         title: '请先选择槽位',
@@ -1528,19 +1528,29 @@ export function SlotReviewWorkspace() {
       return;
     }
 
+    const targetEvidenceMatch = findPdfEvidenceMatchForItem(
+      targetItem,
+      payload,
+    );
+
     setPdfLocationEditState({
-      itemId: activeItem.id,
-      draftPageNumber: activeEvidenceMatch?.page_number ?? null,
-      draftBbox: activeEvidenceMatch?.bbox ?? null,
+      itemId: targetItem.id,
+      draftPageNumber: targetEvidenceMatch?.page_number ?? null,
+      draftBbox: targetEvidenceMatch?.bbox ?? null,
       drag: null,
     });
+    setWorkspaceState((currentState) => ({
+      ...currentState,
+      activeItemId: targetItem.id,
+    }));
 
     const targetPageNumber =
-      activeEvidenceMatch?.page_number ?? payload.pdfEvidence.pages[0]?.pageNumber;
+      targetEvidenceMatch?.page_number ??
+      payload.pdfEvidence.pages[0]?.pageNumber;
 
     if (targetPageNumber) {
       window.setTimeout(() => {
-        scrollPdfPageIntoView(targetPageNumber, activeEvidenceMatch?.bbox);
+        scrollPdfPageIntoView(targetPageNumber, targetEvidenceMatch?.bbox);
       }, 0);
     }
   };
@@ -2311,14 +2321,78 @@ export function SlotReviewWorkspace() {
                           }}
                         />
                         {evidenceMatch ? (
-                          <Group gap={6}>
-                            <Badge color="blue" radius="sm" variant="light">
-                              PDF 第 {evidenceMatch.page_number} 页
+                          <Group gap={6} justify="space-between">
+                            <Group gap={6}>
+                              <Badge color="blue" radius="sm" variant="light">
+                                PDF 第 {evidenceMatch.page_number} 页
+                              </Badge>
+                              <Text c="dimmed" size="xs">
+                                证据置信度：
+                                {Math.round(evidenceMatch.confidence * 100)}%
+                              </Text>
+                            </Group>
+                            <Button
+                              color="orange"
+                              disabled={isLockedByOtherEditing}
+                              radius="xl"
+                              size="compact-xs"
+                              variant={
+                                pdfLocationEditState?.itemId === item.id
+                                  ? 'filled'
+                                  : 'light'
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+
+                                if (isLockedByOtherEditing) {
+                                  notifications.show({
+                                    color: 'yellow',
+                                    title: '请先完成当前槽位修改',
+                                    message:
+                                      '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
+                                  });
+                                  return;
+                                }
+
+                                handleStartPdfLocationEdit(item);
+                              }}
+                            >
+                              调定位
+                            </Button>
+                          </Group>
+                        ) : payload.pdfEvidence ? (
+                          <Group gap={6} justify="space-between">
+                            <Badge color="gray" radius="sm" variant="light">
+                              未定位 PDF
                             </Badge>
-                            <Text c="dimmed" size="xs">
-                              证据置信度：
-                              {Math.round(evidenceMatch.confidence * 100)}%
-                            </Text>
+                            <Button
+                              color="orange"
+                              disabled={isLockedByOtherEditing}
+                              radius="xl"
+                              size="compact-xs"
+                              variant={
+                                pdfLocationEditState?.itemId === item.id
+                                  ? 'filled'
+                                  : 'light'
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+
+                                if (isLockedByOtherEditing) {
+                                  notifications.show({
+                                    color: 'yellow',
+                                    title: '请先完成当前槽位修改',
+                                    message:
+                                      '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
+                                  });
+                                  return;
+                                }
+
+                                handleStartPdfLocationEdit(item);
+                              }}
+                            >
+                              调定位
+                            </Button>
                           </Group>
                         ) : null}
                         {isEditing ? (
@@ -2347,11 +2421,12 @@ export function SlotReviewWorkspace() {
             withBorder
             style={{
               flex: '1 1 380px',
+              height: 'calc(100vh - 210px)',
               minWidth: 320,
               order: 1,
             }}
           >
-            <Stack gap="md">
+            <Stack gap="md" h="100%">
               <div>
                 <Title order={4}>DOCX 模板预览</Title>
                 <Text c="dimmed" mt={6} size="sm">
@@ -2359,19 +2434,26 @@ export function SlotReviewWorkspace() {
                 </Text>
               </div>
               <ScrollArea
-                h={560}
                 offsetScrollbars
                 scrollbarSize={8}
+                style={{ flex: 1 }}
                 type="always"
                 viewportRef={documentViewportRef}
               >
-                <div style={{ width: '100%', minWidth: '100%' }}>
+                <div
+                  style={{
+                    width: '100%',
+                    minWidth: '100%',
+                    minHeight: '100%',
+                  }}
+                >
                   <Paper
                     p="lg"
                     radius="lg"
                     style={{
                       width: '100%',
                       minWidth: '100%',
+                      minHeight: '100%',
                       boxSizing: 'border-box',
                       background: '#f7fbf9',
                       border: '1px solid #dbe9e1',
@@ -2413,11 +2495,12 @@ export function SlotReviewWorkspace() {
               withBorder
               style={{
                 flex: '1 1 420px',
+                height: 'calc(100vh - 210px)',
                 minWidth: 340,
                 order: 2,
               }}
             >
-              <Stack gap="md">
+              <Stack gap="md" h="100%">
                 <Group align="flex-start" justify="space-between">
                   <div>
                     <Title order={4}>PDF 证据定位</Title>
@@ -2457,18 +2540,7 @@ export function SlotReviewWorkspace() {
                           取消
                         </Button>
                       </>
-                    ) : (
-                      <Button
-                        color="orange"
-                        disabled={!activeItem}
-                        radius="xl"
-                        size="compact-sm"
-                        variant="light"
-                        onClick={handleStartPdfLocationEdit}
-                      >
-                        调整当前槽位定位
-                      </Button>
-                    )}
+                    ) : null}
                   </Group>
                 </Group>
 
@@ -2488,11 +2560,11 @@ export function SlotReviewWorkspace() {
                 ) : null}
 
                 {pdfEvidencePages.length > 0 ? (
-                  <Stack gap="sm">
+                  <Stack gap="sm" style={{ flex: 1, minHeight: 0 }}>
                     <ScrollArea
-                      h={560}
                       offsetScrollbars
                       scrollbarSize={8}
+                      style={{ flex: 1 }}
                       type="always"
                       viewportRef={pdfViewportRef}
                     >
@@ -2643,32 +2715,6 @@ export function SlotReviewWorkspace() {
                         })}
                       </Stack>
                     </ScrollArea>
-
-                    {activeEvidenceMatch ? (
-                      <Paper
-                        p="md"
-                        radius="lg"
-                        style={{
-                          background:
-                            'linear-gradient(180deg, rgba(32, 36, 35, 0.98), rgba(25, 27, 27, 0.98))',
-                          border: '1px solid rgba(56, 211, 159, 0.28)',
-                          boxShadow: '0 18px 42px rgba(0, 0, 0, 0.22)',
-                        }}
-                      >
-                        <Text c="teal.3" fw={800} size="xs">
-                          视觉定位证据
-                        </Text>
-                        <Text c="#fffaf0" mt={6} size="sm">
-                          {activeEvidenceMatch.evidence_text ||
-                            '该页已定位到槽位值，但视觉模型未返回可展示的上下文片段。'}
-                        </Text>
-                        <Text c="gray.5" mt={6} size="xs">
-                          置信度：
-                          {Math.round(activeEvidenceMatch.confidence * 100)}
-                          %
-                        </Text>
-                      </Paper>
-                    ) : null}
                   </Stack>
                 ) : (
                   <Paper
