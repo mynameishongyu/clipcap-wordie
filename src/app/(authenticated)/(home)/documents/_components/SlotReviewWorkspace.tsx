@@ -32,6 +32,7 @@ import type {
   ExtractionParagraph,
   TemplatePdfEvidenceResult,
 } from '@/src/app/api/types/template-slot-extraction';
+import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import {
@@ -1016,6 +1017,109 @@ function buildManualPdfEvidenceMatch(input: {
   };
 }
 
+function logPdfBboxMappingDebug(input: {
+  item: EditableExtractionItem;
+  match: PdfEvidenceMatch;
+  pageContainer: HTMLElement | null | undefined;
+}) {
+  const image = input.pageContainer?.querySelector('img') ?? null;
+
+  if (!input.pageContainer || !image) {
+    browserProcessLog.warn('[Slot Review][PDF BBox Debug] Missing DOM node', {
+      slot: {
+        id: input.item.id,
+        field_category: input.item.field_category,
+        original_value: input.item.original_value,
+      },
+      match: input.match,
+      hasPageContainer: Boolean(input.pageContainer),
+      hasImage: Boolean(image),
+    });
+    return;
+  }
+
+  const writeDebugLog = () => {
+    const imageRect = image.getBoundingClientRect();
+    const pageRect = input.pageContainer!.getBoundingClientRect();
+    const bbox = input.match.bbox;
+    const finalCssCoordinate = bbox
+      ? {
+          left: bbox.x * imageRect.width,
+          top: bbox.y * imageRect.height,
+          width: bbox.width * imageRect.width,
+          height: bbox.height * imageRect.height,
+        }
+      : null;
+    const finalNaturalCoordinate = bbox
+      ? {
+          left: bbox.x * image.naturalWidth,
+          top: bbox.y * image.naturalHeight,
+          width: bbox.width * image.naturalWidth,
+          height: bbox.height * image.naturalHeight,
+        }
+      : null;
+    const warnings = [
+      image.naturalWidth <= 0 || image.naturalHeight <= 0
+        ? 'image_natural_size_not_ready'
+        : null,
+      imageRect.width <= 0 || imageRect.height <= 0
+        ? 'image_display_size_not_ready'
+        : null,
+      bbox &&
+      (bbox.x < 0 ||
+        bbox.y < 0 ||
+        bbox.width <= 0 ||
+        bbox.height <= 0 ||
+        bbox.x + bbox.width > 1 ||
+        bbox.y + bbox.height > 1)
+        ? 'bbox_outside_normalized_image'
+        : null,
+    ].filter(Boolean);
+
+    browserProcessLog.info('[Slot Review][PDF BBox Debug]', {
+      slot: {
+        id: input.item.id,
+        field_category: input.item.field_category,
+        original_value: input.item.original_value,
+        meaning_to_applicant: input.item.meaning_to_applicant,
+      },
+      match: {
+        page_number: input.match.page_number,
+        bbox: input.match.bbox,
+        evidence_text: input.match.evidence_text,
+        confidence: input.match.confidence,
+        match_type: input.match.match_type,
+      },
+      imageNaturalSize: {
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      },
+      imageDisplaySize: {
+        width: imageRect.width,
+        height: imageRect.height,
+      },
+      imageOffsetInPageContainer: {
+        left: imageRect.left - pageRect.left,
+        top: imageRect.top - pageRect.top,
+      },
+      pageContainerDisplaySize: {
+        width: pageRect.width,
+        height: pageRect.height,
+      },
+      finalCssCoordinate,
+      finalNaturalCoordinate,
+      warnings,
+    });
+  };
+
+  if (image.complete && image.naturalWidth > 0) {
+    writeDebugLog();
+    return;
+  }
+
+  image.addEventListener('load', writeDebugLog, { once: true });
+}
+
 function persistSlotReviewPayloadToSession(payload: SlotReviewSessionPayload) {
   if (typeof window === 'undefined') {
     return;
@@ -1320,7 +1424,7 @@ export function SlotReviewWorkspace() {
   };
 
   useEffect(() => {
-    if (!activeEvidenceMatch) {
+    if (!activeItem || !activeEvidenceMatch) {
       return;
     }
 
@@ -1328,7 +1432,19 @@ export function SlotReviewWorkspace() {
       activeEvidenceMatch.page_number,
       activeEvidenceMatch.bbox,
     );
-  }, [activeEvidenceMatch]);
+
+    const timeoutId = window.setTimeout(() => {
+      logPdfBboxMappingDebug({
+        item: activeItem,
+        match: activeEvidenceMatch,
+        pageContainer: pdfPageRefs.current[activeEvidenceMatch.page_number],
+      });
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeEvidenceMatch, activeItem]);
 
   const handleDocumentMouseUp = () => {
     if ((!editingItemId && !isAddingItem) || !documentContentRef.current) {

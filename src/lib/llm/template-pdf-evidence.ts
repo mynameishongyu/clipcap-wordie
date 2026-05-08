@@ -190,9 +190,20 @@ async function locateSlotsInPageBatch(input: {
             'bbox values must be normalized ratios relative to the full image: x, y, width, height are all between 0 and 1.',
           strict_requirements: [
             'Only return a match when the visual page image contains the exact value or a visually equivalent value.',
-            'For each match, return the smallest practical bounding box around the visible value, not around the entire row or page.',
+            'The bbox must enclose only the slot value text itself. Do not include field labels such as name, gender, birth date, address, amount, phone, ID number, or nearby form labels.',
+            'Do not include adjacent rows, adjacent columns, explanatory text, table borders, stamps, photos, icons, or blank whitespace unless the value text itself visually requires it.',
+            'For each match, return the tightest practical bounding box around the visible value text, not around the entire row, card, table cell, or page.',
+            'If the value spans multiple lines, the bbox may cover those value lines only; if the value is on one line, the bbox must stay on that line only.',
             'If a value appears multiple times, choose the occurrence that best matches the field label or context.',
+            'If the exact slot value is not visible but a shortened or formatted equivalent is visible, locate only that visible equivalent and put the visible text in evidence_text.',
+            'evidence_text must be the visible text inside or immediately touching the bbox. It should include the located value, not just the field label.',
             'If you are unsure, omit the match instead of guessing.',
+          ],
+          negative_examples: [
+            'For a name value, box only the person name, not the "姓名" label.',
+            'For a gender value, box only "男" or "女", not the "性别" label or the neighboring nationality value.',
+            'For a birth date, box only the date value, not the "出生" label or the address line below it.',
+            'For an address, box only the address text, not the "住址" label, birth date line, ID number line, or photo.',
           ],
           slots: input.slots.map((slot) => ({
             slot_key: slot.slot_key,
@@ -247,7 +258,7 @@ async function locateSlotsInPageBatch(input: {
             {
               role: 'system',
               content:
-                'You are a precise visual document layout locator. Return JSON only. Locate exact visible values in scanned PDF page images and provide normalized bounding boxes.',
+                'You are a precise visual document layout locator. Return JSON only. Locate exact visible slot values in scanned PDF page images and provide tight normalized bounding boxes around only the value text.',
             },
             {
               role: 'user',
