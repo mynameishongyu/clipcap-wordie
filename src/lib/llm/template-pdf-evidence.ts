@@ -669,6 +669,9 @@ async function locateSlotsInPageBatch(input: {
             'For ID numbers, dates, and amounts, the visible value must match the input value after normalizing common formatting such as spaces, commas, Chinese date units, and currency symbols.',
             'If the page contains the same label but a different value, omit that slot from matches.',
             'Spatial consistency is mandatory: the bbox must physically surround the exact visible text reported in evidence_text.',
+            'Page consistency is mandatory: page_number must be the page image where the bbox and evidence_text are visibly present. Do not copy a value from another page, another slot, memory, or document context.',
+            'evidence_text must be transcribed only from the visible characters inside or immediately touching the returned bbox on the same page_number image.',
+            'If original_value is known from the input but is not visibly present on the current page image, do not return it as evidence_text for that page.',
             'Do not return a correct evidence_text with a bbox around another nearby value, another phone number, another signature block, a stamp, a label, or blank space.',
             'Before returning a match, visually re-check the proposed bbox: if the text inside the bbox is not the same value as evidence_text/original_value, omit the match.',
             'If you can read the value somewhere on the page but cannot confidently draw a tight bbox around that same visible text, omit the match instead of guessing a bbox.',
@@ -688,6 +691,7 @@ async function locateSlotsInPageBatch(input: {
             'For an address, box only the address text, not the "住址" label, birth date line, ID number line, or photo.',
             'For original_value "18803308383", never return evidence_text "0311-66568703" because it is a different phone number.',
             'For original_value "18103108407", never return evidence_text "18103108407" with a bbox around the left-side company phone/stamp area if the visible number is actually on the right-side person phone area.',
+            'Never return evidence_text equal to original_value on a page where that text is not visibly printed or handwritten inside the proposed bbox.',
             'For pages with multiple phone labels, the bbox must cover the exact phone number characters, not merely the nearest phone label or a different phone line.',
           ],
           slots: input.slots.map((slot) => ({

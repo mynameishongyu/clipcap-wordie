@@ -79,10 +79,19 @@ interface PdfLocationEditState {
   drag: PdfDragState | null;
 }
 
+interface PdfScrollAnchor {
+  pageNumber: number;
+  relativeY: number;
+}
+
 const PDF_PREVIEW_BASE_WIDTH = 760;
 const PDF_PREVIEW_MIN_ZOOM = 0.5;
 const PDF_PREVIEW_MAX_ZOOM = 2;
 const PDF_PREVIEW_ZOOM_STEP = 0.1;
+
+function clampPdfZoom(value: number) {
+  return Math.min(PDF_PREVIEW_MAX_ZOOM, Math.max(PDF_PREVIEW_MIN_ZOOM, value));
+}
 
 interface SlotReviewWorkspaceState {
   payload: SlotReviewSessionPayload | null;
@@ -1488,6 +1497,81 @@ export function SlotReviewWorkspace() {
     });
   };
 
+  const getPdfScrollAnchor = (): PdfScrollAnchor | null => {
+    const viewport = pdfViewportRef.current;
+
+    if (!viewport) {
+      return null;
+    }
+
+    const viewportCenterY = viewport.scrollTop + viewport.clientHeight / 2;
+    const pageEntries = Object.entries(pdfPageRefs.current)
+      .map(([pageNumber, pageElement]) => ({
+        pageNumber: Number(pageNumber),
+        pageElement,
+      }))
+      .filter(
+        (entry): entry is { pageNumber: number; pageElement: HTMLDivElement } =>
+          Number.isInteger(entry.pageNumber) && Boolean(entry.pageElement),
+      )
+      .sort((left, right) => left.pageNumber - right.pageNumber);
+
+    const centeredEntry =
+      pageEntries.find(
+        ({ pageElement }) =>
+          viewportCenterY >= pageElement.offsetTop &&
+          viewportCenterY <= pageElement.offsetTop + pageElement.offsetHeight,
+      ) ?? pageEntries[0];
+
+    if (!centeredEntry) {
+      return null;
+    }
+
+    return {
+      pageNumber: centeredEntry.pageNumber,
+      relativeY: clampPdfCoordinate(
+        (viewportCenterY - centeredEntry.pageElement.offsetTop) /
+          Math.max(1, centeredEntry.pageElement.offsetHeight),
+      ),
+    };
+  };
+
+  const restorePdfScrollAnchor = (anchor: PdfScrollAnchor | null) => {
+    if (!anchor) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const viewport = pdfViewportRef.current;
+        const pageElement = pdfPageRefs.current[anchor.pageNumber];
+
+        if (!viewport || !pageElement) {
+          return;
+        }
+
+        viewport.scrollTo({
+          top: Math.max(
+            0,
+            pageElement.offsetTop +
+              pageElement.offsetHeight * anchor.relativeY -
+              viewport.clientHeight / 2,
+          ),
+          behavior: 'auto',
+        });
+      });
+    });
+  };
+
+  const updatePdfZoom = (resolveNextZoom: (currentZoom: number) => number) => {
+    const anchor = getPdfScrollAnchor();
+
+    setPdfZoom((currentZoom) =>
+      clampPdfZoom(Number(resolveNextZoom(currentZoom).toFixed(2))),
+    );
+    restorePdfScrollAnchor(anchor);
+  };
+
   useEffect(() => {
     if (!activeItem || !activeEvidenceMatch) {
       return;
@@ -2542,13 +2626,9 @@ export function SlotReviewWorkspace() {
                       size="compact-sm"
                       variant="subtle"
                       onClick={() =>
-                        setPdfZoom((currentZoom) =>
-                          Math.max(
-                            PDF_PREVIEW_MIN_ZOOM,
-                            Number(
-                              (currentZoom - PDF_PREVIEW_ZOOM_STEP).toFixed(2),
-                            ),
-                          ),
+                        updatePdfZoom(
+                          (currentZoom) =>
+                            currentZoom - PDF_PREVIEW_ZOOM_STEP,
                         )
                       }
                     >
@@ -2563,13 +2643,9 @@ export function SlotReviewWorkspace() {
                       size="compact-sm"
                       variant="subtle"
                       onClick={() =>
-                        setPdfZoom((currentZoom) =>
-                          Math.min(
-                            PDF_PREVIEW_MAX_ZOOM,
-                            Number(
-                              (currentZoom + PDF_PREVIEW_ZOOM_STEP).toFixed(2),
-                            ),
-                          ),
+                        updatePdfZoom(
+                          (currentZoom) =>
+                            currentZoom + PDF_PREVIEW_ZOOM_STEP,
                         )
                       }
                     >
@@ -2580,7 +2656,7 @@ export function SlotReviewWorkspace() {
                       radius="xl"
                       size="compact-sm"
                       variant="subtle"
-                      onClick={() => setPdfZoom(1)}
+                      onClick={() => updatePdfZoom(() => 1)}
                     >
                       适宽
                     </Button>
