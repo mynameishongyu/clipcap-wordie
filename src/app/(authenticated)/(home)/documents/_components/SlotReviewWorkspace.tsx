@@ -79,6 +79,11 @@ interface PdfLocationEditState {
   drag: PdfDragState | null;
 }
 
+const PDF_PREVIEW_BASE_WIDTH = 760;
+const PDF_PREVIEW_MIN_ZOOM = 0.5;
+const PDF_PREVIEW_MAX_ZOOM = 2;
+const PDF_PREVIEW_ZOOM_STEP = 0.1;
+
 interface SlotReviewWorkspaceState {
   payload: SlotReviewSessionPayload | null;
   items: EditableExtractionItem[];
@@ -1261,6 +1266,7 @@ export function SlotReviewWorkspace() {
     });
   const [pdfLocationEditState, setPdfLocationEditState] =
     useState<PdfLocationEditState | null>(null);
+  const [pdfZoom, setPdfZoom] = useState(1);
   const documentViewportRef = useRef<HTMLDivElement | null>(null);
   const documentContentRef = useRef<HTMLDivElement | null>(null);
   const pdfViewportRef = useRef<HTMLDivElement | null>(null);
@@ -2540,6 +2546,54 @@ export function SlotReviewWorkspace() {
                     </Text>
                   </div>
                   <Group gap="xs" justify="flex-end">
+                    <Button
+                      color="gray"
+                      radius="xl"
+                      size="compact-sm"
+                      variant="subtle"
+                      onClick={() =>
+                        setPdfZoom((currentZoom) =>
+                          Math.max(
+                            PDF_PREVIEW_MIN_ZOOM,
+                            Number(
+                              (currentZoom - PDF_PREVIEW_ZOOM_STEP).toFixed(2),
+                            ),
+                          ),
+                        )
+                      }
+                    >
+                      缩小
+                    </Button>
+                    <Badge color="gray" radius="xl" variant="light">
+                      {Math.round(pdfZoom * 100)}%
+                    </Badge>
+                    <Button
+                      color="gray"
+                      radius="xl"
+                      size="compact-sm"
+                      variant="subtle"
+                      onClick={() =>
+                        setPdfZoom((currentZoom) =>
+                          Math.min(
+                            PDF_PREVIEW_MAX_ZOOM,
+                            Number(
+                              (currentZoom + PDF_PREVIEW_ZOOM_STEP).toFixed(2),
+                            ),
+                          ),
+                        )
+                      }
+                    >
+                      放大
+                    </Button>
+                    <Button
+                      color="gray"
+                      radius="xl"
+                      size="compact-sm"
+                      variant="subtle"
+                      onClick={() => setPdfZoom(1)}
+                    >
+                      适宽
+                    </Button>
                     {pdfLocationEditState ? (
                       <>
                         <Badge color="orange" radius="sm" variant="light">
@@ -2610,6 +2664,10 @@ export function SlotReviewWorkspace() {
                           const isEditingPage =
                             Boolean(pdfLocationEditState) &&
                             pdfLocationEditState?.itemId === activeItemId;
+                          const zoomedPageWidth =
+                            PDF_PREVIEW_BASE_WIDTH * pdfZoom;
+                          const isFitWidthZoom =
+                            Math.abs(pdfZoom - 1) < Number.EPSILON;
 
                           return (
                             <Box
@@ -2621,7 +2679,10 @@ export function SlotReviewWorkspace() {
                                 position: 'relative',
                                 display: 'flex',
                                 justifyContent: 'center',
-                                minWidth: 560,
+                                minWidth: Math.max(
+                                  560,
+                                  zoomedPageWidth + 28,
+                                ),
                                 padding: 14,
                                 background: '#101514',
                                 borderRadius: 18,
@@ -2645,8 +2706,12 @@ export function SlotReviewWorkspace() {
                               <Box
                                 style={{
                                   position: 'relative',
-                                  width: '100%',
-                                  maxWidth: 760,
+                                  width: isFitWidthZoom
+                                    ? '100%'
+                                    : zoomedPageWidth,
+                                  maxWidth: isFitWidthZoom
+                                    ? PDF_PREVIEW_BASE_WIDTH
+                                    : 'none',
                                   cursor: isEditingPage
                                     ? 'crosshair'
                                     : undefined,
