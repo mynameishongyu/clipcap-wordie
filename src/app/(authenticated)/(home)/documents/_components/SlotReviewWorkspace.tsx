@@ -1324,6 +1324,22 @@ export function SlotReviewWorkspace() {
     );
   }
 
+  const pdfEvidencePages = payload.pdfEvidence?.pages ?? [];
+  const displayedEvidencePage =
+    activeEvidencePage ?? pdfEvidencePages[0] ?? null;
+  const displayedEvidenceMatch =
+    displayedEvidencePage &&
+    activeEvidenceMatch?.page_number === displayedEvidencePage.pageNumber
+      ? activeEvidenceMatch
+      : null;
+  const docxPreviewDescription = isAddingItem
+    ? '正在手动新增槽位。请先在左侧 DOCX 预览中框选一段连续文本作为槽位抽取值，再在右侧填写槽位含义并点击“保存新增”。'
+    : editingItem
+      ? `正在修改：${editingItem.field_category}。请先在左侧 DOCX 预览中框选一段连续文本，再点击右侧“保存”才会正式写回槽位。`
+      : activeItem
+        ? `已定位到：${activeItem.field_category} - ${activeItem.original_value || '未填写'}`
+        : '点击右侧槽位后，DOCX 与 PDF 会同步定位到对应位置。';
+
   return (
     <Stack gap="xl">
       <Stack gap="sm">
@@ -1356,15 +1372,30 @@ export function SlotReviewWorkspace() {
         </Text>
       </Stack>
 
-      <Group align="stretch" gap="xl" wrap="nowrap">
+      <Group align="stretch" gap="xl" wrap="wrap">
         <Paper
           p="lg"
           radius="xl"
           withBorder
-          style={{ flex: '0 0 320px', minWidth: 320 }}
+          style={{
+            flex: '0 0 340px',
+            minWidth: 320,
+            order: 3,
+            background: '#fffdf7',
+          }}
         >
           <Stack gap="md">
-            <Title order={4}>抽取槽位</Title>
+            <Group align="flex-start" justify="space-between">
+              <div>
+                <Title order={4}>抽取槽位</Title>
+                <Text c="dimmed" mt={4} size="sm">
+                  选择槽位后，左侧 DOCX 和中间 PDF 会联动定位。
+                </Text>
+              </div>
+              <Badge color="teal" radius="xl" variant="light">
+                {visibleItems.length} 个
+              </Badge>
+            </Group>
             <Button
               color="teal"
               disabled={Boolean(editingItemId)}
@@ -1400,7 +1431,7 @@ export function SlotReviewWorkspace() {
               {isAddingItem ? '取消新增槽位' : '手动新增槽位'}
             </Button>
             <ScrollArea
-              h={640}
+              h={680}
               offsetScrollbars
               scrollbarSize={8}
               type="always"
@@ -1453,7 +1484,7 @@ export function SlotReviewWorkspace() {
                                   color: 'yellow',
                                   title: '新增槽位信息不完整',
                                   message:
-                                    '请先在右侧框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
+                                    '请先在 DOCX 预览中框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
                                 });
                                 return;
                               }
@@ -1522,7 +1553,7 @@ export function SlotReviewWorkspace() {
                         }}
                       />
                       <Text c="yellow" size="xs">
-                        新增中：槽位抽取值必须通过右侧框选生成，不能手动输入；槽位含义填写后才能保存新增。
+                        新增中：槽位抽取值必须通过 DOCX 预览框选生成，不能手动输入；槽位含义填写后才能保存新增。
                       </Text>
                     </Stack>
                   </Card>
@@ -1561,7 +1592,7 @@ export function SlotReviewWorkspace() {
                             color: 'yellow',
                             title: '请先完成当前槽位修改',
                             message:
-                              '当前正在修改另一个槽位，请先在右侧完成框选，或点击“取消”后再切换。',
+                              '当前正在修改另一个槽位，请先在 DOCX 预览中完成框选，或点击“取消”后再切换。',
                           });
                           return;
                         }
@@ -1784,7 +1815,7 @@ export function SlotReviewWorkspace() {
                         ) : null}
                         {isEditing ? (
                           <Text c="yellow" size="xs">
-                            修改中：请在右侧预览文本中框选新的连续文本片段，确认后点击“保存”再更新槽位。
+                            修改中：请在 DOCX 预览中框选新的连续文本片段，确认后点击“保存”再更新槽位。
                           </Text>
                         ) : null}
                         {isEditing && pendingSelection ? (
@@ -1801,28 +1832,27 @@ export function SlotReviewWorkspace() {
           </Stack>
         </Paper>
 
-        <Stack gap="xl" style={{ flex: '1 1 0', minWidth: 0 }}>
+        <Box style={{ display: 'contents' }}>
           <Paper
             p="lg"
             radius="xl"
             withBorder
-            style={{ width: '100%', minWidth: 0 }}
+            style={{
+              flex: '1 1 380px',
+              minWidth: 340,
+              order: 1,
+              background: '#fffef9',
+            }}
           >
             <Stack gap="md">
               <div>
-                <Title order={4}>原文高亮预览</Title>
+                <Title order={4}>DOCX 模板预览</Title>
                 <Text c="dimmed" mt={6} size="sm">
-                  {isAddingItem
-                    ? '正在手动新增槽位。请先在右侧框选一段连续文本作为槽位抽取值，再在左侧填写槽位含义并点击“保存新增”。'
-                    : editingItem
-                      ? `正在修改：${editingItem.field_category}。请先在右侧框选一段连续文本，再点击左侧“保存”才会正式写回槽位。`
-                      : activeItem
-                        ? `已定位到：${activeItem.field_category} - ${activeItem.original_value || '未填写'}`
-                        : '点击左侧槽位后，右侧会自动滚动到对应原文位置。'}
+                  {docxPreviewDescription}
                 </Text>
               </div>
               <ScrollArea
-                h={640}
+                h={680}
                 offsetScrollbars
                 scrollbarSize={8}
                 type="always"
@@ -1874,28 +1904,33 @@ export function SlotReviewWorkspace() {
               p="lg"
               radius="xl"
               withBorder
-              style={{ width: '100%', minWidth: 0 }}
+              style={{
+                flex: '1.25 1 460px',
+                minWidth: 360,
+                order: 2,
+                background: '#fffaf0',
+              }}
             >
               <Stack gap="md">
                 <Group align="flex-start" justify="space-between">
                   <div>
-                    <Title order={4}>PDF 证据预览</Title>
+                    <Title order={4}>PDF 证据定位</Title>
                     <Text c="dimmed" mt={6} size="sm">
                       当前 PDF：{payload.pdfEvidence.pdfFileName}
-                      。点击左侧槽位后，这里会切换到视觉模型定位到的页面并画出位置。
+                      。选中右侧槽位后，这里会切换到视觉模型定位页并画出位置。
                     </Text>
                   </div>
-                  {activeEvidenceMatch ? (
+                  {displayedEvidencePage ? (
                     <Badge color="blue" radius="sm" variant="filled">
-                      PDF 第 {activeEvidenceMatch.page_number} 页
+                      PDF 第 {displayedEvidencePage.pageNumber} 页
                     </Badge>
                   ) : null}
                 </Group>
 
-                {activeEvidencePage ? (
+                {displayedEvidencePage ? (
                   <Stack gap="sm">
                     <ScrollArea
-                      h={520}
+                      h={680}
                       offsetScrollbars
                       scrollbarSize={8}
                       type="always"
@@ -1920,10 +1955,10 @@ export function SlotReviewWorkspace() {
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
-                            alt={`${payload.pdfEvidence.pdfFileName} 第 ${activeEvidencePage.pageNumber} 页`}
+                            alt={`${payload.pdfEvidence.pdfFileName} 第 ${displayedEvidencePage.pageNumber} 页`}
                             src={
-                              activeEvidencePage.imageUrl ??
-                              activeEvidencePage.imageDataUrl
+                              displayedEvidencePage.imageUrl ??
+                              displayedEvidencePage.imageDataUrl
                             }
                             style={{
                               width: '100%',
@@ -1933,14 +1968,14 @@ export function SlotReviewWorkspace() {
                               boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
                             }}
                           />
-                          {activeEvidenceMatch?.bbox ? (
+                          {displayedEvidenceMatch?.bbox ? (
                             <Box
                               style={{
                                 position: 'absolute',
-                                left: `${activeEvidenceMatch.bbox.x * 100}%`,
-                                top: `${activeEvidenceMatch.bbox.y * 100}%`,
-                                width: `${activeEvidenceMatch.bbox.width * 100}%`,
-                                height: `${activeEvidenceMatch.bbox.height * 100}%`,
+                                left: `${displayedEvidenceMatch.bbox.x * 100}%`,
+                                top: `${displayedEvidenceMatch.bbox.y * 100}%`,
+                                width: `${displayedEvidenceMatch.bbox.width * 100}%`,
+                                height: `${displayedEvidenceMatch.bbox.height * 100}%`,
                                 minWidth: 18,
                                 minHeight: 14,
                                 border: '3px solid #f59f00',
@@ -1951,7 +1986,7 @@ export function SlotReviewWorkspace() {
                                 pointerEvents: 'none',
                               }}
                             />
-                          ) : (
+                          ) : displayedEvidenceMatch ? (
                             <Box
                               style={{
                                 position: 'absolute',
@@ -1973,15 +2008,15 @@ export function SlotReviewWorkspace() {
                               <Text fw={800} size="xs">
                                 关联槽位
                                 <br />
-                                {activeEvidenceMatch?.field_category}
+                                {displayedEvidenceMatch.field_category}
                               </Text>
                             </Box>
-                          )}
+                          ) : null}
                         </Box>
                       </Box>
                     </ScrollArea>
 
-                    {activeEvidenceMatch ? (
+                    {displayedEvidenceMatch ? (
                       <Paper
                         p="md"
                         radius="lg"
@@ -1994,8 +2029,13 @@ export function SlotReviewWorkspace() {
                           视觉定位证据
                         </Text>
                         <Text mt={6} size="sm">
-                          {activeEvidenceMatch.evidence_text ||
+                          {displayedEvidenceMatch.evidence_text ||
                             '该页已定位到槽位值，但视觉模型未返回可展示的上下文片段。'}
+                        </Text>
+                        <Text c="dimmed" mt={6} size="xs">
+                          置信度：
+                          {Math.round(displayedEvidenceMatch.confidence * 100)}
+                          %
                         </Text>
                       </Paper>
                     ) : null}
@@ -2010,14 +2050,14 @@ export function SlotReviewWorkspace() {
                     }}
                   >
                     <Text c="dimmed" size="sm">
-                      当前选中的槽位还没有在扫描 PDF 图片中定位到证据位置。
+                      当前没有可展示的 PDF 页图，请回到首页重新上传 DOCX 和扫描 PDF 后再识别。
                     </Text>
                   </Paper>
                 )}
               </Stack>
             </Paper>
           ) : null}
-        </Stack>
+        </Box>
       </Group>
 
       {isJsonPreviewDebugEnabled ? (
@@ -2025,7 +2065,7 @@ export function SlotReviewWorkspace() {
           <Stack gap="sm">
             <Title order={4}>JSON 预览</Title>
             <Text c="dimmed" size="sm">
-              当前预览会随着左侧编辑实时变化，便于后续落库存储。
+              当前预览会随着槽位清单编辑实时变化，便于后续落库存储。
             </Text>
             <Paper
               p="md"

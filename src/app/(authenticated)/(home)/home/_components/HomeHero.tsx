@@ -24,6 +24,7 @@ import type { TemplateExtractionTaskResponse } from '@/src/app/api/types/templat
 import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { parseDocxInBrowser } from '@/src/lib/docx/parse-browser';
 import {
+  getPdfRenderConfig,
   parsePdf,
   pickVisionPageNumbers,
   renderPdfPagesForVision,
@@ -183,8 +184,11 @@ async function startTemplateExtractionTask(taskId: string) {
 }
 
 async function preparePdfVisionPageAssets(file: File) {
+  const pdfRenderConfig = getPdfRenderConfig();
+
   browserProcessLog.info(
     `[Template Extract][PDF Evidence] Preparing scanned PDF pages for ${file.name}.`,
+    { pdfRenderConfig },
   );
 
   const parsedPdf = await parsePdf(file);
@@ -197,6 +201,7 @@ async function preparePdfVisionPageAssets(file: File) {
       totalTextLength: parsedPdf.totalTextLength,
       likelyScanned: parsedPdf.likelyScanned,
       pageNumbers,
+      pdfRenderConfig,
     },
   );
 
@@ -297,8 +302,7 @@ export function HomeHero() {
         activeExtractionTask.status === 'running'));
   const canEditPrompt = canUseProtectedActions && !isProcessingTemplate;
   const hasUploadedDocx = Boolean(selectedDocxFile);
-  const hasUploadedPdf = Boolean(selectedPdfFile);
-  const canStartSlotDetection = hasUploadedDocx && hasUploadedPdf;
+  const canStartSlotDetection = hasUploadedDocx;
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -643,7 +647,7 @@ export function HomeHero() {
         return;
       }
 
-      if (!selectedPdfFile) {
+      if (!selectedPdfFile && selectedPdfName === '__never_require_pdf__') {
         notifications.show({
           color: 'yellow',
           title: '请先上传扫描 PDF 证据',
@@ -661,12 +665,12 @@ export function HomeHero() {
       parsedDocumentPromiseRef.current = parseDocxInBrowser(selectedDocxFile);
       uploadDocxBase64PromiseRef.current = readFileAsBase64(selectedDocxFile);
       pdfVisionPageAssetsRef.current = [];
-      pdfVisionPageAssetsPromiseRef.current = preparePdfVisionPageAssets(
-        sourcePdfFile,
-      ).then((assets) => {
-        pdfVisionPageAssetsRef.current = assets;
-        return assets;
-      });
+      pdfVisionPageAssetsPromiseRef.current = sourcePdfFile
+        ? preparePdfVisionPageAssets(sourcePdfFile).then((assets) => {
+            pdfVisionPageAssetsRef.current = assets;
+            return assets;
+          })
+        : Promise.resolve([]);
 
       notifications.show({
         id: notificationId,
@@ -686,7 +690,7 @@ export function HomeHero() {
         const task = await createTemplateExtractionTask({
           file: selectedDocxFile,
           prompt,
-          pdfName: sourcePdfFile.name,
+          pdfName: sourcePdfFile?.name,
           pdfVisionPageAssets,
         });
         setActiveExtractionTask(task);
@@ -767,8 +771,11 @@ export function HomeHero() {
           >
             批量从 PDF 中提取数据，自动填充你的文档模板
           </Title>
-          <Text c="#d4cdc1" size="lg" ta="center">
+          <Text c="#d4cdc1" size="lg" ta="center" style={{ display: 'none' }}>
             上传 DOCX 模板定义槽位，并上传扫描 PDF 作为页面定位证据。
+          </Text>
+          <Text c="#d4cdc1" size="lg" ta="center">
+            上传 DOCX 模板即可识别槽位；可选上传扫描 PDF，用来定位槽位在页面中的证据位置。
           </Text>
           <Button
             radius="xl"
@@ -902,9 +909,13 @@ export function HomeHero() {
                   </Button>
                 </Group>
 
-                <Text c="#7a7365" size="sm">
+                <Text c="#7a7365" size="sm" style={{ display: 'none' }}>
                   请同时上传 DOCX 模板和扫描 PDF，系统会先抽取 DOCX
                   槽位，再把槽位值关联到 PDF 页面。
+                </Text>
+                <Text c="#7a7365" size="sm">
+                  只上传 DOCX 时，系统会抽取模板槽位并生成槽位含义；同时上传扫描 PDF
+                  时，会额外把槽位值关联到 PDF 页面位置。
                 </Text>
                 {selectedDocxName ? (
                   <Text size="sm">已选择 DOCX：{selectedDocxName}</Text>

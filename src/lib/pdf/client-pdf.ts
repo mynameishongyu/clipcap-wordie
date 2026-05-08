@@ -18,9 +18,16 @@ export interface PdfVisionPageInput {
   imageDataUrl: string;
 }
 
-const OCR_RENDER_SCALE = 4.0;
-const OCR_IMAGE_FORMAT = 'image/png';
-const OCR_IMAGE_JPEG_QUALITY = 0.92;
+const DEFAULT_PDF_RENDER_SCALE = 4.0;
+const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
+const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
+const SUPPORTED_PDF_RENDER_IMAGE_FORMATS = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+] as const;
+
+type PdfRenderImageFormat = (typeof SUPPORTED_PDF_RENDER_IMAGE_FORMATS)[number];
 
 const PDFJS_VERSION = '5.6.205';
 const PDFJS_CMAP_URL = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/cmaps/`;
@@ -30,6 +37,48 @@ let pdfJsPromise: Promise<typeof import('pdfjs-dist')> | null = null;
 
 function normalizePdfText(rawText: string) {
   return rawText.replace(/\s+/g, ' ').trim();
+}
+
+function getPdfRenderScale() {
+  const parsedValue = Number(process.env.NEXT_PUBLIC_PDF_RENDER_SCALE);
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return DEFAULT_PDF_RENDER_SCALE;
+  }
+
+  return parsedValue;
+}
+
+function getPdfRenderImageFormat(): PdfRenderImageFormat {
+  const rawValue = process.env.NEXT_PUBLIC_PDF_RENDER_IMAGE_FORMAT?.trim().toLowerCase();
+
+  if (
+    SUPPORTED_PDF_RENDER_IMAGE_FORMATS.includes(
+      rawValue as PdfRenderImageFormat,
+    )
+  ) {
+    return rawValue as PdfRenderImageFormat;
+  }
+
+  return DEFAULT_PDF_RENDER_IMAGE_FORMAT;
+}
+
+function getPdfRenderJpegQuality() {
+  const parsedValue = Number(process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_QUALITY);
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_PDF_RENDER_JPEG_QUALITY;
+  }
+
+  return Math.min(1, Math.max(0.1, parsedValue));
+}
+
+export function getPdfRenderConfig() {
+  return {
+    scale: getPdfRenderScale(),
+    imageFormat: getPdfRenderImageFormat(),
+    imageQuality: getPdfRenderJpegQuality(),
+  };
 }
 
 async function loadPdfJs() {
@@ -104,10 +153,11 @@ export async function renderPdfPagesForVision(
 ): Promise<PdfVisionPageInput[]> {
   const pdf = await loadPdfDocument(file);
   const results: PdfVisionPageInput[] = [];
+  const { scale, imageFormat, imageQuality } = getPdfRenderConfig();
 
   for (const pageNumber of pageNumbers) {
     const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
+    const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
 
@@ -127,9 +177,9 @@ export async function renderPdfPagesForVision(
     results.push({
       pageNumber,
       imageDataUrl:
-        OCR_IMAGE_FORMAT === 'image/png'
-          ? canvas.toDataURL(OCR_IMAGE_FORMAT)
-          : canvas.toDataURL(OCR_IMAGE_FORMAT, OCR_IMAGE_JPEG_QUALITY),
+        imageFormat === 'image/png'
+          ? canvas.toDataURL(imageFormat)
+          : canvas.toDataURL(imageFormat, imageQuality),
     });
   }
 
