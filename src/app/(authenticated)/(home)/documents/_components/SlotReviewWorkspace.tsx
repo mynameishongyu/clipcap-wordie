@@ -1717,28 +1717,39 @@ export function SlotReviewWorkspace() {
           radius="xl"
           withBorder
           style={{
+            background:
+              'linear-gradient(180deg, rgba(37, 37, 37, 0.98), rgba(29, 29, 29, 0.98))',
+            borderColor: 'rgba(255, 255, 255, 0.14)',
             flex: '0 0 340px',
             minWidth: 320,
             order: 3,
           }}
         >
-          <Stack gap="md">
+          <Stack gap="lg">
             <Group align="flex-start" justify="space-between">
               <div>
-                <Title order={4}>抽取槽位</Title>
-                <Text c="dimmed" mt={4} size="sm">
+                <Title c="#fffaf0" order={4}>
+                  抽取槽位
+                </Title>
+                <Text c="gray.5" mt={6} size="sm">
                   选择槽位后，左侧 DOCX 和中间 PDF 会联动定位。
                 </Text>
               </div>
-              <Badge color="teal" radius="xl" variant="light">
+              <Badge color="teal" radius="xl" variant="filled">
                 {visibleItems.length} 个
               </Badge>
             </Group>
             <Button
               color="teal"
               disabled={Boolean(editingItemId)}
+              fullWidth
               radius="xl"
-              variant={isAddingItem ? 'filled' : 'light'}
+              style={{
+                boxShadow: isAddingItem
+                  ? '0 12px 28px rgba(18, 184, 134, 0.2)'
+                  : undefined,
+              }}
+              variant="filled"
               onClick={() => {
                 if (editingItemId) {
                   notifications.show({
@@ -1781,8 +1792,11 @@ export function SlotReviewWorkspace() {
                     radius="xl"
                     withBorder
                     style={{
+                      background:
+                        'linear-gradient(180deg, rgba(47, 47, 47, 0.96), rgba(38, 38, 38, 0.96))',
                       borderColor: '#38d39f',
                       boxShadow: '0 0 0 1px #38d39f inset',
+                      color: '#fffaf0',
                     }}
                   >
                     <Stack gap="sm">
@@ -1876,10 +1890,26 @@ export function SlotReviewWorkspace() {
                       <TextInput
                         label="槽位抽取值"
                         readOnly
+                        styles={{
+                          input: {
+                            background: 'rgba(255, 255, 255, 0.04)',
+                            borderColor: 'rgba(255, 255, 255, 0.16)',
+                            color: '#fffaf0',
+                          },
+                          label: { color: '#d8f7eb' },
+                        }}
                         value={pendingNewItemSelection}
                       />
                       <TextInput
                         label="槽位含义"
+                        styles={{
+                          input: {
+                            background: 'rgba(255, 255, 255, 0.04)',
+                            borderColor: 'rgba(255, 255, 255, 0.16)',
+                            color: '#fffaf0',
+                          },
+                          label: { color: '#d8f7eb' },
+                        }}
                         value={pendingNewItemMeaning}
                         onChange={(event) => {
                           const nextMeaning = event.currentTarget.value;
@@ -1917,12 +1947,18 @@ export function SlotReviewWorkspace() {
                       radius="xl"
                       withBorder
                       style={{
+                        background: isActive
+                          ? 'linear-gradient(180deg, rgba(42, 47, 43, 0.98), rgba(37, 39, 38, 0.98))'
+                          : 'linear-gradient(180deg, rgba(43, 43, 43, 0.96), rgba(35, 35, 35, 0.96))',
                         cursor: 'pointer',
                         opacity: isLockedByOtherEditing ? 0.72 : 1,
-                        borderColor: isActive ? '#38d39f' : undefined,
+                        borderColor: isActive
+                          ? '#38d39f'
+                          : 'rgba(255, 255, 255, 0.12)',
                         boxShadow: isActive
-                          ? '0 0 0 1px #38d39f inset'
-                          : undefined,
+                          ? '0 0 0 1px #38d39f inset, 0 18px 48px rgba(18, 184, 134, 0.12)'
+                          : '0 12px 34px rgba(0, 0, 0, 0.18)',
+                        color: '#fffaf0',
                       }}
                       onClick={() => {
                         if (isLockedByOtherEditing) {
@@ -1946,6 +1982,7 @@ export function SlotReviewWorkspace() {
                         <Group justify="space-between">
                           <Badge
                             color="teal"
+                            radius="sm"
                             variant={isActive ? 'filled' : 'light'}
                           >
                             {item.field_category}
@@ -2120,10 +2157,26 @@ export function SlotReviewWorkspace() {
                         <TextInput
                           readOnly
                           label="槽位抽取值"
+                          styles={{
+                            input: {
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              borderColor: 'rgba(255, 255, 255, 0.14)',
+                              color: '#fffaf0',
+                            },
+                            label: { color: '#d8f7eb' },
+                          }}
                           value={item.original_value}
                         />
                         <TextInput
                           label="槽位含义"
+                          styles={{
+                            input: {
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              borderColor: 'rgba(255, 255, 255, 0.14)',
+                              color: '#fffaf0',
+                            },
+                            label: { color: '#d8f7eb' },
+                          }}
                           value={item.meaning_to_applicant}
                           onChange={(event) => {
                             const nextMeaning = event.currentTarget.value;
@@ -2308,8 +2361,8 @@ export function SlotReviewWorkspace() {
                     p="sm"
                     radius="lg"
                     style={{
-                      background: '#fff8e8',
-                      border: '1px solid #ffe0a3',
+                      background: 'rgba(245, 159, 0, 0.12)',
+                      border: '1px solid rgba(245, 159, 0, 0.32)',
                     }}
                   >
                     <Text c="orange" size="sm">
@@ -2480,18 +2533,20 @@ export function SlotReviewWorkspace() {
                         p="md"
                         radius="lg"
                         style={{
-                          background: '#f7fbf9',
-                          border: '1px solid #dbe9e1',
+                          background:
+                            'linear-gradient(180deg, rgba(32, 36, 35, 0.98), rgba(25, 27, 27, 0.98))',
+                          border: '1px solid rgba(56, 211, 159, 0.28)',
+                          boxShadow: '0 18px 42px rgba(0, 0, 0, 0.22)',
                         }}
                       >
-                        <Text c="dimmed" size="xs">
+                        <Text c="teal.3" fw={800} size="xs">
                           视觉定位证据
                         </Text>
-                        <Text mt={6} size="sm">
+                        <Text c="#fffaf0" mt={6} size="sm">
                           {activeEvidenceMatch.evidence_text ||
                             '该页已定位到槽位值，但视觉模型未返回可展示的上下文片段。'}
                         </Text>
-                        <Text c="dimmed" mt={6} size="xs">
+                        <Text c="gray.5" mt={6} size="xs">
                           置信度：
                           {Math.round(activeEvidenceMatch.confidence * 100)}
                           %
