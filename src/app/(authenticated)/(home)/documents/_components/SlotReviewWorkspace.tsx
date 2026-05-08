@@ -1608,16 +1608,6 @@ export function SlotReviewWorkspace() {
       ...currentState,
       activeItemId: targetItem.id,
     }));
-
-    const targetPageNumber =
-      targetEvidenceMatch?.page_number ??
-      payload.pdfEvidence.pages[0]?.pageNumber;
-
-    if (targetPageNumber) {
-      window.setTimeout(() => {
-        scrollPdfPageIntoView(targetPageNumber, targetEvidenceMatch?.bbox);
-      }, 0);
-    }
   };
 
   const handlePdfPageMouseDown = (
