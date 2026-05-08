@@ -6,6 +6,7 @@ import { BatchGenerateModal } from '@/src/modals/batch-generate';
 import { CompleteRegistrationModal } from '@/src/modals/complete-registration';
 import { GenerationReviewGuideModal } from '@/src/modals/generation-review-guide';
 import { TemplateSaveModal } from '@/src/modals/save-template';
+import { SlotReviewGuideModal } from '@/src/modals/slot-review-guide';
 import { UsageGuideModal } from '@/src/modals/usage-guide';
 
 const modalRegistry = {
@@ -13,6 +14,7 @@ const modalRegistry = {
   completeRegistration: CompleteRegistrationModal,
   generationReviewGuide: GenerationReviewGuideModal,
   saveTemplate: TemplateSaveModal,
+  slotReviewGuide: SlotReviewGuideModal,
   usageGuide: UsageGuideModal,
 };
 

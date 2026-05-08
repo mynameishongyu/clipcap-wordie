@@ -39,6 +39,7 @@ import {
   type SlotReviewSessionPayload,
 } from '@/src/lib/templates/slot-review-session';
 import { openSaveTemplateModal } from '@/src/modals/save-template';
+import { openSlotReviewGuideModal } from '@/src/modals/slot-review-guide';
 import { useSaveTemplate } from '@/src/querys/use-template-library';
 import type {
   DocBlock,
@@ -1686,6 +1687,13 @@ export function SlotReviewWorkspace() {
           <Group>
             <Button
               radius="xl"
+              variant="light"
+              onClick={() => openSlotReviewGuideModal()}
+            >
+              使用说明
+            </Button>
+            <Button
+              radius="xl"
               variant="white"
               onClick={() => {
                 return handleSaveTemplate();
@@ -1712,7 +1720,6 @@ export function SlotReviewWorkspace() {
             flex: '0 0 340px',
             minWidth: 320,
             order: 3,
-            background: '#fffdf7',
           }}
         >
           <Stack gap="md">
@@ -2173,7 +2180,6 @@ export function SlotReviewWorkspace() {
               flex: '1 1 380px',
               minWidth: 320,
               order: 1,
-              background: '#fffef9',
             }}
           >
             <Stack gap="md">
@@ -2240,7 +2246,6 @@ export function SlotReviewWorkspace() {
                 flex: '1 1 420px',
                 minWidth: 340,
                 order: 2,
-                background: '#fffaf0',
               }}
             >
               <Stack gap="md">
