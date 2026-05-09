@@ -1181,11 +1181,13 @@ function sharpenCanvas(canvas: HTMLCanvasElement, strength: number) {
 function PdfEvidencePageCanvas({
   alt,
   displayWidth,
+  fallbackImageUrl,
   imageUrl,
   pageNumber,
 }: {
   alt: string;
   displayWidth: number;
+  fallbackImageUrl?: string;
   imageUrl: string;
   pageNumber: number;
 }) {
@@ -1199,9 +1201,8 @@ function PdfEvidencePageCanvas({
     }
 
     let isDisposed = false;
-    const image = new Image();
 
-    image.onload = () => {
+    const drawImageToCanvas = (image: HTMLImageElement, sourceUrl: string) => {
       if (isDisposed || !canvasRef.current) {
         return;
       }
@@ -1227,6 +1228,11 @@ function PdfEvidencePageCanvas({
       canvasRef.current.dataset.naturalWidth = String(image.naturalWidth);
       canvasRef.current.dataset.naturalHeight = String(image.naturalHeight);
       canvasRef.current.dataset.pageNumber = String(pageNumber);
+      canvasRef.current.dataset.imageSource = sourceUrl.startsWith('blob:')
+        ? 'local_blob'
+        : sourceUrl.startsWith('data:')
+          ? 'data_url'
+          : 'remote_url';
 
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = getPreviewSmoothingQuality();
@@ -1245,12 +1251,33 @@ function PdfEvidencePageCanvas({
       sharpenCanvas(canvasRef.current, PDF_PREVIEW_SHARPEN_STRENGTH);
     };
 
-    image.src = imageUrl;
+    const loadImage = (sourceUrl: string, allowFallback: boolean) => {
+      const image = new Image();
+
+      image.onload = () => {
+        drawImageToCanvas(image, sourceUrl);
+      };
+
+      image.onerror = () => {
+        if (
+          !isDisposed &&
+          allowFallback &&
+          fallbackImageUrl &&
+          fallbackImageUrl !== sourceUrl
+        ) {
+          loadImage(fallbackImageUrl, false);
+        }
+      };
+
+      image.src = sourceUrl;
+    };
+
+    loadImage(imageUrl, true);
 
     return () => {
       isDisposed = true;
     };
-  }, [displayWidth, imageUrl, pageNumber]);
+  }, [displayWidth, fallbackImageUrl, imageUrl, pageNumber]);
 
   return (
     <canvas
@@ -3055,7 +3082,10 @@ export function SlotReviewWorkspace() {
                           const zoomedPageWidth =
                             PDF_PREVIEW_BASE_WIDTH * pdfZoom;
                           const pageImageUrl =
-                            page.imageUrl ?? page.imageDataUrl ?? '';
+                            page.imageUrl ??
+                            page.imageDataUrl ??
+                            page.fallbackImageUrl ??
+                            '';
 
                           return (
                             <Box
@@ -3112,6 +3142,7 @@ export function SlotReviewWorkspace() {
                                 <PdfEvidencePageCanvas
                                   alt={`${payload.pdfEvidence?.pdfFileName ?? 'PDF'} 第 ${page.pageNumber} 页`}
                                   displayWidth={zoomedPageWidth}
+                                  fallbackImageUrl={page.fallbackImageUrl}
                                   imageUrl={pageImageUrl}
                                   pageNumber={page.pageNumber}
                                 />

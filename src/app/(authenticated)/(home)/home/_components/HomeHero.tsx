@@ -457,7 +457,10 @@ export function HomeHero() {
                     pdfFileName: task.pdf_evidence.pdf_file_name,
                     pages: pdfVisionPageAssetsRef.current.map((asset) => ({
                       pageNumber: asset.pageNumber,
-                      imageUrl: asset.previewUrl,
+                      imageUrl: asset.localPreviewUrl ?? asset.previewUrl,
+                      ...(asset.localPreviewUrl
+                        ? { fallbackImageUrl: asset.previewUrl }
+                        : {}),
                       storagePath: asset.storagePath,
                       crop: asset.crop,
                     })),

@@ -13,6 +13,7 @@ export interface SlotReviewPdfEvidencePayload {
     pageNumber: number;
     imageDataUrl?: string;
     imageUrl?: string;
+    fallbackImageUrl?: string;
     storagePath?: string;
     crop?: {
       left: number;
