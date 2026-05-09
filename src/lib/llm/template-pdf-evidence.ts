@@ -778,12 +778,33 @@ async function locateSlotsInPageBatch(input: {
       return [] as VisionLocateCandidate[];
     }
 
+    await input.onTrace?.({
+      message:
+        `[Template PDF Locate][LLM Raw Response][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+        JSON.stringify({
+          pdf_file_name: input.pdfFileName,
+          page_numbers: pageNumbers,
+          raw_response: rawContent,
+        }),
+    });
+
     const normalized = await parseVisionLocationResponse({
       rawContent,
       pageBatchIndex: input.pageBatchIndex,
       totalPageBatches: input.totalPageBatches,
       onTrace: input.onTrace,
     });
+
+    await input.onTrace?.({
+      message:
+        `[Template PDF Locate][LLM Parsed Matches][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+        JSON.stringify({
+          pdf_file_name: input.pdfFileName,
+          page_numbers: pageNumbers,
+          matches: normalized.matches ?? [],
+        }),
+    });
+
     const completedMessage =
       `[Template PDF Locate] Completed visual location batch ${input.pageBatchIndex + 1}/${input.totalPageBatches} ` +
       `for ${input.pdfFileName} with ${normalized.matches?.length ?? 0} raw match(es).`;

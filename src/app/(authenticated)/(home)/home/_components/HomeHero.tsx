@@ -38,6 +38,33 @@ import { openCompleteRegistrationModal } from '@/src/modals/complete-registratio
 import { openUsageGuideModal } from '@/src/modals/usage-guide';
 import { useRegistrationGateStore } from '@/src/stores/registration-gate-store';
 
+function logTemplatePdfLocateLlmTrace(line: string) {
+  const rawMarker = '[Template PDF Locate][LLM Raw Response]';
+  const parsedMarker = '[Template PDF Locate][LLM Parsed Matches]';
+
+  if (!line.includes(rawMarker) && !line.includes(parsedMarker)) {
+    return false;
+  }
+
+  const jsonStartIndex = line.indexOf('{');
+  const label = line.includes(rawMarker)
+    ? '[Template PDF Locate][LLM Raw Response]'
+    : '[Template PDF Locate][LLM Parsed Matches]';
+
+  if (jsonStartIndex < 0) {
+    browserProcessLog.info(line);
+    return true;
+  }
+
+  try {
+    browserProcessLog.info(label, JSON.parse(line.slice(jsonStartIndex)));
+  } catch {
+    browserProcessLog.info(line);
+  }
+
+  return true;
+}
+
 function readFileAsBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -526,6 +553,10 @@ export function HomeHero() {
       .filter(Boolean);
 
     for (const line of traceLines) {
+      if (logTemplatePdfLocateLlmTrace(line)) {
+        continue;
+      }
+
       if (
         line.includes('[Template Extract][LLM][ErrorDetails]') ||
         line.includes('[RouteErrorDetails][TemplateExtraction]')
