@@ -517,6 +517,19 @@ async function requestTextLlmJson(input: {
         throw new Error('Text LLM returned empty content.');
       }
 
+      await input.onTrace?.({
+        message:
+          `[Template Extract][LLM Raw Response][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+          stringifyTraceJson({
+            file_name: input.fileName,
+            source_paragraph_index: input.paragraphIndex,
+            paragraph_display_index: input.paragraphDisplayIndex,
+            total_paragraphs: input.totalParagraphs,
+            paragraph_title: input.paragraphTitle,
+            raw_response: rawContent,
+          }),
+      });
+
       const completedMessage =
         `[Template Extract][LLM] Completed paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
         `for ${input.fileName} (attempt ${attempt + 1}, concurrency: ${input.concurrency}) in ${formatElapsedMs(Date.now() - requestStartedAt)}.`;
@@ -667,6 +680,17 @@ async function extractSlotsForParagraph(params: {
   });
   const parsed = JSON.parse(rawJson);
   const object = templateSlotExtractionResultSchema.parse(parsed);
+  await params.onTrace?.({
+    message:
+      `[Template Extract][LLM Parsed JSON][Paragraph ${params.paragraphDisplayIndex + 1}/${params.totalParagraphs}] ` +
+      stringifyTraceJson({
+        file_name: params.fileName,
+        source_paragraph_index: params.paragraph.paragraph_index,
+        paragraph_display_index: params.paragraphDisplayIndex,
+        total_paragraphs: params.totalParagraphs,
+        parsed_json: object,
+      }),
+  });
   const extractedParagraph = object.extraction_result[0];
 
   if (!extractedParagraph) {
@@ -760,6 +784,19 @@ async function extractSlotsForParagraphBatch(params: {
   });
   const parsed = JSON.parse(rawJson);
   const object = templateSlotExtractionResultSchema.parse(parsed);
+  await params.onTrace?.({
+    message:
+      `[Template Extract][LLM Parsed JSON][Paragraph ${params.firstParagraphDisplayIndex + 1}/${params.totalParagraphs}] ` +
+      stringifyTraceJson({
+        file_name: params.fileName,
+        source_paragraph_indices: params.paragraphs.map(
+          (paragraph) => paragraph.paragraph_index,
+        ),
+        first_paragraph_display_index: params.firstParagraphDisplayIndex,
+        total_paragraphs: params.totalParagraphs,
+        parsed_json: object,
+      }),
+  });
   const paragraphByIndex = new Map(
     params.paragraphs.map((paragraph) => [
       paragraph.paragraph_index,

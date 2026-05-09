@@ -65,6 +65,33 @@ function logTemplatePdfLocateLlmTrace(line: string) {
   return true;
 }
 
+function logTemplateExtractionLlmTrace(line: string) {
+  const rawMarker = '[Template Extract][LLM Raw Response]';
+  const parsedMarker = '[Template Extract][LLM Parsed JSON]';
+
+  if (!line.includes(rawMarker) && !line.includes(parsedMarker)) {
+    return false;
+  }
+
+  const jsonStartIndex = line.indexOf('{');
+  const label = line.includes(rawMarker)
+    ? '[Template Extract][LLM Raw Response]'
+    : '[Template Extract][LLM Parsed JSON]';
+
+  if (jsonStartIndex < 0) {
+    browserProcessLog.info(line);
+    return true;
+  }
+
+  try {
+    browserProcessLog.info(label, JSON.parse(line.slice(jsonStartIndex)));
+  } catch {
+    browserProcessLog.info(line);
+  }
+
+  return true;
+}
+
 function readFileAsBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -553,6 +580,10 @@ export function HomeHero() {
       .filter(Boolean);
 
     for (const line of traceLines) {
+      if (logTemplateExtractionLlmTrace(line)) {
+        continue;
+      }
+
       if (logTemplatePdfLocateLlmTrace(line)) {
         continue;
       }
