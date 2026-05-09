@@ -6,6 +6,13 @@ export const MantineThemeConfig: MantineThemeOverride = {
   primaryColor: 'teal',
   cursorType: 'pointer',
   defaultRadius: 'xl',
+  fontSizes: {
+    xs: '0.625rem',
+    sm: '0.6875rem',
+    md: '0.75rem',
+    lg: '0.8125rem',
+    xl: '0.875rem',
+  },
   components: {
     Container: {
       defaultProps: {

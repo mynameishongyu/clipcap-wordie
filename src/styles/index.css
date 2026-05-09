@@ -15,6 +15,7 @@ body {
 body {
   margin: 0;
   color: #f6f3ea;
+  font-size: 12px;
 }
 
 .text-wrap-safe {

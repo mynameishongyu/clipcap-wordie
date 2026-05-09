@@ -1447,7 +1447,6 @@ export function SlotReviewWorkspace() {
   const [pdfLocationEditState, setPdfLocationEditState] =
     useState<PdfLocationEditState | null>(null);
   const [pdfZoom, setPdfZoom] = useState(1);
-  const [isDocxPanelCollapsed, setIsDocxPanelCollapsed] = useState(false);
   const [isSlotPanelCollapsed, setIsSlotPanelCollapsed] = useState(false);
   const documentViewportRef = useRef<HTMLDivElement | null>(null);
   const documentContentRef = useRef<HTMLDivElement | null>(null);
@@ -2135,20 +2134,21 @@ export function SlotReviewWorkspace() {
     : '尚未选择槽位';
 
   return (
-    <Stack gap="lg" style={{ fontSize: 13 }}>
+    <Stack gap="md" style={{ fontSize: 12 }}>
       <Stack gap="sm">
         <Group justify="space-between" align="center">
           <div>
             <Badge color="teal" radius="sm" variant="outline">
               抽取结果编辑
             </Badge>
-            <Title mt="sm" order={2}>
+            <Title mt="xs" order={3}>
               编辑 LLM 抽取出的槽位结果
             </Title>
           </div>
           <Group>
             <Button
               radius="xl"
+              size="xs"
               variant="light"
               onClick={() => openSlotReviewGuideModal()}
             >
@@ -2156,6 +2156,7 @@ export function SlotReviewWorkspace() {
             </Button>
             <Button
               radius="xl"
+              size="xs"
               variant="white"
               onClick={() => {
                 return handleSaveTemplate();
@@ -2163,7 +2164,13 @@ export function SlotReviewWorkspace() {
             >
               保存模板
             </Button>
-            <Button component={Link} href="/home" radius="xl" variant="light">
+            <Button
+              component={Link}
+              href="/home"
+              radius="xl"
+              size="xs"
+              variant="light"
+            >
               返回首页
             </Button>
           </Group>
@@ -2267,7 +2274,7 @@ export function SlotReviewWorkspace() {
             <Stack gap="sm" h="100%">
               <Group align="flex-start" justify="space-between">
                 <div>
-                  <Title c="#fffaf0" order={4}>
+                  <Title c="#fffaf0" order={4} size="h5">
                     抽取槽位
                   </Title>
                   <Text c="gray.5" mt={4} size="xs">
@@ -2821,119 +2828,82 @@ export function SlotReviewWorkspace() {
 
         <Box style={{ display: 'contents' }}>
           <Paper
-            p={isDocxPanelCollapsed ? 'xs' : 'md'}
+            p="md"
             radius="xl"
             withBorder
             style={{
-              flex: isDocxPanelCollapsed ? '0 0 54px' : '0 0 320px',
+              flex: '0 0 320px',
               height: 'calc(100vh - 178px)',
-              minWidth: isDocxPanelCollapsed ? 54 : 280,
+              minWidth: 280,
               order: 1,
               overflow: 'hidden',
             }}
           >
-            {isDocxPanelCollapsed ? (
-              <Stack align="center" gap="sm" h="100%" justify="space-between">
-                <Button
-                  color="teal"
-                  radius="xl"
-                  size="compact-xs"
-                  variant="filled"
-                  onClick={() => setIsDocxPanelCollapsed(false)}
-                >
-                  展
-                </Button>
-                <Text fw={800} size="xs" style={{ writingMode: 'vertical-rl' }}>
-                  DOCX 预览
+            <Stack gap="xs" h="100%">
+              <div>
+                <Title order={4} size="h5">
+                  DOCX 模板预览
+                </Title>
+                <Text c="dimmed" mt={3} size="xs">
+                  {docxPreviewDescription}
                 </Text>
-                <Button
-                  color="gray"
-                  radius="xl"
-                  size="compact-xs"
-                  variant="subtle"
-                  onClick={() => setIsDocxPanelCollapsed(false)}
+              </div>
+              <ScrollArea
+                offsetScrollbars
+                scrollbarSize={8}
+                style={{ flex: 1 }}
+                type="always"
+                viewportRef={documentViewportRef}
+              >
+                <div
+                  style={{
+                    width: '100%',
+                    minWidth: '100%',
+                    minHeight: '100%',
+                  }}
                 >
-                  开
-                </Button>
-              </Stack>
-            ) : (
-              <Stack gap="sm" h="100%">
-                <div>
-                  <Group justify="space-between" align="flex-start">
-                    <div>
-                      <Title order={4}>DOCX 模板预览</Title>
-                      <Text c="dimmed" mt={4} size="xs">
-                        {docxPreviewDescription}
-                      </Text>
-                    </div>
-                    <Button
-                      color="gray"
-                      radius="xl"
-                      size="compact-xs"
-                      variant="subtle"
-                      onClick={() => setIsDocxPanelCollapsed(true)}
-                    >
-                      收起
-                    </Button>
-                  </Group>
-                </div>
-                <ScrollArea
-                  offsetScrollbars
-                  scrollbarSize={8}
-                  style={{ flex: 1 }}
-                  type="always"
-                  viewportRef={documentViewportRef}
-                >
-                  <div
+                  <Paper
+                    p="md"
+                    radius="lg"
                     style={{
                       width: '100%',
                       minWidth: '100%',
                       minHeight: '100%',
+                      boxSizing: 'border-box',
+                      background: '#f7fbf9',
+                      border: '1px solid #dbe9e1',
+                      color: '#18211d',
+                      lineHeight: 1.85,
                     }}
                   >
-                    <Paper
-                      p="md"
-                      radius="lg"
+                    <div
+                      className="slot-review-document"
+                      onMouseUp={handleDocumentMouseUp}
+                      ref={documentContentRef}
                       style={{
                         width: '100%',
-                        minWidth: '100%',
-                        minHeight: '100%',
-                        boxSizing: 'border-box',
-                        background: '#f7fbf9',
-                        border: '1px solid #dbe9e1',
-                        color: '#18211d',
-                        lineHeight: 1.85,
+                        fontFamily:
+                          '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
+                        fontSize: '12px',
+                        lineHeight: 1.5,
+                        whiteSpace: 'normal',
+                        wordBreak: 'break-word',
                       }}
                     >
-                      <div
-                        className="slot-review-document"
-                        onMouseUp={handleDocumentMouseUp}
-                        ref={documentContentRef}
-                        style={{
-                          width: '100%',
-                          fontFamily:
-                            '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
-                          fontSize: '13px',
-                          lineHeight: 1.58,
-                          whiteSpace: 'normal',
-                          wordBreak: 'break-word',
-                        }}
-                      >
-                        {structuredPreview ? (
-                          structuredPreview
-                        ) : (
-                          <div
-                            dangerouslySetInnerHTML={{
-                              __html: highlightedText,
-                            }}
-                          />
-                        )}
-                      </div>
-                    </Paper>
-                  </div>
-                </ScrollArea>
-              </Stack>
-            )}
+                      {structuredPreview ? (
+                        structuredPreview
+                      ) : (
+                        <div
+                          dangerouslySetInnerHTML={{
+                            __html: highlightedText,
+                          }}
+                        />
+                      )}
+                    </div>
+                  </Paper>
+                </div>
+              </ScrollArea>
+            </Stack>
           </Paper>
           {payload.pdfEvidence ? (
             <Paper
@@ -2951,7 +2921,9 @@ export function SlotReviewWorkspace() {
               <Stack gap="sm" h="100%">
                 <Group align="flex-start" justify="space-between">
                   <div>
-                    <Title order={4}>PDF 证据定位</Title>
+                    <Title order={4} size="h5">
+                      PDF 证据定位
+                    </Title>
                     <Text c="dimmed" mt={4} size="xs">
                       当前 PDF：{payload.pdfEvidence.pdfFileName}
                       。这里会展示所有上传页，选中槽位后自动滚动到对应页并高亮位置。
