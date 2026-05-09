@@ -214,6 +214,7 @@ async function preparePdfVisionPageAssets(file: File) {
         pageNumber: page.pageNumber,
         dataUrlLength: page.imageDataUrl.length,
         dataUrlPrefix: page.imageDataUrl.slice(0, 30),
+        crop: page.crop,
       })),
     },
   );
@@ -458,6 +459,7 @@ export function HomeHero() {
                       pageNumber: asset.pageNumber,
                       imageUrl: asset.previewUrl,
                       storagePath: asset.storagePath,
+                      crop: asset.crop,
                     })),
                     ocrPages: task.pdf_evidence.ocr_pages,
                     matches: task.pdf_evidence.matches,
@@ -777,7 +779,8 @@ export function HomeHero() {
             上传 DOCX 模板定义槽位，并上传扫描 PDF 作为页面定位证据。
           </Text>
           <Text c="#d4cdc1" size="lg" ta="center">
-            上传 DOCX 模板即可识别槽位；可选上传扫描 PDF，用来定位槽位在页面中的证据位置。
+            上传 DOCX 模板即可识别槽位；可选上传扫描
+            PDF，用来定位槽位在页面中的证据位置。
           </Text>
           <Button
             radius="xl"
@@ -912,8 +915,8 @@ export function HomeHero() {
                 </Group>
 
                 <Text c="#7a7365" size="sm">
-                  只上传 DOCX 时，系统会抽取模板槽位并生成槽位含义；同时上传扫描 PDF
-                  时，会额外把槽位值关联到 PDF 页面位置。
+                  只上传 DOCX 时，系统会抽取模板槽位并生成槽位含义；同时上传扫描
+                  PDF 时，会额外把槽位值关联到 PDF 页面位置。
                 </Text>
                 {selectedDocxName ? (
                   <Text size="sm">已选择 DOCX：{selectedDocxName}</Text>

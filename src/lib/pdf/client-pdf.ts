@@ -16,11 +16,27 @@ export interface ParsedPdfDocument {
 export interface PdfVisionPageInput {
   pageNumber: number;
   imageDataUrl: string;
+  crop?: PdfVisionPageCrop;
+}
+
+export interface PdfVisionPageCrop {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  originalWidth: number;
+  originalHeight: number;
+  contentRatio: number;
 }
 
 const DEFAULT_PDF_RENDER_SCALE = 4.0;
 const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
+const PDF_AUTO_CROP_WHITE_MARGIN = true;
+const PDF_CROP_WHITE_THRESHOLD = 245;
+const PDF_CROP_CONTENT_DIFFERENCE_THRESHOLD = 18;
+const PDF_CROP_PADDING_RATIO = 0.025;
+const PDF_CROP_MIN_CONTENT_RATIO = 0.02;
 const SUPPORTED_PDF_RENDER_IMAGE_FORMATS = [
   'image/png',
   'image/jpeg',
@@ -50,7 +66,8 @@ function getPdfRenderScale() {
 }
 
 function getPdfRenderImageFormat(): PdfRenderImageFormat {
-  const rawValue = process.env.NEXT_PUBLIC_PDF_RENDER_IMAGE_FORMAT?.trim().toLowerCase();
+  const rawValue =
+    process.env.NEXT_PUBLIC_PDF_RENDER_IMAGE_FORMAT?.trim().toLowerCase();
 
   if (
     SUPPORTED_PDF_RENDER_IMAGE_FORMATS.includes(
@@ -128,8 +145,13 @@ export async function parsePdf(file: File): Promise<ParsedPdfDocument> {
     });
   }
 
-  const totalTextLength = pages.reduce((sum, page) => sum + page.text.length, 0);
-  const lowTextPageCount = pages.filter((page) => page.text.length <= 10).length;
+  const totalTextLength = pages.reduce(
+    (sum, page) => sum + page.text.length,
+    0,
+  );
+  const lowTextPageCount = pages.filter(
+    (page) => page.text.length <= 10,
+  ).length;
   const likelyScanned =
     totalTextLength <= Math.max(20, pdf.numPages * 10) ||
     lowTextPageCount >= Math.ceil(pdf.numPages * 0.8);
@@ -145,6 +167,131 @@ export async function parsePdf(file: File): Promise<ParsedPdfDocument> {
 
 export function pickVisionPageNumbers(pdf: ParsedPdfDocument) {
   return pdf.pages.map((page) => page.pageNumber);
+}
+
+function isLikelyWhitePixel(data: Uint8ClampedArray, index: number) {
+  const red = data[index] ?? 0;
+  const green = data[index + 1] ?? 0;
+  const blue = data[index + 2] ?? 0;
+  const alpha = data[index + 3] ?? 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+
+  return (
+    alpha < 12 ||
+    (red >= PDF_CROP_WHITE_THRESHOLD &&
+      green >= PDF_CROP_WHITE_THRESHOLD &&
+      blue >= PDF_CROP_WHITE_THRESHOLD &&
+      max - min <= PDF_CROP_CONTENT_DIFFERENCE_THRESHOLD)
+  );
+}
+
+function findCanvasContentBounds(canvas: HTMLCanvasElement) {
+  const context = canvas.getContext('2d');
+
+  if (!context || !PDF_AUTO_CROP_WHITE_MARGIN) {
+    return null;
+  }
+
+  const { width, height } = canvas;
+  const imageData = context.getImageData(0, 0, width, height);
+  const { data } = imageData;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  let contentPixels = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 4;
+
+      if (isLikelyWhitePixel(data, index)) {
+        continue;
+      }
+
+      contentPixels += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  const contentRatio = contentPixels / (width * height);
+
+  if (maxX < minX || maxY < minY || contentRatio < PDF_CROP_MIN_CONTENT_RATIO) {
+    return null;
+  }
+
+  const padding = Math.round(
+    Math.min(width, height) * Math.max(0, PDF_CROP_PADDING_RATIO),
+  );
+  const left = Math.max(0, minX - padding);
+  const top = Math.max(0, minY - padding);
+  const right = Math.min(width - 1, maxX + padding);
+  const bottom = Math.min(height - 1, maxY + padding);
+
+  return {
+    left,
+    top,
+    width: right - left + 1,
+    height: bottom - top + 1,
+    originalWidth: width,
+    originalHeight: height,
+    contentRatio,
+  };
+}
+
+function cropCanvas(canvas: HTMLCanvasElement, crop: PdfVisionPageCrop) {
+  const croppedCanvas = document.createElement('canvas');
+  const context = croppedCanvas.getContext('2d');
+
+  if (!context) {
+    throw new Error('无法创建裁剪后的 PDF 页图画布。');
+  }
+
+  croppedCanvas.width = crop.width;
+  croppedCanvas.height = crop.height;
+  context.drawImage(
+    canvas,
+    crop.left,
+    crop.top,
+    crop.width,
+    crop.height,
+    0,
+    0,
+    crop.width,
+    crop.height,
+  );
+
+  return croppedCanvas;
+}
+
+function createPdfVisionCanvas(canvas: HTMLCanvasElement) {
+  const crop = findCanvasContentBounds(canvas);
+
+  if (!crop) {
+    return {
+      canvas,
+      crop: undefined,
+    };
+  }
+
+  return {
+    canvas: cropCanvas(canvas, crop),
+    crop,
+  };
+}
+
+function canvasToImageDataUrl(
+  canvas: HTMLCanvasElement,
+  imageFormat: PdfRenderImageFormat,
+  imageQuality: number,
+) {
+  return imageFormat === 'image/png'
+    ? canvas.toDataURL(imageFormat)
+    : canvas.toDataURL(imageFormat, imageQuality);
 }
 
 export async function renderPdfPagesForVision(
@@ -174,12 +321,16 @@ export async function renderPdfPagesForVision(
       viewport,
     }).promise;
 
+    const visionCanvas = createPdfVisionCanvas(canvas);
+
     results.push({
       pageNumber,
-      imageDataUrl:
-        imageFormat === 'image/png'
-          ? canvas.toDataURL(imageFormat)
-          : canvas.toDataURL(imageFormat, imageQuality),
+      imageDataUrl: canvasToImageDataUrl(
+        visionCanvas.canvas,
+        imageFormat,
+        imageQuality,
+      ),
+      ...(visionCanvas.crop ? { crop: visionCanvas.crop } : {}),
     });
   }
 

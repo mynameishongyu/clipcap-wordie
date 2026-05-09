@@ -84,10 +84,14 @@ interface PdfScrollAnchor {
   relativeY: number;
 }
 
-const PDF_PREVIEW_BASE_WIDTH = 760;
-const PDF_PREVIEW_MIN_ZOOM = 0.5;
-const PDF_PREVIEW_MAX_ZOOM = 2;
+const PDF_PREVIEW_BASE_WIDTH = 1020;
+const PDF_PREVIEW_MIN_ZOOM = 0.45;
+const PDF_PREVIEW_MAX_ZOOM = 2.2;
 const PDF_PREVIEW_ZOOM_STEP = 0.1;
+const PDF_PREVIEW_MAX_DEVICE_PIXEL_RATIO = 2;
+const PDF_PREVIEW_IMAGE_SMOOTHING_QUALITY = 'high';
+const PDF_PREVIEW_SHARPEN_STRENGTH = 0.22;
+const DOCX_PREVIEW_FONT_SCALE = 0.72;
 
 function clampPdfZoom(value: number) {
   return Math.min(PDF_PREVIEW_MAX_ZOOM, Math.max(PDF_PREVIEW_MIN_ZOOM, value));
@@ -402,7 +406,9 @@ function textStyleToCss(style: TextStyleSnapshot): CSSProperties {
     textDecoration: style.underline ? 'underline' : undefined,
     color: style.color,
     backgroundColor: style.backgroundColor,
-    fontSize: style.fontSizePt ? `${style.fontSizePt}pt` : undefined,
+    fontSize: style.fontSizePt
+      ? `${Math.max(8, style.fontSizePt * DOCX_PREVIEW_FONT_SCALE)}pt`
+      : undefined,
     fontFamily: style.fontFamily,
     whiteSpace: 'pre-wrap',
   };
@@ -634,13 +640,13 @@ function renderParagraphBlock(
       data-preview-paragraph-index={paragraphIndex}
       data-preview-block-id={block.id}
       style={{
-        margin: '0 0 1.1em',
-        minHeight: 24,
+        margin: '0 0 0.75em',
+        minHeight: 16,
         textAlign: block.align,
         textIndent: isLikelyTitle || block.align === 'center' ? 0 : '2em',
-        lineHeight: 2,
+        lineHeight: 1.58,
         fontWeight: isLikelyTitle ? 700 : undefined,
-        fontSize: isLikelyTitle ? '20px' : undefined,
+        fontSize: isLikelyTitle ? '15px' : undefined,
       }}
     >
       {block.segments.length === 0 ? <span>&nbsp;</span> : null}
@@ -1053,9 +1059,7 @@ function buildPdfBboxFromPoints(
   };
 }
 
-function getNormalizedPdfPointerPosition(
-  event: MouseEvent<HTMLElement>,
-) {
+function getNormalizedPdfPointerPosition(event: MouseEvent<HTMLElement>) {
   const rect = event.currentTarget.getBoundingClientRect();
 
   return {
@@ -1090,14 +1094,179 @@ function buildManualPdfEvidenceMatch(input: {
   };
 }
 
+function getPreviewDevicePixelRatio() {
+  const rawRatio =
+    typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
+
+  if (!Number.isFinite(rawRatio) || rawRatio <= 0) {
+    return 1;
+  }
+
+  return Math.min(PDF_PREVIEW_MAX_DEVICE_PIXEL_RATIO, rawRatio);
+}
+
+function getPreviewSmoothingQuality(): ImageSmoothingQuality {
+  const quality = PDF_PREVIEW_IMAGE_SMOOTHING_QUALITY.trim().toLowerCase();
+
+  if (quality === 'low' || quality === 'medium' || quality === 'high') {
+    return quality;
+  }
+
+  return 'high';
+}
+
+function sharpenCanvas(canvas: HTMLCanvasElement, strength: number) {
+  if (strength <= 0) {
+    return;
+  }
+
+  const context = canvas.getContext('2d');
+  const { width, height } = canvas;
+
+  if (!context || width < 3 || height < 3) {
+    return;
+  }
+
+  try {
+    const imageData = context.getImageData(0, 0, width, height);
+    const source = imageData.data;
+    const output = new Uint8ClampedArray(source);
+    const centerWeight = 1 + strength * 4;
+
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const index = (y * width + x) * 4;
+        const topIndex = index - width * 4;
+        const bottomIndex = index + width * 4;
+        const leftIndex = index - 4;
+        const rightIndex = index + 4;
+
+        for (let channel = 0; channel < 3; channel += 1) {
+          output[index + channel] = Math.max(
+            0,
+            Math.min(
+              255,
+              source[index + channel] * centerWeight -
+                source[topIndex + channel] * strength -
+                source[bottomIndex + channel] * strength -
+                source[leftIndex + channel] * strength -
+                source[rightIndex + channel] * strength,
+            ),
+          );
+        }
+      }
+    }
+
+    imageData.data.set(output);
+    context.putImageData(imageData, 0, 0);
+  } catch {
+    // Cross-origin signed URLs can taint the canvas; display still works, so skip sharpening.
+  }
+}
+
+function PdfEvidencePageCanvas({
+  alt,
+  displayWidth,
+  imageUrl,
+  pageNumber,
+}: {
+  alt: string;
+  displayWidth: number;
+  imageUrl: string;
+  pageNumber: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+
+    if (!canvas || !imageUrl) {
+      return;
+    }
+
+    let isDisposed = false;
+    const image = new Image();
+
+    image.onload = () => {
+      if (isDisposed || !canvasRef.current) {
+        return;
+      }
+
+      const ratio = getPreviewDevicePixelRatio();
+      const cssWidth = Math.max(1, Math.round(displayWidth));
+      const cssHeight = Math.max(
+        1,
+        Math.round(cssWidth * (image.naturalHeight / image.naturalWidth)),
+      );
+      const canvasWidth = Math.max(1, Math.round(cssWidth * ratio));
+      const canvasHeight = Math.max(1, Math.round(cssHeight * ratio));
+      const context = canvasRef.current.getContext('2d');
+
+      if (!context) {
+        return;
+      }
+
+      canvasRef.current.width = canvasWidth;
+      canvasRef.current.height = canvasHeight;
+      canvasRef.current.style.width = `${cssWidth}px`;
+      canvasRef.current.style.height = `${cssHeight}px`;
+      canvasRef.current.dataset.naturalWidth = String(image.naturalWidth);
+      canvasRef.current.dataset.naturalHeight = String(image.naturalHeight);
+      canvasRef.current.dataset.pageNumber = String(pageNumber);
+
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = getPreviewSmoothingQuality();
+      context.clearRect(0, 0, canvasWidth, canvasHeight);
+      context.drawImage(
+        image,
+        0,
+        0,
+        image.naturalWidth,
+        image.naturalHeight,
+        0,
+        0,
+        canvasWidth,
+        canvasHeight,
+      );
+      sharpenCanvas(canvasRef.current, PDF_PREVIEW_SHARPEN_STRENGTH);
+    };
+
+    image.src = imageUrl;
+
+    return () => {
+      isDisposed = true;
+    };
+  }, [displayWidth, imageUrl, pageNumber]);
+
+  return (
+    <canvas
+      aria-label={alt}
+      data-pdf-page-canvas="true"
+      ref={canvasRef}
+      style={{
+        display: 'block',
+        width: displayWidth,
+        height: 'auto',
+        borderRadius: 12,
+        background: '#fff',
+        boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
+        pointerEvents: 'none',
+      }}
+    />
+  );
+}
+
 function logPdfBboxMappingDebug(input: {
   item: EditableExtractionItem;
   match: PdfEvidenceMatch;
   pageContainer: HTMLElement | null | undefined;
 }) {
-  const image = input.pageContainer?.querySelector('img') ?? null;
+  const pageCanvas =
+    input.pageContainer?.querySelector<HTMLCanvasElement>(
+      'canvas[data-pdf-page-canvas]',
+    ) ?? null;
 
-  if (!input.pageContainer || !image) {
+  if (!input.pageContainer || !pageCanvas) {
     browserProcessLog.warn('[Slot Review][PDF BBox Debug] Missing DOM node', {
       slot: {
         id: input.item.id,
@@ -1106,37 +1275,41 @@ function logPdfBboxMappingDebug(input: {
       },
       match: input.match,
       hasPageContainer: Boolean(input.pageContainer),
-      hasImage: Boolean(image),
+      hasCanvas: Boolean(pageCanvas),
     });
     return;
   }
 
   const writeDebugLog = () => {
-    const imageRect = image.getBoundingClientRect();
+    const canvasRect = pageCanvas.getBoundingClientRect();
     const pageRect = input.pageContainer!.getBoundingClientRect();
+    const naturalWidth =
+      Number(pageCanvas.dataset.naturalWidth) || pageCanvas.width;
+    const naturalHeight =
+      Number(pageCanvas.dataset.naturalHeight) || pageCanvas.height;
     const bbox = input.match.bbox;
     const finalCssCoordinate = bbox
       ? {
-          left: bbox.x * imageRect.width,
-          top: bbox.y * imageRect.height,
-          width: bbox.width * imageRect.width,
-          height: bbox.height * imageRect.height,
+          left: bbox.x * canvasRect.width,
+          top: bbox.y * canvasRect.height,
+          width: bbox.width * canvasRect.width,
+          height: bbox.height * canvasRect.height,
         }
       : null;
     const finalNaturalCoordinate = bbox
       ? {
-          left: bbox.x * image.naturalWidth,
-          top: bbox.y * image.naturalHeight,
-          width: bbox.width * image.naturalWidth,
-          height: bbox.height * image.naturalHeight,
+          left: bbox.x * naturalWidth,
+          top: bbox.y * naturalHeight,
+          width: bbox.width * naturalWidth,
+          height: bbox.height * naturalHeight,
         }
       : null;
     const warnings = [
-      image.naturalWidth <= 0 || image.naturalHeight <= 0
-        ? 'image_natural_size_not_ready'
+      naturalWidth <= 0 || naturalHeight <= 0
+        ? 'canvas_natural_size_not_ready'
         : null,
-      imageRect.width <= 0 || imageRect.height <= 0
-        ? 'image_display_size_not_ready'
+      canvasRect.width <= 0 || canvasRect.height <= 0
+        ? 'canvas_display_size_not_ready'
         : null,
       bbox &&
       (bbox.x < 0 ||
@@ -1164,16 +1337,16 @@ function logPdfBboxMappingDebug(input: {
         match_type: input.match.match_type,
       },
       imageNaturalSize: {
-        width: image.naturalWidth,
-        height: image.naturalHeight,
+        width: naturalWidth,
+        height: naturalHeight,
       },
       imageDisplaySize: {
-        width: imageRect.width,
-        height: imageRect.height,
+        width: canvasRect.width,
+        height: canvasRect.height,
       },
       imageOffsetInPageContainer: {
-        left: imageRect.left - pageRect.left,
-        top: imageRect.top - pageRect.top,
+        left: canvasRect.left - pageRect.left,
+        top: canvasRect.top - pageRect.top,
       },
       pageContainerDisplaySize: {
         width: pageRect.width,
@@ -1185,12 +1358,7 @@ function logPdfBboxMappingDebug(input: {
     });
   };
 
-  if (image.complete && image.naturalWidth > 0) {
-    writeDebugLog();
-    return;
-  }
-
-  image.addEventListener('load', writeDebugLog, { once: true });
+  window.setTimeout(writeDebugLog, 0);
 }
 
 function persistSlotReviewPayloadToSession(payload: SlotReviewSessionPayload) {
@@ -1198,7 +1366,10 @@ function persistSlotReviewPayloadToSession(payload: SlotReviewSessionPayload) {
     return;
   }
 
-  window.sessionStorage.setItem(SLOT_REVIEW_SESSION_KEY, JSON.stringify(payload));
+  window.sessionStorage.setItem(
+    SLOT_REVIEW_SESSION_KEY,
+    JSON.stringify(payload),
+  );
 }
 
 function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
@@ -1276,6 +1447,8 @@ export function SlotReviewWorkspace() {
   const [pdfLocationEditState, setPdfLocationEditState] =
     useState<PdfLocationEditState | null>(null);
   const [pdfZoom, setPdfZoom] = useState(1);
+  const [isDocxPanelCollapsed, setIsDocxPanelCollapsed] = useState(false);
+  const [isSlotPanelCollapsed, setIsSlotPanelCollapsed] = useState(false);
   const documentViewportRef = useRef<HTMLDivElement | null>(null);
   const documentContentRef = useRef<HTMLDivElement | null>(null);
   const pdfViewportRef = useRef<HTMLDivElement | null>(null);
@@ -1456,6 +1629,9 @@ export function SlotReviewWorkspace() {
     () => visibleItems.find((item) => item.id === activeItemId) ?? null,
     [activeItemId, visibleItems],
   );
+  const activeItemIndex = visibleItems.findIndex(
+    (item) => item.id === activeItemId,
+  );
   const activeEvidenceMatch = useMemo(
     () => findPdfEvidenceMatchForItem(activeItem, payload),
     [activeItem, payload],
@@ -1468,10 +1644,28 @@ export function SlotReviewWorkspace() {
     ? (pendingSelectionByItemId[editingItemId] ?? '')
     : '';
 
-  const scrollPdfPageIntoView = (
-    pageNumber: number,
-    bbox?: PdfBbox | null,
-  ) => {
+  const selectVisibleItemByOffset = (offset: number) => {
+    if (visibleItems.length === 0) {
+      return;
+    }
+
+    const currentIndex = activeItemIndex >= 0 ? activeItemIndex : 0;
+    const nextIndex =
+      (currentIndex + offset + visibleItems.length) % visibleItems.length;
+    const nextItem = visibleItems[nextIndex];
+
+    if (!nextItem) {
+      return;
+    }
+
+    setWorkspaceState((currentState) => ({
+      ...currentState,
+      activeItemId: nextItem.id,
+    }));
+    setPdfLocationEditState(null);
+  };
+
+  const scrollPdfPageIntoView = (pageNumber: number, bbox?: PdfBbox | null) => {
     const viewport = pdfViewportRef.current;
     const targetPage = pdfPageRefs.current[pageNumber];
 
@@ -1929,16 +2123,19 @@ export function SlotReviewWorkspace() {
   }
 
   const pdfEvidencePages = payload.pdfEvidence?.pages ?? [];
+  const currentDocumentName =
+    payload.documentInfo.document_name || payload.fileName;
   const docxPreviewDescription = isAddingItem
     ? '正在手动新增槽位。请先在左侧 DOCX 预览中框选一段连续文本作为槽位抽取值，再在右侧填写槽位含义并点击“保存新增”。'
     : editingItem
       ? `正在修改：${editingItem.field_category}。请先在左侧 DOCX 预览中框选一段连续文本，再点击右侧“保存”才会正式写回槽位。`
-      : activeItem
-        ? `已定位到：${activeItem.field_category} - ${activeItem.original_value || '未填写'}`
-        : '点击右侧槽位后，DOCX 与 PDF 会同步定位到对应位置。';
+      : `当前文件：${currentDocumentName}`;
+  const activeSlotSummary = activeItem
+    ? `${activeItem.field_category}：${activeItem.original_value || '未填写'}`
+    : '尚未选择槽位';
 
   return (
-    <Stack gap="xl">
+    <Stack gap="lg" style={{ fontSize: 13 }}>
       <Stack gap="sm">
         <Group justify="space-between" align="center">
           <div>
@@ -1971,300 +2168,415 @@ export function SlotReviewWorkspace() {
             </Button>
           </Group>
         </Group>
-        <Text c="dimmed">
-          当前文件：{payload.documentInfo.document_name || payload.fileName}
-        </Text>
       </Stack>
 
-      <Group align="stretch" gap="xl" wrap="wrap">
+      <Group
+        align="stretch"
+        gap="md"
+        wrap="nowrap"
+        style={{ minWidth: 0, overflow: 'hidden' }}
+      >
         <Paper
-          p="lg"
+          p={isSlotPanelCollapsed ? 'xs' : 'md'}
           radius="xl"
           withBorder
           style={{
             background:
               'linear-gradient(180deg, rgba(37, 37, 37, 0.98), rgba(29, 29, 29, 0.98))',
             borderColor: 'rgba(255, 255, 255, 0.14)',
-            flex: '0 0 340px',
-            height: 'calc(100vh - 210px)',
-            minWidth: 320,
+            flex: isSlotPanelCollapsed ? '0 0 54px' : '0 0 300px',
+            height: 'calc(100vh - 178px)',
+            minWidth: isSlotPanelCollapsed ? 54 : 280,
             order: 3,
+            overflow: 'hidden',
           }}
         >
-          <Stack gap="lg" h="100%">
-            <Group align="flex-start" justify="space-between">
-              <div>
-                <Title c="#fffaf0" order={4}>
+          {isSlotPanelCollapsed ? (
+            <Stack align="center" gap="sm" h="100%" justify="space-between">
+              <Stack align="center" gap="sm">
+                <Button
+                  color="teal"
+                  radius="xl"
+                  size="compact-xs"
+                  variant="filled"
+                  onClick={() => setIsSlotPanelCollapsed(false)}
+                >
+                  展
+                </Button>
+                <Text
+                  c="#fffaf0"
+                  fw={800}
+                  size="xs"
+                  style={{ writingMode: 'vertical-rl' }}
+                >
                   抽取槽位
-                </Title>
-                <Text c="gray.5" mt={6} size="sm">
-                  选择槽位后，左侧 DOCX 和中间 PDF 会联动定位。
                 </Text>
-              </div>
-              <Badge color="teal" radius="xl" variant="filled">
-                {visibleItems.length} 个
-              </Badge>
-            </Group>
-            <Button
-              color="teal"
-              disabled={Boolean(editingItemId)}
-              fullWidth
-              radius="xl"
-              style={{
-                boxShadow: isAddingItem
-                  ? '0 12px 28px rgba(18, 184, 134, 0.2)'
-                  : undefined,
-              }}
-              variant="filled"
-              onClick={() => {
-                if (editingItemId) {
-                  notifications.show({
-                    color: 'yellow',
-                    title: '请先完成当前槽位修改',
-                    message:
-                      '当前正在修改已有槽位，请先保存或取消后再新增槽位。',
-                  });
-                  return;
-                }
-
-                setWorkspaceState((currentState) => ({
-                  ...currentState,
-                  activeItemId: null,
-                  isAddingItem: !currentState.isAddingItem,
-                  pendingNewItemSelection: currentState.isAddingItem
-                    ? ''
-                    : currentState.pendingNewItemSelection,
-                  pendingNewItemParagraphIndex: currentState.isAddingItem
-                    ? null
-                    : currentState.pendingNewItemParagraphIndex,
-                  pendingNewItemMeaning: currentState.isAddingItem
-                    ? ''
-                    : currentState.pendingNewItemMeaning,
-                }));
-              }}
-            >
-              {isAddingItem ? '取消新增槽位' : '手动新增槽位'}
-            </Button>
-            <ScrollArea
-              offsetScrollbars
-              scrollbarSize={8}
-              style={{ flex: 1 }}
-              type="always"
-            >
-              <Stack gap="md">
-                {isAddingItem ? (
-                  <Card
-                    padding="md"
+                <Badge color="teal" radius="xl" size="sm" variant="filled">
+                  {visibleItems.length}
+                </Badge>
+              </Stack>
+              <Stack align="center" gap={6}>
+                <Button
+                  color="gray"
+                  disabled={visibleItems.length <= 1}
+                  radius="xl"
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() => selectVisibleItemByOffset(-1)}
+                >
+                  ↑
+                </Button>
+                <Text
+                  c="gray.4"
+                  fw={700}
+                  size="xs"
+                  style={{
+                    maxHeight: 120,
+                    overflow: 'hidden',
+                    textAlign: 'center',
+                    writingMode: 'vertical-rl',
+                  }}
+                >
+                  {activeItem?.field_category ?? '槽位'}
+                </Text>
+                <Button
+                  color="gray"
+                  disabled={visibleItems.length <= 1}
+                  radius="xl"
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() => selectVisibleItemByOffset(1)}
+                >
+                  ↓
+                </Button>
+                {payload.pdfEvidence ? (
+                  <Button
+                    color="orange"
+                    disabled={!activeItem}
                     radius="xl"
-                    withBorder
-                    style={{
-                      background:
-                        'linear-gradient(180deg, rgba(47, 47, 47, 0.96), rgba(38, 38, 38, 0.96))',
-                      borderColor: '#38d39f',
-                      boxShadow: '0 0 0 1px #38d39f inset',
-                      color: '#fffaf0',
-                    }}
+                    size="compact-xs"
+                    variant="subtle"
+                    onClick={() => handleStartPdfLocationEdit(activeItem)}
                   >
-                    <Stack gap="sm">
-                      <Group justify="space-between">
-                        <Badge color="teal" variant="filled">
-                          手动新增
-                        </Badge>
-                        <Group gap="xs">
-                          <Button
-                            color="yellow"
-                            radius="xl"
-                            size="compact-xs"
-                            variant="subtle"
-                            onClick={() =>
-                              setWorkspaceState((currentState) => ({
-                                ...currentState,
-                                isAddingItem: false,
-                                pendingNewItemSelection: '',
-                                pendingNewItemParagraphIndex: null,
-                                pendingNewItemMeaning: '',
-                              }))
-                            }
-                          >
-                            取消
-                          </Button>
-                          <Button
-                            color="teal"
-                            radius="xl"
-                            size="compact-xs"
-                            variant="filled"
-                            onClick={() => {
-                              if (
-                                !pendingNewItemSelection.trim() ||
-                                !pendingNewItemMeaning.trim()
-                              ) {
-                                notifications.show({
-                                  color: 'yellow',
-                                  title: '新增槽位信息不完整',
-                                  message:
-                                    '请先在 DOCX 预览中框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
-                                });
-                                return;
-                              }
+                    定
+                  </Button>
+                ) : null}
+              </Stack>
+            </Stack>
+          ) : (
+            <Stack gap="sm" h="100%">
+              <Group align="flex-start" justify="space-between">
+                <div>
+                  <Title c="#fffaf0" order={4}>
+                    抽取槽位
+                  </Title>
+                  <Text c="gray.5" mt={4} size="xs">
+                    选择槽位后，左侧 DOCX 和中间 PDF 会联动定位。
+                  </Text>
+                </div>
+                <Group gap={6}>
+                  <Badge color="teal" radius="xl" variant="filled">
+                    {visibleItems.length} 个
+                  </Badge>
+                  <Button
+                    color="gray"
+                    radius="xl"
+                    size="compact-xs"
+                    variant="subtle"
+                    onClick={() => setIsSlotPanelCollapsed(true)}
+                  >
+                    收起
+                  </Button>
+                </Group>
+              </Group>
+              <Button
+                color="teal"
+                disabled={Boolean(editingItemId)}
+                fullWidth
+                radius="xl"
+                style={{
+                  boxShadow: isAddingItem
+                    ? '0 12px 28px rgba(18, 184, 134, 0.2)'
+                    : undefined,
+                }}
+                variant="filled"
+                onClick={() => {
+                  if (editingItemId) {
+                    notifications.show({
+                      color: 'yellow',
+                      title: '请先完成当前槽位修改',
+                      message:
+                        '当前正在修改已有槽位，请先保存或取消后再新增槽位。',
+                    });
+                    return;
+                  }
 
-                              setWorkspaceState((currentState) => {
-                                const nextSequence =
-                                  currentState.items.reduce(
-                                    (maxSequence, item) =>
-                                      Math.max(maxSequence, item.sequence),
-                                    0,
-                                  ) + 1;
-                                const newItem: EditableExtractionItem = {
-                                  id: `manual-${Date.now()}`,
-                                  paragraphTitle: '手动新增槽位',
-                                  sequence: nextSequence,
-                                  field_category: '手动新增',
-                                  original_value:
-                                    currentState.pendingNewItemSelection.trim(),
-                                  meaning_to_applicant:
-                                    currentState.pendingNewItemMeaning.trim(),
-                                  original_doc_position:
-                                    currentState.pendingNewItemSelection.trim(),
-                                  paragraph_index:
-                                    currentState.pendingNewItemParagraphIndex ??
-                                    undefined,
-                                };
-
-                                return {
+                  setWorkspaceState((currentState) => ({
+                    ...currentState,
+                    activeItemId: null,
+                    isAddingItem: !currentState.isAddingItem,
+                    pendingNewItemSelection: currentState.isAddingItem
+                      ? ''
+                      : currentState.pendingNewItemSelection,
+                    pendingNewItemParagraphIndex: currentState.isAddingItem
+                      ? null
+                      : currentState.pendingNewItemParagraphIndex,
+                    pendingNewItemMeaning: currentState.isAddingItem
+                      ? ''
+                      : currentState.pendingNewItemMeaning,
+                  }));
+                }}
+              >
+                {isAddingItem ? '取消新增槽位' : '手动新增槽位'}
+              </Button>
+              <ScrollArea
+                offsetScrollbars
+                scrollbarSize={8}
+                style={{ flex: 1 }}
+                type="always"
+              >
+                <Stack gap="md">
+                  {isAddingItem ? (
+                    <Card
+                      padding="sm"
+                      radius="xl"
+                      withBorder
+                      style={{
+                        background:
+                          'linear-gradient(180deg, rgba(47, 47, 47, 0.96), rgba(38, 38, 38, 0.96))',
+                        borderColor: '#38d39f',
+                        boxShadow: '0 0 0 1px #38d39f inset',
+                        color: '#fffaf0',
+                      }}
+                    >
+                      <Stack gap="xs">
+                        <Group justify="space-between">
+                          <Badge color="teal" variant="filled">
+                            手动新增
+                          </Badge>
+                          <Group gap="xs">
+                            <Button
+                              color="yellow"
+                              radius="xl"
+                              size="compact-xs"
+                              variant="subtle"
+                              onClick={() =>
+                                setWorkspaceState((currentState) => ({
                                   ...currentState,
-                                  items: [...currentState.items, newItem],
-                                  activeItemId: newItem.id,
                                   isAddingItem: false,
                                   pendingNewItemSelection: '',
                                   pendingNewItemParagraphIndex: null,
                                   pendingNewItemMeaning: '',
-                                };
-                              });
+                                }))
+                              }
+                            >
+                              取消
+                            </Button>
+                            <Button
+                              color="teal"
+                              radius="xl"
+                              size="compact-xs"
+                              variant="filled"
+                              onClick={() => {
+                                if (
+                                  !pendingNewItemSelection.trim() ||
+                                  !pendingNewItemMeaning.trim()
+                                ) {
+                                  notifications.show({
+                                    color: 'yellow',
+                                    title: '新增槽位信息不完整',
+                                    message:
+                                      '请先在 DOCX 预览中框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
+                                  });
+                                  return;
+                                }
 
-                              notifications.show({
-                                color: 'teal',
-                                title: '新增槽位已加入',
-                                message:
-                                  '手动新增槽位已经加入当前模板编辑结果，记得点击顶部“保存模板”完成保存。',
-                              });
-                            }}
-                          >
-                            保存新增
-                          </Button>
+                                setWorkspaceState((currentState) => {
+                                  const nextSequence =
+                                    currentState.items.reduce(
+                                      (maxSequence, item) =>
+                                        Math.max(maxSequence, item.sequence),
+                                      0,
+                                    ) + 1;
+                                  const newItem: EditableExtractionItem = {
+                                    id: `manual-${Date.now()}`,
+                                    paragraphTitle: '手动新增槽位',
+                                    sequence: nextSequence,
+                                    field_category: '手动新增',
+                                    original_value:
+                                      currentState.pendingNewItemSelection.trim(),
+                                    meaning_to_applicant:
+                                      currentState.pendingNewItemMeaning.trim(),
+                                    original_doc_position:
+                                      currentState.pendingNewItemSelection.trim(),
+                                    paragraph_index:
+                                      currentState.pendingNewItemParagraphIndex ??
+                                      undefined,
+                                  };
+
+                                  return {
+                                    ...currentState,
+                                    items: [...currentState.items, newItem],
+                                    activeItemId: newItem.id,
+                                    isAddingItem: false,
+                                    pendingNewItemSelection: '',
+                                    pendingNewItemParagraphIndex: null,
+                                    pendingNewItemMeaning: '',
+                                  };
+                                });
+
+                                notifications.show({
+                                  color: 'teal',
+                                  title: '新增槽位已加入',
+                                  message:
+                                    '手动新增槽位已经加入当前模板编辑结果，记得点击顶部“保存模板”完成保存。',
+                                });
+                              }}
+                            >
+                              保存新增
+                            </Button>
+                          </Group>
                         </Group>
-                      </Group>
-                      <TextInput
-                        label="槽位抽取值"
-                        readOnly
-                        styles={{
-                          input: {
-                            background: 'rgba(255, 255, 255, 0.04)',
-                            borderColor: 'rgba(255, 255, 255, 0.16)',
-                            color: '#fffaf0',
-                          },
-                          label: { color: '#d8f7eb' },
+                        <TextInput
+                          label="槽位抽取值"
+                          readOnly
+                          size="xs"
+                          styles={{
+                            input: {
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              borderColor: 'rgba(255, 255, 255, 0.16)',
+                              color: '#fffaf0',
+                            },
+                            label: { color: '#d8f7eb' },
+                          }}
+                          value={pendingNewItemSelection}
+                        />
+                        <TextInput
+                          label="槽位含义"
+                          size="xs"
+                          styles={{
+                            input: {
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              borderColor: 'rgba(255, 255, 255, 0.16)',
+                              color: '#fffaf0',
+                            },
+                            label: { color: '#d8f7eb' },
+                          }}
+                          value={pendingNewItemMeaning}
+                          onChange={(event) => {
+                            const nextMeaning = event.currentTarget.value;
+
+                            setWorkspaceState((currentState) => ({
+                              ...currentState,
+                              pendingNewItemMeaning: nextMeaning,
+                            }));
+                          }}
+                        />
+                        <Text c="yellow" size="xs">
+                          新增中：槽位抽取值必须通过 DOCX
+                          预览框选生成，不能手动输入；槽位含义填写后才能保存新增。
+                        </Text>
+                      </Stack>
+                    </Card>
+                  ) : null}
+                  {visibleItems.map((item) => {
+                    const isActive = item.id === activeItemId;
+                    const isEditing = item.id === editingItemId;
+                    const isLockedByOtherEditing = Boolean(
+                      (editingItemId && editingItemId !== item.id) ||
+                      isAddingItem,
+                    );
+                    const pendingSelection =
+                      pendingSelectionByItemId[item.id] ?? '';
+                    const evidenceMatch = findPdfEvidenceMatchForItem(
+                      item,
+                      payload,
+                    );
+
+                    return (
+                      <Card
+                        key={item.id}
+                        padding="sm"
+                        radius="xl"
+                        withBorder
+                        style={{
+                          background: isActive
+                            ? 'linear-gradient(180deg, rgba(42, 47, 43, 0.98), rgba(37, 39, 38, 0.98))'
+                            : 'linear-gradient(180deg, rgba(43, 43, 43, 0.96), rgba(35, 35, 35, 0.96))',
+                          cursor: 'pointer',
+                          opacity: isLockedByOtherEditing ? 0.72 : 1,
+                          borderColor: isActive
+                            ? '#38d39f'
+                            : 'rgba(255, 255, 255, 0.12)',
+                          boxShadow: isActive
+                            ? '0 0 0 1px #38d39f inset, 0 18px 48px rgba(18, 184, 134, 0.12)'
+                            : '0 12px 34px rgba(0, 0, 0, 0.18)',
+                          color: '#fffaf0',
                         }}
-                        value={pendingNewItemSelection}
-                      />
-                      <TextInput
-                        label="槽位含义"
-                        styles={{
-                          input: {
-                            background: 'rgba(255, 255, 255, 0.04)',
-                            borderColor: 'rgba(255, 255, 255, 0.16)',
-                            color: '#fffaf0',
-                          },
-                          label: { color: '#d8f7eb' },
-                        }}
-                        value={pendingNewItemMeaning}
-                        onChange={(event) => {
-                          const nextMeaning = event.currentTarget.value;
+                        onClick={() => {
+                          if (isLockedByOtherEditing) {
+                            notifications.show({
+                              color: 'yellow',
+                              title: '请先完成当前槽位修改',
+                              message:
+                                '当前正在修改另一个槽位，请先在 DOCX 预览中完成框选，或点击“取消”后再切换。',
+                            });
+                            return;
+                          }
 
                           setWorkspaceState((currentState) => ({
                             ...currentState,
-                            pendingNewItemMeaning: nextMeaning,
+                            activeItemId: item.id,
                           }));
+                          setPdfLocationEditState(null);
                         }}
-                      />
-                      <Text c="yellow" size="xs">
-                        新增中：槽位抽取值必须通过 DOCX 预览框选生成，不能手动输入；槽位含义填写后才能保存新增。
-                      </Text>
-                    </Stack>
-                  </Card>
-                ) : null}
-                {visibleItems.map((item) => {
-                  const isActive = item.id === activeItemId;
-                  const isEditing = item.id === editingItemId;
-                  const isLockedByOtherEditing = Boolean(
-                    (editingItemId && editingItemId !== item.id) ||
-                    isAddingItem,
-                  );
-                  const pendingSelection =
-                    pendingSelectionByItemId[item.id] ?? '';
-                  const evidenceMatch = findPdfEvidenceMatchForItem(
-                    item,
-                    payload,
-                  );
+                      >
+                        <Stack gap="xs">
+                          <Group justify="space-between">
+                            <Badge
+                              color="teal"
+                              radius="sm"
+                              variant={isActive ? 'filled' : 'light'}
+                            >
+                              {item.field_category}
+                            </Badge>
+                            <Group gap="xs">
+                              {payload.pdfEvidence ? (
+                                <Button
+                                  color="orange"
+                                  disabled={isLockedByOtherEditing}
+                                  radius="xl"
+                                  size="compact-xs"
+                                  variant={
+                                    pdfLocationEditState?.itemId === item.id
+                                      ? 'filled'
+                                      : 'subtle'
+                                  }
+                                  onClick={(event) => {
+                                    event.stopPropagation();
 
-                  return (
-                    <Card
-                      key={item.id}
-                      padding="md"
-                      radius="xl"
-                      withBorder
-                      style={{
-                        background: isActive
-                          ? 'linear-gradient(180deg, rgba(42, 47, 43, 0.98), rgba(37, 39, 38, 0.98))'
-                          : 'linear-gradient(180deg, rgba(43, 43, 43, 0.96), rgba(35, 35, 35, 0.96))',
-                        cursor: 'pointer',
-                        opacity: isLockedByOtherEditing ? 0.72 : 1,
-                        borderColor: isActive
-                          ? '#38d39f'
-                          : 'rgba(255, 255, 255, 0.12)',
-                        boxShadow: isActive
-                          ? '0 0 0 1px #38d39f inset, 0 18px 48px rgba(18, 184, 134, 0.12)'
-                          : '0 12px 34px rgba(0, 0, 0, 0.18)',
-                        color: '#fffaf0',
-                      }}
-                      onClick={() => {
-                        if (isLockedByOtherEditing) {
-                          notifications.show({
-                            color: 'yellow',
-                            title: '请先完成当前槽位修改',
-                            message:
-                              '当前正在修改另一个槽位，请先在 DOCX 预览中完成框选，或点击“取消”后再切换。',
-                          });
-                          return;
-                        }
+                                    if (isLockedByOtherEditing) {
+                                      notifications.show({
+                                        color: 'yellow',
+                                        title: '请先完成当前槽位修改',
+                                        message:
+                                          '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
+                                      });
+                                      return;
+                                    }
 
-                        setWorkspaceState((currentState) => ({
-                          ...currentState,
-                          activeItemId: item.id,
-                        }));
-                        setPdfLocationEditState(null);
-                      }}
-                    >
-                      <Stack gap="sm">
-                        <Group justify="space-between">
-                          <Badge
-                            color="teal"
-                            radius="sm"
-                            variant={isActive ? 'filled' : 'light'}
-                          >
-                            {item.field_category}
-                          </Badge>
-                          <Group gap="xs">
-                            {payload.pdfEvidence ? (
+                                    handleStartPdfLocationEdit(item);
+                                  }}
+                                >
+                                  调定位
+                                </Button>
+                              ) : null}
                               <Button
-                                color="orange"
+                                color={isEditing ? 'yellow' : 'gray'}
                                 disabled={isLockedByOtherEditing}
                                 radius="xl"
                                 size="compact-xs"
-                                variant={
-                                  pdfLocationEditState?.itemId === item.id
-                                    ? 'filled'
-                                    : 'subtle'
-                                }
+                                variant={isEditing ? 'filled' : 'subtle'}
                                 onClick={(event) => {
                                   event.stopPropagation();
 
@@ -2273,91 +2585,128 @@ export function SlotReviewWorkspace() {
                                       color: 'yellow',
                                       title: '请先完成当前槽位修改',
                                       message:
-                                        '当前正在修改另一个槽位，请先完成或取消当前修改后再调整 PDF 定位。',
+                                        '当前正在修改另一个槽位，请先完成当前框选，或先取消当前修改。',
                                     });
                                     return;
                                   }
 
-                                  handleStartPdfLocationEdit(item);
+                                  setWorkspaceState((currentState) => ({
+                                    ...currentState,
+                                    activeItemId: item.id,
+                                    editingItemId:
+                                      currentState.editingItemId === item.id
+                                        ? null
+                                        : item.id,
+                                    pendingSelectionByItemId:
+                                      currentState.editingItemId === item.id
+                                        ? Object.fromEntries(
+                                            Object.entries(
+                                              currentState.pendingSelectionByItemId,
+                                            ).filter(
+                                              ([currentItemId]) =>
+                                                currentItemId !== item.id,
+                                            ),
+                                          )
+                                        : currentState.pendingSelectionByItemId,
+                                  }));
                                 }}
                               >
-                                调定位
+                                {isEditing ? '取消' : '修改'}
                               </Button>
-                            ) : null}
-                            <Button
-                              color={isEditing ? 'yellow' : 'gray'}
-                              disabled={isLockedByOtherEditing}
-                              radius="xl"
-                              size="compact-xs"
-                              variant={isEditing ? 'filled' : 'subtle'}
-                              onClick={(event) => {
-                                event.stopPropagation();
-
-                                if (isLockedByOtherEditing) {
-                                  notifications.show({
-                                    color: 'yellow',
-                                    title: '请先完成当前槽位修改',
-                                    message:
-                                      '当前正在修改另一个槽位，请先完成当前框选，或先取消当前修改。',
-                                  });
-                                  return;
-                                }
-
-                                setWorkspaceState((currentState) => ({
-                                  ...currentState,
-                                  activeItemId: item.id,
-                                  editingItemId:
-                                    currentState.editingItemId === item.id
-                                      ? null
-                                      : item.id,
-                                  pendingSelectionByItemId:
-                                    currentState.editingItemId === item.id
-                                      ? Object.fromEntries(
+                              {isEditing ? (
+                                <Button
+                                  color="teal"
+                                  disabled={!pendingSelection}
+                                  radius="xl"
+                                  size="compact-xs"
+                                  variant="filled"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setWorkspaceState((currentState) => ({
+                                      ...currentState,
+                                      items: currentState.items.map(
+                                        (currentItem) =>
+                                          currentItem.id === item.id
+                                            ? {
+                                                ...currentItem,
+                                                original_value:
+                                                  currentState
+                                                    .pendingSelectionByItemId[
+                                                    item.id
+                                                  ] ??
+                                                  currentItem.original_value,
+                                                original_doc_position:
+                                                  currentState
+                                                    .pendingSelectionByItemId[
+                                                    item.id
+                                                  ] ??
+                                                  currentItem.original_doc_position,
+                                              }
+                                            : currentItem,
+                                      ),
+                                      editingItemId: null,
+                                      pendingSelectionByItemId:
+                                        Object.fromEntries(
                                           Object.entries(
                                             currentState.pendingSelectionByItemId,
                                           ).filter(
                                             ([currentItemId]) =>
                                               currentItemId !== item.id,
                                           ),
-                                        )
-                                      : currentState.pendingSelectionByItemId,
-                                }));
-                              }}
-                            >
-                              {isEditing ? '取消' : '修改'}
-                            </Button>
-                            {isEditing ? (
+                                        ),
+                                    }));
+
+                                    notifications.show({
+                                      color: 'teal',
+                                      title: '槽位值已保存',
+                                      message:
+                                        '新的框选内容已经正式更新到槽位抽取值和原文定位中。',
+                                    });
+                                  }}
+                                >
+                                  保存
+                                </Button>
+                              ) : null}
                               <Button
-                                color="teal"
-                                disabled={!pendingSelection}
+                                color="red"
+                                disabled={isLockedByOtherEditing}
                                 radius="xl"
                                 size="compact-xs"
-                                variant="filled"
+                                variant="subtle"
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  setWorkspaceState((currentState) => ({
-                                    ...currentState,
-                                    items: currentState.items.map(
+
+                                  if (isLockedByOtherEditing) {
+                                    notifications.show({
+                                      color: 'yellow',
+                                      title: '请先完成当前槽位修改',
+                                      message:
+                                        '当前正在修改另一个槽位，请先完成或取消当前修改后再删除其它槽位。',
+                                    });
+                                    return;
+                                  }
+
+                                  const visibleItemIndex =
+                                    visibleItems.findIndex(
+                                      (visibleItem) =>
+                                        visibleItem.id === item.id,
+                                    );
+                                  const nextVisibleItemId =
+                                    visibleItems[visibleItemIndex + 1]?.id ??
+                                    visibleItems[visibleItemIndex - 1]?.id ??
+                                    null;
+
+                                  setWorkspaceState((currentState) => {
+                                    const nextItems = currentState.items.filter(
                                       (currentItem) =>
-                                        currentItem.id === item.id
-                                          ? {
-                                              ...currentItem,
-                                              original_value:
-                                                currentState
-                                                  .pendingSelectionByItemId[
-                                                  item.id
-                                                ] ?? currentItem.original_value,
-                                              original_doc_position:
-                                                currentState
-                                                  .pendingSelectionByItemId[
-                                                  item.id
-                                                ] ??
-                                                currentItem.original_doc_position,
-                                            }
-                                          : currentItem,
-                                    ),
-                                    editingItemId: null,
-                                    pendingSelectionByItemId:
+                                        currentItem.id !== item.id,
+                                    );
+                                    const nextActiveItemId =
+                                      currentState.activeItemId === item.id
+                                        ? nextVisibleItemId
+                                        : currentState.activeItemId;
+
+                                    const nextPendingSelectionByItemId =
                                       Object.fromEntries(
                                         Object.entries(
                                           currentState.pendingSelectionByItemId,
@@ -2365,256 +2714,245 @@ export function SlotReviewWorkspace() {
                                           ([currentItemId]) =>
                                             currentItemId !== item.id,
                                         ),
-                                      ),
-                                  }));
+                                      );
+
+                                    return {
+                                      ...currentState,
+                                      items: nextItems,
+                                      activeItemId: nextActiveItemId,
+                                      editingItemId:
+                                        currentState.editingItemId === item.id
+                                          ? null
+                                          : currentState.editingItemId,
+                                      pendingSelectionByItemId:
+                                        nextPendingSelectionByItemId,
+                                    };
+                                  });
 
                                   notifications.show({
-                                    color: 'teal',
-                                    title: '槽位值已保存',
+                                    color: 'red',
+                                    title: '槽位已删除',
                                     message:
-                                      '新的框选内容已经正式更新到槽位抽取值和原文定位中。',
+                                      '该槽位已从当前模板编辑结果中移除，点击顶部“保存模板”后将不会保留。',
                                   });
                                 }}
                               >
-                                保存
+                                删除
                               </Button>
-                            ) : null}
-                            <Button
-                              color="red"
-                              disabled={isLockedByOtherEditing}
-                              radius="xl"
-                              size="compact-xs"
-                              variant="subtle"
-                              onClick={(event) => {
-                                event.stopPropagation();
-
-                                if (isLockedByOtherEditing) {
-                                  notifications.show({
-                                    color: 'yellow',
-                                    title: '请先完成当前槽位修改',
-                                    message:
-                                      '当前正在修改另一个槽位，请先完成或取消当前修改后再删除其它槽位。',
-                                  });
-                                  return;
-                                }
-
-                                const visibleItemIndex = visibleItems.findIndex(
-                                  (visibleItem) => visibleItem.id === item.id,
-                                );
-                                const nextVisibleItemId =
-                                  visibleItems[visibleItemIndex + 1]?.id ??
-                                  visibleItems[visibleItemIndex - 1]?.id ??
-                                  null;
-
-                                setWorkspaceState((currentState) => {
-                                  const nextItems = currentState.items.filter(
-                                    (currentItem) => currentItem.id !== item.id,
-                                  );
-                                  const nextActiveItemId =
-                                    currentState.activeItemId === item.id
-                                      ? nextVisibleItemId
-                                      : currentState.activeItemId;
-
-                                  const nextPendingSelectionByItemId =
-                                    Object.fromEntries(
-                                      Object.entries(
-                                        currentState.pendingSelectionByItemId,
-                                      ).filter(
-                                        ([currentItemId]) =>
-                                          currentItemId !== item.id,
-                                      ),
-                                    );
-
-                                  return {
-                                    ...currentState,
-                                    items: nextItems,
-                                    activeItemId: nextActiveItemId,
-                                    editingItemId:
-                                      currentState.editingItemId === item.id
-                                        ? null
-                                        : currentState.editingItemId,
-                                    pendingSelectionByItemId:
-                                      nextPendingSelectionByItemId,
-                                  };
-                                });
-
-                                notifications.show({
-                                  color: 'red',
-                                  title: '槽位已删除',
-                                  message:
-                                    '该槽位已从当前模板编辑结果中移除，点击顶部“保存模板”后将不会保留。',
-                                });
-                              }}
-                            >
-                              删除
-                            </Button>
+                            </Group>
                           </Group>
-                        </Group>
-                        <TextInput
-                          readOnly
-                          label="槽位抽取值"
-                          styles={{
-                            input: {
-                              background: 'rgba(255, 255, 255, 0.04)',
-                              borderColor: 'rgba(255, 255, 255, 0.14)',
-                              color: '#fffaf0',
-                            },
-                            label: { color: '#d8f7eb' },
-                          }}
-                          value={item.original_value}
-                        />
-                        <TextInput
-                          label="槽位含义"
-                          styles={{
-                            input: {
-                              background: 'rgba(255, 255, 255, 0.04)',
-                              borderColor: 'rgba(255, 255, 255, 0.14)',
-                              color: '#fffaf0',
-                            },
-                            label: { color: '#d8f7eb' },
-                          }}
-                          value={item.meaning_to_applicant}
-                          onChange={(event) => {
-                            const nextMeaning = event.currentTarget.value;
+                          <TextInput
+                            readOnly
+                            label="槽位抽取值"
+                            size="xs"
+                            styles={{
+                              input: {
+                                background: 'rgba(255, 255, 255, 0.04)',
+                                borderColor: 'rgba(255, 255, 255, 0.14)',
+                                color: '#fffaf0',
+                              },
+                              label: { color: '#d8f7eb' },
+                            }}
+                            value={item.original_value}
+                          />
+                          <TextInput
+                            label="槽位含义"
+                            size="xs"
+                            styles={{
+                              input: {
+                                background: 'rgba(255, 255, 255, 0.04)',
+                                borderColor: 'rgba(255, 255, 255, 0.14)',
+                                color: '#fffaf0',
+                              },
+                              label: { color: '#d8f7eb' },
+                            }}
+                            value={item.meaning_to_applicant}
+                            onChange={(event) => {
+                              const nextMeaning = event.currentTarget.value;
 
-                            setWorkspaceState((currentState) => ({
-                              ...currentState,
-                              items: currentState.items.map((currentItem) =>
-                                currentItem.id === item.id
-                                  ? {
-                                      ...currentItem,
-                                      meaning_to_applicant: nextMeaning,
-                                    }
-                                  : currentItem,
-                              ),
-                            }));
-                          }}
-                        />
-                        {evidenceMatch ? (
-                          <Group gap={6}>
-                            <Badge color="blue" radius="sm" variant="light">
-                              PDF 第 {evidenceMatch.page_number} 页
+                              setWorkspaceState((currentState) => ({
+                                ...currentState,
+                                items: currentState.items.map((currentItem) =>
+                                  currentItem.id === item.id
+                                    ? {
+                                        ...currentItem,
+                                        meaning_to_applicant: nextMeaning,
+                                      }
+                                    : currentItem,
+                                ),
+                              }));
+                            }}
+                          />
+                          {evidenceMatch ? (
+                            <Group gap={6}>
+                              <Badge color="blue" radius="sm" variant="light">
+                                PDF 第 {evidenceMatch.page_number} 页
+                              </Badge>
+                              <Text c="dimmed" size="xs">
+                                证据置信度：
+                                {Math.round(evidenceMatch.confidence * 100)}%
+                              </Text>
+                            </Group>
+                          ) : payload.pdfEvidence ? (
+                            <Badge color="gray" radius="sm" variant="light">
+                              未定位 PDF
                             </Badge>
-                            <Text c="dimmed" size="xs">
-                              证据置信度：
-                              {Math.round(evidenceMatch.confidence * 100)}%
+                          ) : null}
+                          {isEditing ? (
+                            <Text c="yellow" size="xs">
+                              修改中：请在 DOCX
+                              预览中框选新的连续文本片段，确认后点击“保存”再更新槽位。
                             </Text>
-                          </Group>
-                        ) : payload.pdfEvidence ? (
-                          <Badge color="gray" radius="sm" variant="light">
-                            未定位 PDF
-                          </Badge>
-                        ) : null}
-                        {isEditing ? (
-                          <Text c="yellow" size="xs">
-                            修改中：请在 DOCX 预览中框选新的连续文本片段，确认后点击“保存”再更新槽位。
-                          </Text>
-                        ) : null}
-                        {isEditing && pendingSelection ? (
-                          <Text c="teal" size="xs">
-                            待保存内容：{pendingSelection}
-                          </Text>
-                        ) : null}
-                      </Stack>
-                    </Card>
-                  );
-                })}
-              </Stack>
-            </ScrollArea>
-          </Stack>
+                          ) : null}
+                          {isEditing && pendingSelection ? (
+                            <Text c="teal" size="xs">
+                              待保存内容：{pendingSelection}
+                            </Text>
+                          ) : null}
+                        </Stack>
+                      </Card>
+                    );
+                  })}
+                </Stack>
+              </ScrollArea>
+            </Stack>
+          )}
         </Paper>
 
         <Box style={{ display: 'contents' }}>
           <Paper
-            p="lg"
+            p={isDocxPanelCollapsed ? 'xs' : 'md'}
             radius="xl"
             withBorder
             style={{
-              flex: '1 1 380px',
-              height: 'calc(100vh - 210px)',
-              minWidth: 320,
+              flex: isDocxPanelCollapsed ? '0 0 54px' : '0 0 320px',
+              height: 'calc(100vh - 178px)',
+              minWidth: isDocxPanelCollapsed ? 54 : 280,
               order: 1,
+              overflow: 'hidden',
             }}
           >
-            <Stack gap="md" h="100%">
-              <div>
-                <Title order={4}>DOCX 模板预览</Title>
-                <Text c="dimmed" mt={6} size="sm">
-                  {docxPreviewDescription}
-                </Text>
-              </div>
-              <ScrollArea
-                offsetScrollbars
-                scrollbarSize={8}
-                style={{ flex: 1 }}
-                type="always"
-                viewportRef={documentViewportRef}
-              >
-                <div
-                  style={{
-                    width: '100%',
-                    minWidth: '100%',
-                    minHeight: '100%',
-                  }}
+            {isDocxPanelCollapsed ? (
+              <Stack align="center" gap="sm" h="100%" justify="space-between">
+                <Button
+                  color="teal"
+                  radius="xl"
+                  size="compact-xs"
+                  variant="filled"
+                  onClick={() => setIsDocxPanelCollapsed(false)}
                 >
-                  <Paper
-                    p="lg"
-                    radius="lg"
+                  展
+                </Button>
+                <Text fw={800} size="xs" style={{ writingMode: 'vertical-rl' }}>
+                  DOCX 预览
+                </Text>
+                <Button
+                  color="gray"
+                  radius="xl"
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() => setIsDocxPanelCollapsed(false)}
+                >
+                  开
+                </Button>
+              </Stack>
+            ) : (
+              <Stack gap="sm" h="100%">
+                <div>
+                  <Group justify="space-between" align="flex-start">
+                    <div>
+                      <Title order={4}>DOCX 模板预览</Title>
+                      <Text c="dimmed" mt={4} size="xs">
+                        {docxPreviewDescription}
+                      </Text>
+                    </div>
+                    <Button
+                      color="gray"
+                      radius="xl"
+                      size="compact-xs"
+                      variant="subtle"
+                      onClick={() => setIsDocxPanelCollapsed(true)}
+                    >
+                      收起
+                    </Button>
+                  </Group>
+                </div>
+                <ScrollArea
+                  offsetScrollbars
+                  scrollbarSize={8}
+                  style={{ flex: 1 }}
+                  type="always"
+                  viewportRef={documentViewportRef}
+                >
+                  <div
                     style={{
                       width: '100%',
                       minWidth: '100%',
                       minHeight: '100%',
-                      boxSizing: 'border-box',
-                      background: '#f7fbf9',
-                      border: '1px solid #dbe9e1',
-                      color: '#18211d',
-                      lineHeight: 1.85,
                     }}
                   >
-                    <div
-                      className="slot-review-document"
-                      onMouseUp={handleDocumentMouseUp}
-                      ref={documentContentRef}
+                    <Paper
+                      p="md"
+                      radius="lg"
                       style={{
                         width: '100%',
-                        fontFamily:
-                          '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
-                        fontSize: '18px',
-                        lineHeight: 2,
-                        whiteSpace: 'normal',
-                        wordBreak: 'break-word',
+                        minWidth: '100%',
+                        minHeight: '100%',
+                        boxSizing: 'border-box',
+                        background: '#f7fbf9',
+                        border: '1px solid #dbe9e1',
+                        color: '#18211d',
+                        lineHeight: 1.85,
                       }}
                     >
-                      {structuredPreview ? (
-                        structuredPreview
-                      ) : (
-                        <div
-                          dangerouslySetInnerHTML={{ __html: highlightedText }}
-                        />
-                      )}
-                    </div>
-                  </Paper>
-                </div>
-              </ScrollArea>
-            </Stack>
+                      <div
+                        className="slot-review-document"
+                        onMouseUp={handleDocumentMouseUp}
+                        ref={documentContentRef}
+                        style={{
+                          width: '100%',
+                          fontFamily:
+                            '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
+                          fontSize: '13px',
+                          lineHeight: 1.58,
+                          whiteSpace: 'normal',
+                          wordBreak: 'break-word',
+                        }}
+                      >
+                        {structuredPreview ? (
+                          structuredPreview
+                        ) : (
+                          <div
+                            dangerouslySetInnerHTML={{
+                              __html: highlightedText,
+                            }}
+                          />
+                        )}
+                      </div>
+                    </Paper>
+                  </div>
+                </ScrollArea>
+              </Stack>
+            )}
           </Paper>
           {payload.pdfEvidence ? (
             <Paper
-              p="lg"
+              p="md"
               radius="xl"
               withBorder
               style={{
-                flex: '1 1 420px',
-                height: 'calc(100vh - 210px)',
-                minWidth: 340,
+                flex: '1 1 920px',
+                height: 'calc(100vh - 178px)',
+                minWidth: 520,
                 order: 2,
+                overflow: 'hidden',
               }}
             >
-              <Stack gap="md" h="100%">
+              <Stack gap="sm" h="100%">
                 <Group align="flex-start" justify="space-between">
                   <div>
                     <Title order={4}>PDF 证据定位</Title>
-                    <Text c="dimmed" mt={6} size="sm">
+                    <Text c="dimmed" mt={4} size="xs">
                       当前 PDF：{payload.pdfEvidence.pdfFileName}
                       。这里会展示所有上传页，选中槽位后自动滚动到对应页并高亮位置。
                     </Text>
@@ -2627,8 +2965,7 @@ export function SlotReviewWorkspace() {
                       variant="subtle"
                       onClick={() =>
                         updatePdfZoom(
-                          (currentZoom) =>
-                            currentZoom - PDF_PREVIEW_ZOOM_STEP,
+                          (currentZoom) => currentZoom - PDF_PREVIEW_ZOOM_STEP,
                         )
                       }
                     >
@@ -2644,8 +2981,7 @@ export function SlotReviewWorkspace() {
                       variant="subtle"
                       onClick={() =>
                         updatePdfZoom(
-                          (currentZoom) =>
-                            currentZoom + PDF_PREVIEW_ZOOM_STEP,
+                          (currentZoom) => currentZoom + PDF_PREVIEW_ZOOM_STEP,
                         )
                       }
                     >
@@ -2699,7 +3035,8 @@ export function SlotReviewWorkspace() {
                     }}
                   >
                     <Text c="orange" size="sm">
-                      请在正确的 PDF 页面上拖拽画框。保存后会把当前槽位关联到该页和新的框选位置。
+                      请在正确的 PDF
+                      页面上拖拽画框。保存后会把当前槽位关联到该页和新的框选位置。
                     </Text>
                   </Paper>
                 ) : null}
@@ -2716,8 +3053,7 @@ export function SlotReviewWorkspace() {
                       <Stack gap="md">
                         {pdfEvidencePages.map((page) => {
                           const savedMatch =
-                            activeEvidenceMatch?.page_number ===
-                            page.pageNumber
+                            activeEvidenceMatch?.page_number === page.pageNumber
                               ? activeEvidenceMatch
                               : null;
                           const draftBbox =
@@ -2732,8 +3068,8 @@ export function SlotReviewWorkspace() {
                             pdfLocationEditState?.itemId === activeItemId;
                           const zoomedPageWidth =
                             PDF_PREVIEW_BASE_WIDTH * pdfZoom;
-                          const isFitWidthZoom =
-                            Math.abs(pdfZoom - 1) < Number.EPSILON;
+                          const pageImageUrl =
+                            page.imageUrl ?? page.imageDataUrl ?? '';
 
                           return (
                             <Box
@@ -2745,11 +3081,8 @@ export function SlotReviewWorkspace() {
                                 position: 'relative',
                                 display: 'flex',
                                 justifyContent: 'center',
-                                minWidth: Math.max(
-                                  560,
-                                  zoomedPageWidth + 28,
-                                ),
-                                padding: 14,
+                                minWidth: Math.max(620, zoomedPageWidth + 28),
+                                padding: 12,
                                 background: '#101514',
                                 borderRadius: 18,
                               }}
@@ -2772,12 +3105,8 @@ export function SlotReviewWorkspace() {
                               <Box
                                 style={{
                                   position: 'relative',
-                                  width: isFitWidthZoom
-                                    ? '100%'
-                                    : zoomedPageWidth,
-                                  maxWidth: isFitWidthZoom
-                                    ? PDF_PREVIEW_BASE_WIDTH
-                                    : 'none',
+                                  width: zoomedPageWidth,
+                                  maxWidth: 'none',
                                   cursor: isEditingPage
                                     ? 'crosshair'
                                     : undefined,
@@ -2786,34 +3115,19 @@ export function SlotReviewWorkspace() {
                                     : undefined,
                                 }}
                                 onMouseDown={(event) =>
-                                  handlePdfPageMouseDown(
-                                    event,
-                                    page.pageNumber,
-                                  )
+                                  handlePdfPageMouseDown(event, page.pageNumber)
                                 }
                                 onMouseLeave={handlePdfPageMouseUp}
                                 onMouseMove={(event) =>
-                                  handlePdfPageMouseMove(
-                                    event,
-                                    page.pageNumber,
-                                  )
+                                  handlePdfPageMouseMove(event, page.pageNumber)
                                 }
                                 onMouseUp={handlePdfPageMouseUp}
                               >
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img
+                                <PdfEvidencePageCanvas
                                   alt={`${payload.pdfEvidence?.pdfFileName ?? 'PDF'} 第 ${page.pageNumber} 页`}
-                                  draggable={false}
-                                  src={page.imageUrl ?? page.imageDataUrl}
-                                  style={{
-                                    width: '100%',
-                                    height: 'auto',
-                                    display: 'block',
-                                    borderRadius: 12,
-                                    boxShadow:
-                                      '0 18px 50px rgba(0, 0, 0, 0.32)',
-                                    pointerEvents: 'none',
-                                  }}
+                                  displayWidth={zoomedPageWidth}
+                                  imageUrl={pageImageUrl}
+                                  pageNumber={page.pageNumber}
                                 />
                                 {visibleBbox ? (
                                   <Box
@@ -2871,6 +3185,66 @@ export function SlotReviewWorkspace() {
                         })}
                       </Stack>
                     </ScrollArea>
+                    {isSlotPanelCollapsed && activeItem ? (
+                      <Paper
+                        p="xs"
+                        radius="lg"
+                        style={{
+                          background: 'rgba(16, 21, 20, 0.96)',
+                          border: '1px solid rgba(56, 211, 159, 0.28)',
+                        }}
+                      >
+                        <Group justify="space-between" gap="xs" wrap="nowrap">
+                          <Text c="#fffaf0" fw={800} size="xs" truncate>
+                            当前槽位：{activeSlotSummary}
+                          </Text>
+                          <Group gap={6} wrap="nowrap">
+                            <Button
+                              color="gray"
+                              disabled={visibleItems.length <= 1}
+                              radius="xl"
+                              size="compact-xs"
+                              variant="subtle"
+                              onClick={() => selectVisibleItemByOffset(-1)}
+                            >
+                              上一个
+                            </Button>
+                            <Button
+                              color="gray"
+                              disabled={visibleItems.length <= 1}
+                              radius="xl"
+                              size="compact-xs"
+                              variant="subtle"
+                              onClick={() => selectVisibleItemByOffset(1)}
+                            >
+                              下一个
+                            </Button>
+                            {payload.pdfEvidence ? (
+                              <Button
+                                color="orange"
+                                radius="xl"
+                                size="compact-xs"
+                                variant="light"
+                                onClick={() =>
+                                  handleStartPdfLocationEdit(activeItem)
+                                }
+                              >
+                                调定位
+                              </Button>
+                            ) : null}
+                            <Button
+                              color="teal"
+                              radius="xl"
+                              size="compact-xs"
+                              variant="filled"
+                              onClick={() => setIsSlotPanelCollapsed(false)}
+                            >
+                              展开槽位
+                            </Button>
+                          </Group>
+                        </Group>
+                      </Paper>
+                    ) : null}
                   </Stack>
                 ) : (
                   <Paper
@@ -2882,7 +3256,8 @@ export function SlotReviewWorkspace() {
                     }}
                   >
                     <Text c="dimmed" size="sm">
-                      当前没有可展示的 PDF 页图，请回到首页重新上传 DOCX 和扫描 PDF 后再识别。
+                      当前没有可展示的 PDF 页图，请回到首页重新上传 DOCX 和扫描
+                      PDF 后再识别。
                     </Text>
                   </Paper>
                 )}

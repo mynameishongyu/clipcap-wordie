@@ -14,6 +14,15 @@ export interface SlotReviewPdfEvidencePayload {
     imageDataUrl?: string;
     imageUrl?: string;
     storagePath?: string;
+    crop?: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+      originalWidth: number;
+      originalHeight: number;
+      contentRatio: number;
+    };
   }>;
   ocrPages: TemplatePdfEvidenceResult['ocr_pages'];
   matches: TemplatePdfEvidenceResult['matches'];

@@ -1,7 +1,13 @@
 'use client';
 
-import type { PdfVisionPageInput } from '@/src/lib/pdf/client-pdf';
+import type {
+  PdfVisionPageCrop,
+  PdfVisionPageInput,
+} from '@/src/lib/pdf/client-pdf';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
+
+const DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY = 3;
+const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
 
 export interface StoredPdfVisionPageAsset {
   pageNumber: number;
@@ -11,6 +17,7 @@ export interface StoredPdfVisionPageAsset {
   localPreviewUrl?: string;
   contentType: string;
   size: number;
+  crop?: PdfVisionPageCrop;
 }
 
 function sanitizeStorageFileName(fileName: string) {
@@ -70,6 +77,46 @@ async function dataUrlToBlob(dataUrl: string) {
   return response.blob();
 }
 
+function getPdfVisionUploadConcurrency() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_VISION_UPLOAD_CONCURRENCY,
+  );
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY;
+  }
+
+  return Math.min(
+    MAX_PDF_VISION_UPLOAD_CONCURRENCY,
+    Math.max(1, Math.floor(parsedValue)),
+  );
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        const currentItem = items[currentIndex];
+
+        if (!currentItem) {
+          continue;
+        }
+
+        await worker(currentItem, currentIndex);
+      }
+    }),
+  );
+}
+
 export async function uploadPdfVisionPagesToSupabase(input: {
   pdfFileName: string;
   visionPages: PdfVisionPageInput[];
@@ -87,88 +134,101 @@ export async function uploadPdfVisionPagesToSupabase(input: {
 
   const safeBaseName = sanitizeStorageFileName(input.pdfFileName);
   const totalPageCount = input.visionPages.length;
-  const uploadedAssets: StoredPdfVisionPageAsset[] = [];
+  const uploadedAssets: Array<StoredPdfVisionPageAsset | undefined> =
+    Array.from({ length: totalPageCount });
+  const uploadConcurrency = getPdfVisionUploadConcurrency();
 
   input.onLog?.('[Template Extract][PDF Evidence][Storage] Upload started.', {
     pdfFileName: input.pdfFileName,
     pageCount: totalPageCount,
+    uploadConcurrency,
   });
 
-  for (const [index, visionPage] of input.visionPages.entries()) {
-    const blob = await dataUrlToBlob(visionPage.imageDataUrl);
-    const extension = getImageExtensionFromDataUrl(visionPage.imageDataUrl);
-    const storagePath =
-      `${user.id}/template-extraction-ocr/${crypto.randomUUID()}-` +
-      `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
-    const contentType =
-      blob.type || getImageContentTypeFromDataUrl(visionPage.imageDataUrl);
-    const localPreviewUrl =
-      typeof URL !== 'undefined' ? URL.createObjectURL(blob) : undefined;
+  await runWithConcurrency(
+    input.visionPages,
+    uploadConcurrency,
+    async (visionPage, index) => {
+      const blob = await dataUrlToBlob(visionPage.imageDataUrl);
+      const extension = getImageExtensionFromDataUrl(visionPage.imageDataUrl);
+      const storagePath =
+        `${user.id}/template-extraction-ocr/${crypto.randomUUID()}-` +
+        `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
+      const contentType =
+        blob.type || getImageContentTypeFromDataUrl(visionPage.imageDataUrl);
+      const localPreviewUrl =
+        typeof URL !== 'undefined' ? URL.createObjectURL(blob) : undefined;
 
-    input.onLog?.(
-      '[Template Extract][PDF Evidence][Storage] Uploading page image.',
-      {
-        pdfFileName: input.pdfFileName,
+      input.onLog?.(
+        '[Template Extract][PDF Evidence][Storage] Uploading page image.',
+        {
+          pdfFileName: input.pdfFileName,
+          pageNumber: visionPage.pageNumber,
+          index: index + 1,
+          totalPageCount,
+          blob,
+          localPreviewUrl,
+          storagePath,
+          contentType,
+          size: blob.size,
+        },
+      );
+
+      const { error: uploadError } = await supabase.storage
+        .from('generation-pdfs')
+        .upload(storagePath, blob, {
+          contentType,
+          upsert: false,
+        });
+
+      if (uploadError) {
+        throw new Error(
+          `上传 PDF 页图到 Supabase Storage 失败：${uploadError.message}`,
+        );
+      }
+
+      const { data: signedUrlData, error: signedUrlError } =
+        await supabase.storage
+          .from('generation-pdfs')
+          .createSignedUrl(storagePath, 60 * 60 * 24);
+
+      if (signedUrlError || !signedUrlData?.signedUrl) {
+        throw new Error(
+          `创建 PDF 页图预览链接失败：${signedUrlError?.message ?? storagePath}`,
+        );
+      }
+
+      const asset = {
         pageNumber: visionPage.pageNumber,
-        index: index + 1,
-        totalPageCount,
-        blob,
-        localPreviewUrl,
+        originalPageNumber: visionPage.pageNumber,
         storagePath,
+        previewUrl: signedUrlData.signedUrl,
+        ...(localPreviewUrl ? { localPreviewUrl } : {}),
         contentType,
         size: blob.size,
-      },
-    );
+        ...(visionPage.crop ? { crop: visionPage.crop } : {}),
+      } satisfies StoredPdfVisionPageAsset;
 
-    const { error: uploadError } = await supabase.storage
-      .from('generation-pdfs')
-      .upload(storagePath, blob, {
-        contentType,
-        upsert: false,
-      });
-
-    if (uploadError) {
-      throw new Error(
-        `上传 PDF 页图到 Supabase Storage 失败：${uploadError.message}`,
+      uploadedAssets[index] = asset;
+      input.onLog?.(
+        '[Template Extract][PDF Evidence][Storage] Page image uploaded.',
+        {
+          ...asset,
+          index: index + 1,
+          totalPageCount,
+        },
       );
-    }
+    },
+  );
 
-    const { data: signedUrlData, error: signedUrlError } =
-      await supabase.storage
-        .from('generation-pdfs')
-        .createSignedUrl(storagePath, 60 * 60 * 24);
-
-    if (signedUrlError || !signedUrlData?.signedUrl) {
-      throw new Error(
-        `创建 PDF 页图预览链接失败：${signedUrlError?.message ?? storagePath}`,
-      );
-    }
-
-    const asset = {
-      pageNumber: visionPage.pageNumber,
-      originalPageNumber: visionPage.pageNumber,
-      storagePath,
-      previewUrl: signedUrlData.signedUrl,
-      ...(localPreviewUrl ? { localPreviewUrl } : {}),
-      contentType,
-      size: blob.size,
-    } satisfies StoredPdfVisionPageAsset;
-
-    uploadedAssets.push(asset);
-    input.onLog?.(
-      '[Template Extract][PDF Evidence][Storage] Page image uploaded.',
-      {
-        ...asset,
-        index: index + 1,
-        totalPageCount,
-      },
-    );
-  }
+  const orderedUploadedAssets = uploadedAssets.filter(
+    (asset): asset is StoredPdfVisionPageAsset => Boolean(asset),
+  );
 
   input.onLog?.('[Template Extract][PDF Evidence][Storage] Upload completed.', {
     pdfFileName: input.pdfFileName,
-    uploadedPageCount: uploadedAssets.length,
+    uploadedPageCount: orderedUploadedAssets.length,
+    uploadConcurrency,
   });
 
-  return uploadedAssets;
+  return orderedUploadedAssets;
 }
