@@ -29,7 +29,7 @@ export interface PdfVisionPageCrop {
   contentRatio: number;
 }
 
-const DEFAULT_PDF_RENDER_SCALE = 4.0;
+const DEFAULT_PDF_RENDER_SCALE = 6.0;
 const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
 const PDF_AUTO_CROP_WHITE_MARGIN = true;

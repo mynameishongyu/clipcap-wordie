@@ -90,8 +90,22 @@ const PDF_PREVIEW_MAX_ZOOM = 2.2;
 const PDF_PREVIEW_ZOOM_STEP = 0.1;
 const PDF_PREVIEW_MAX_DEVICE_PIXEL_RATIO = 2;
 const PDF_PREVIEW_IMAGE_SMOOTHING_QUALITY = 'high';
-const PDF_PREVIEW_SHARPEN_STRENGTH = 0.22;
+const DEFAULT_PDF_PREVIEW_SHARPEN_STRENGTH = 0.25;
 const DOCX_PREVIEW_FONT_SCALE = 0.72;
+
+function getPdfPreviewSharpenStrength() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_PREVIEW_SHARPEN_STRENGTH,
+  );
+
+  if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+    return DEFAULT_PDF_PREVIEW_SHARPEN_STRENGTH;
+  }
+
+  return parsedValue;
+}
+
+const PDF_PREVIEW_SHARPEN_STRENGTH = getPdfPreviewSharpenStrength();
 
 function clampPdfZoom(value: number) {
   return Math.min(PDF_PREVIEW_MAX_ZOOM, Math.max(PDF_PREVIEW_MIN_ZOOM, value));
