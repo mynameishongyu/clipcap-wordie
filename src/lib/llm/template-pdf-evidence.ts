@@ -671,6 +671,18 @@ function isAmountLikeSlot(slot: TemplatePdfLocateSlot) {
   );
 }
 
+function normalizeEthnicityValue(value: string) {
+  return normalizeLooseText(value)
+    .replace(/(?:民?族)$/u, '')
+    .replace(/(?:族)$/u, '');
+}
+
+function isEthnicityLikeSlot(slot: TemplatePdfLocateSlot) {
+  const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
+
+  return /(?:民族|族别|ethnicity|nation)/iu.test(metadata);
+}
+
 function isPhoneLikeSlot(slot: TemplatePdfLocateSlot) {
   const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
   const digits = normalizeDigits(slot.original_value);
@@ -741,6 +753,20 @@ function validateVisionEvidenceValue(input: {
         originalPhones.size > 0 &&
         hasMatchingVariant(originalPhones, evidencePhones),
       reason: 'phone_digits_mismatch',
+    };
+  }
+
+  if (isEthnicityLikeSlot(input.slot)) {
+    const normalizedOriginal = normalizeEthnicityValue(originalValue);
+    const normalizedEvidence = normalizeEthnicityValue(evidenceText);
+
+    return {
+      valid:
+        Boolean(normalizedOriginal) &&
+        Boolean(normalizedEvidence) &&
+        (normalizedOriginal.includes(normalizedEvidence) ||
+          normalizedEvidence.includes(normalizedOriginal)),
+      reason: 'ethnicity_value_mismatch',
     };
   }
 
