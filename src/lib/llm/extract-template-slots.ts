@@ -8,6 +8,7 @@ import { getOptionalEnv, getTextLlmModel } from '@/src/lib/llm/env';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
+  getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
@@ -172,6 +173,18 @@ function getTemplateExtractionRequestIntervalMs() {
     'TEMPLATE_EXTRACTION_LLM_REQUEST_INTERVAL_MS',
     DEFAULT_TEMPLATE_EXTRACTION_REQUEST_INTERVAL_MS,
   );
+}
+
+function buildLlmTraceConfigPayload(
+  traceConfig: ReturnType<typeof getLlmRuntimeTraceConfig>,
+) {
+  return {
+    [traceConfig.modelEnvName]: traceConfig.model,
+    [traceConfig.thinkingEnabledEnvName]: traceConfig.thinkingEnabled,
+    [traceConfig.reasoningEffortEnvName]: traceConfig.reasoningEffort,
+    provider: traceConfig.provider,
+    effective_extra_body: traceConfig.extraBody,
+  };
 }
 
 async function waitForTemplateExtractionRequestSlot(input: {
@@ -966,6 +979,13 @@ export async function extractTemplateSlotsFromDocx(
   if (extractableParagraphs.length === 0) {
     throw new Error('No extractable paragraphs were found in the DOCX file.');
   }
+
+  const textTraceConfig = getLlmRuntimeTraceConfig('text');
+  const textConfigMessage =
+    `[Template Extract][Text LLM Config] ` +
+    stringifyTraceJson(buildLlmTraceConfigPayload(textTraceConfig));
+  console.info(textConfigMessage);
+  await params.onTrace?.({ message: textConfigMessage });
 
   await params.onTrace?.({
     message:

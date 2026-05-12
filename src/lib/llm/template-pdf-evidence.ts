@@ -9,6 +9,7 @@ import {
   buildChatCompletionHeaders,
   buildChatCompletionBody,
   getLlmRuntimeConfig,
+  getLlmRuntimeTraceConfig,
   type LlmProvider,
 } from '@/src/lib/llm/provider';
 
@@ -63,6 +64,20 @@ function getTemplatePdfLocatePagesPerRequest() {
   }
 
   return parsedValue;
+}
+
+function buildLlmTraceConfigPayload(
+  traceConfig: ReturnType<typeof getLlmRuntimeTraceConfig>,
+  extra?: Record<string, unknown>,
+) {
+  return {
+    [traceConfig.modelEnvName]: traceConfig.model,
+    [traceConfig.thinkingEnabledEnvName]: traceConfig.thinkingEnabled,
+    [traceConfig.reasoningEffortEnvName]: traceConfig.reasoningEffort,
+    provider: traceConfig.provider,
+    effective_extra_body: traceConfig.extraBody,
+    ...extra,
+  };
 }
 
 function chunkPages<T>(items: T[], chunkSize: number) {
@@ -1058,6 +1073,7 @@ export async function buildTemplatePdfEvidence(input: {
   const slots = buildLocateSlots(input.extractionResult);
   const targetMode = getTemplatePdfBboxTargetMode();
   const visionConfig = getLlmRuntimeConfig('vision');
+  const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
   const visionProvider = visionConfig.provider;
   const pageBatches = chunkPages(
     input.visionPages,
@@ -1069,6 +1085,15 @@ export async function buildTemplatePdfEvidence(input: {
       `[Template PDF Locate] Visual location started for ${input.pdfFileName} ` +
       `(pages: ${input.visionPages.length}, batches: ${pageBatches.length}, slots: ${slots.length}, ` +
       `provider: ${visionProvider}, model: ${visionConfig.model}, bbox_target_mode: ${targetMode}).`,
+  });
+  await input.onTrace?.({
+    message:
+      `[Template PDF Locate][Vision LLM Config] ` +
+      JSON.stringify(
+        buildLlmTraceConfigPayload(visionTraceConfig, {
+          PDF_BBOX_TARGET_MODE: targetMode,
+        }),
+      ),
   });
 
   const slotByKey = new Map(slots.map((slot) => [slot.slot_key, slot]));

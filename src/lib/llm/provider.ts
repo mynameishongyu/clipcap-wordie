@@ -25,6 +25,17 @@ export interface LlmRuntimeConfig {
   extraBody: Record<string, unknown>;
 }
 
+export interface LlmRuntimeTraceConfig {
+  provider: LlmProvider;
+  modelEnvName: string;
+  model: string;
+  thinkingEnabledEnvName: string;
+  thinkingEnabled: boolean;
+  reasoningEffortEnvName: string;
+  reasoningEffort: string | null;
+  extraBody: Record<string, unknown>;
+}
+
 const KIMI_K25_INSTANT_THINKING_CONFIG = {
   type: 'disabled',
 } as const;
@@ -111,6 +122,10 @@ function getOptionalRoleBaseUrl(role: LlmRole) {
 
 function getRoleModel(role: LlmRole) {
   return role === 'text' ? getTextLlmModel() : getVisionLlmModel();
+}
+
+function getRoleModelEnvName(role: LlmRole) {
+  return role === 'text' ? 'TEXT_LLM_MODEL' : 'VISION_LLM_MODEL';
 }
 
 function getRoleThinkingEnabledEnvName(role: LlmRole) {
@@ -311,6 +326,21 @@ export function getLlmRuntimeConfig(role: LlmRole): LlmRuntimeConfig {
     baseUrl,
     chatCompletionsUrl: resolveChatCompletionsUrl(baseUrl),
     extraBody: getProviderExtraBody(role, provider, model),
+  };
+}
+
+export function getLlmRuntimeTraceConfig(role: LlmRole): LlmRuntimeTraceConfig {
+  const config = getLlmRuntimeConfig(role);
+
+  return {
+    provider: config.provider,
+    modelEnvName: getRoleModelEnvName(role),
+    model: config.model,
+    thinkingEnabledEnvName: getRoleThinkingEnabledEnvName(role),
+    thinkingEnabled: getRoleThinkingEnabled(role),
+    reasoningEffortEnvName: getRoleReasoningEffortEnvName(role),
+    reasoningEffort: getOptionalEnv(getRoleReasoningEffortEnvName(role)) ?? null,
+    extraBody: config.extraBody,
   };
 }
 

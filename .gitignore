@@ -7,3 +7,8 @@ coverage
 test_doubao_api.py
 pdf_bbox/
 pdf_png_test/
+_ocr_run_qin/
+_ocr_run_xin/
+_ocr_tmp_qin/
+.codex_tmp_pdf_pages/
+.tmp_qin_pages/
