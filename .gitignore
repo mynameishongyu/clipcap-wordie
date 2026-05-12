@@ -5,3 +5,5 @@ node_modules
 dist
 coverage
 test_doubao_api.py
+pdf_bbox/
+pdf_png_test/

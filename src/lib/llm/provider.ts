@@ -9,7 +9,12 @@ import {
 } from '@/src/lib/llm/env';
 
 export type LlmRole = 'text' | 'vision';
-export type LlmProvider = 'kimi' | 'gemini' | 'openai-compatible';
+export type LlmProvider =
+  | 'kimi'
+  | 'gemini'
+  | 'qwen'
+  | 'doubao'
+  | 'openai-compatible';
 
 export interface LlmRuntimeConfig {
   provider: LlmProvider;
@@ -31,9 +36,28 @@ const GEMINI_REASONING_EFFORTS = [
   'high',
 ] as const;
 type GeminiReasoningEffort = (typeof GEMINI_REASONING_EFFORTS)[number];
+const DOUBAO_REASONING_EFFORTS = ['low', 'medium', 'high'] as const;
+type DoubaoReasoningEffort = (typeof DOUBAO_REASONING_EFFORTS)[number];
+const DOUBAO_DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3';
 
 function normalizeModelName(model: string) {
   return model.trim().toLowerCase();
+}
+
+function normalizeProviderName(provider: string | undefined): LlmProvider | null {
+  const normalizedProvider = provider?.trim().toLowerCase();
+
+  if (
+    normalizedProvider === 'gemini' ||
+    normalizedProvider === 'qwen' ||
+    normalizedProvider === 'kimi' ||
+    normalizedProvider === 'doubao' ||
+    normalizedProvider === 'openai-compatible'
+  ) {
+    return normalizedProvider;
+  }
+
+  return null;
 }
 
 function detectProvider(model: string): LlmProvider {
@@ -41,6 +65,14 @@ function detectProvider(model: string): LlmProvider {
 
   if (normalizedModel.startsWith('gemini-')) {
     return 'gemini';
+  }
+
+  if (normalizedModel.startsWith('qwen')) {
+    return 'qwen';
+  }
+
+  if (normalizedModel.startsWith('doubao-')) {
+    return 'doubao';
   }
 
   if (
@@ -71,6 +103,12 @@ function getRoleBaseUrl(role: LlmRole) {
   return role === 'text' ? getTextLlmBaseUrl() : getVisionLlmBaseUrl();
 }
 
+function getOptionalRoleBaseUrl(role: LlmRole) {
+  return getOptionalEnv(
+    role === 'text' ? 'TEXT_LLM_BASE_URL' : 'VISION_LLM_BASE_URL',
+  );
+}
+
 function getRoleModel(role: LlmRole) {
   return role === 'text' ? getTextLlmModel() : getVisionLlmModel();
 }
@@ -87,6 +125,10 @@ function getRoleReasoningEffortEnvName(role: LlmRole) {
     : 'VISION_LLM_REASONING_EFFORT';
 }
 
+function getRoleProviderEnvName(role: LlmRole) {
+  return role === 'text' ? 'TEXT_LLM_PROVIDER' : 'VISION_LLM_PROVIDER';
+}
+
 function getProviderApiKey(role: LlmRole, provider: LlmProvider) {
   if (provider === 'gemini') {
     return getOptionalEnv('GEMINI_API_KEY') ?? getRoleApiKey(role);
@@ -96,6 +138,23 @@ function getProviderApiKey(role: LlmRole, provider: LlmProvider) {
     return (
       getOptionalEnv('KIMI_API_KEY') ??
       getOptionalEnv('MOONSHOT_API_KEY') ??
+      getRoleApiKey(role)
+    );
+  }
+
+  if (provider === 'qwen') {
+    return (
+      getOptionalEnv('QWEN_API_KEY') ??
+      getOptionalEnv('DASHSCOPE_API_KEY') ??
+      getRoleApiKey(role)
+    );
+  }
+
+  if (provider === 'doubao') {
+    return (
+      getOptionalEnv('DOUBAO_API_KEY') ??
+      getOptionalEnv('ARK_API_KEY') ??
+      getOptionalEnv('VOLCENGINE_API_KEY') ??
       getRoleApiKey(role)
     );
   }
@@ -116,6 +175,25 @@ function getProviderBaseUrl(role: LlmRole, provider: LlmProvider) {
       getOptionalEnv('KIMI_BASE_URL') ??
       getOptionalEnv('MOONSHOT_BASE_URL') ??
       getRoleBaseUrl(role)
+    );
+  }
+
+  if (provider === 'qwen') {
+    return (
+      getOptionalEnv('QWEN_BASE_URL') ??
+      getOptionalEnv('DASHSCOPE_BASE_URL') ??
+      getOptionalRoleBaseUrl(role) ??
+      'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    );
+  }
+
+  if (provider === 'doubao') {
+    return (
+      getOptionalEnv('DOUBAO_BASE_URL') ??
+      getOptionalEnv('ARK_BASE_URL') ??
+      getOptionalEnv('VOLCENGINE_BASE_URL') ??
+      getOptionalRoleBaseUrl(role) ??
+      DOUBAO_DEFAULT_BASE_URL
     );
   }
 
@@ -160,6 +238,24 @@ function getGeminiReasoningEffort(role: LlmRole): GeminiReasoningEffort {
   );
 }
 
+function getDoubaoReasoningEffort(role: LlmRole): DoubaoReasoningEffort {
+  const rawValue =
+    getOptionalEnv(getRoleReasoningEffortEnvName(role)) ?? 'medium';
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (
+    DOUBAO_REASONING_EFFORTS.includes(
+      normalizedValue as DoubaoReasoningEffort,
+    )
+  ) {
+    return normalizedValue as DoubaoReasoningEffort;
+  }
+
+  throw new Error(
+    `${getRoleReasoningEffortEnvName(role)} must be one of: ${DOUBAO_REASONING_EFFORTS.join(', ')} for doubao models.`,
+  );
+}
+
 function getProviderExtraBody(
   role: LlmRole,
   provider: LlmProvider,
@@ -186,12 +282,26 @@ function getProviderExtraBody(
     };
   }
 
+  if (provider === 'qwen') {
+    return {
+      enable_thinking: Boolean(thinkingEnabled),
+    };
+  }
+
+  if (provider === 'doubao' && thinkingEnabled) {
+    return {
+      reasoning_effort: getDoubaoReasoningEffort(role),
+    };
+  }
+
   return {};
 }
 
 export function getLlmRuntimeConfig(role: LlmRole): LlmRuntimeConfig {
   const model = getRoleModel(role);
-  const provider = detectProvider(model);
+  const provider =
+    normalizeProviderName(getOptionalEnv(getRoleProviderEnvName(role))) ??
+    detectProvider(model);
   const baseUrl = getProviderBaseUrl(role, provider);
 
   return {
@@ -202,6 +312,19 @@ export function getLlmRuntimeConfig(role: LlmRole): LlmRuntimeConfig {
     chatCompletionsUrl: resolveChatCompletionsUrl(baseUrl),
     extraBody: getProviderExtraBody(role, provider, model),
   };
+}
+
+export function buildChatCompletionHeaders(config: LlmRuntimeConfig) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.apiKey}`,
+  };
+
+  if (config.provider === 'doubao') {
+    headers['ark-beta-image-process'] = 'true';
+  }
+
+  return headers;
 }
 
 export function buildChatCompletionBody(
