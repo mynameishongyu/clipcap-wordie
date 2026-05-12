@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
-import { getVisionLlmModel } from '@/src/lib/llm/env';
+import { getOptionalEnv, getVisionLlmModel } from '@/src/lib/llm/env';
 import {
   buildChatCompletionBody,
   buildChatCompletionHeaders,
@@ -95,7 +95,8 @@ const PDF_SLOT_FILL_VISION_TIMEOUT_PER_PAGE_MS = 15000;
 const PDF_SLOT_FILL_VISION_TIMEOUT_PER_SLOT_MS = 20000;
 const PDF_SLOT_FILL_VISION_TIMEOUT_MAX_MS = 300000;
 const MAX_VISION_REQUEST_RETRIES = 2;
-const DIRECT_VISION_PAGES_PER_REQUEST = 2;
+const DEFAULT_DIRECT_VISION_PAGES_LLM_CONCURRENCY = 1;
+const MAX_DIRECT_VISION_PAGES_LLM_CONCURRENCY = 8;
 const LEGACY_VISION_OCR_PAGES_PER_REQUEST = 2;
 const LEGACY_VISION_OCR_BATCH_CONCURRENCY = 1;
 const MAX_TEXT_PAGES_PER_CHUNK = 8;
@@ -119,6 +120,19 @@ function getVisionOcrPagesPerRequest() {
 
 function getVisionOcrBatchConcurrency() {
   return LEGACY_VISION_OCR_BATCH_CONCURRENCY;
+}
+
+function getDirectVisionPagesLlmConcurrency() {
+  const rawValue = getOptionalEnv('PDF_FILL_VISION_PAGES_LLM_CONCURRENCY');
+  const parsedValue = rawValue
+    ? Number(rawValue)
+    : DEFAULT_DIRECT_VISION_PAGES_LLM_CONCURRENCY;
+
+  if (!Number.isInteger(parsedValue) || parsedValue < 1) {
+    return DEFAULT_DIRECT_VISION_PAGES_LLM_CONCURRENCY;
+  }
+
+  return Math.min(MAX_DIRECT_VISION_PAGES_LLM_CONCURRENCY, parsedValue);
 }
 
 function normalizeJsonText(rawContent: string) {
@@ -1840,13 +1854,15 @@ async function extractAllSlotsWithTextModel(input: {
 
 function buildDirectVisionPageBatches(visionPages: PdfVisionPageInput[]) {
   const batches: PdfVisionPageInput[][] = [];
+  const llmConcurrency = getDirectVisionPagesLlmConcurrency();
+  const workerCount = Math.min(
+    Math.max(1, llmConcurrency),
+    Math.max(1, visionPages.length),
+  );
+  const batchSize = Math.ceil(visionPages.length / workerCount);
 
-  for (
-    let index = 0;
-    index < visionPages.length;
-    index += DIRECT_VISION_PAGES_PER_REQUEST
-  ) {
-    batches.push(visionPages.slice(index, index + DIRECT_VISION_PAGES_PER_REQUEST));
+  for (let index = 0; index < visionPages.length; index += batchSize) {
+    batches.push(visionPages.slice(index, index + batchSize));
   }
 
   return batches;
@@ -1926,6 +1942,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         0,
       );
       const requestLabel = `visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches}`;
+      const llmConcurrency = getDirectVisionPagesLlmConcurrency();
       const promptPayload = buildDirectVisionSlotFillPromptPayload({
         documentName: input.documentName,
         slots: input.slots,
@@ -1948,6 +1965,8 @@ async function extractSlotsFromVisionPageBatch(input: {
           reasoning_effort: visionTraceConfig.reasoningEffort,
           extra_body: visionTraceConfig.extraBody,
           request_label: requestLabel,
+          llm_concurrency_env_name: 'PDF_FILL_VISION_PAGES_LLM_CONCURRENCY',
+          llm_concurrency: llmConcurrency,
           page_numbers: pageNumbers,
           total_vision_pages: input.totalVisionPages,
           messages: [
@@ -1968,7 +1987,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         `[PDF Fill][DirectVision] Starting ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, pages: ${pageNumbers.join(
           ',',
-        )}, slots: ${input.slots.length}, timeout: ${formatElapsedMs(
+        )}, llm concurrency: ${llmConcurrency}, slots: ${input.slots.length}, timeout: ${formatElapsedMs(
           requestTimeoutMs,
         )}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
           {
@@ -2201,39 +2220,47 @@ export async function fillSlotsFromVisionPages(params: {
 
   const startedAt = Date.now();
   const batches = buildDirectVisionPageBatches(validVisionPages);
+  const llmConcurrency = getDirectVisionPagesLlmConcurrency();
   const startedMessage =
     `[PDF Fill][DirectVision] Direct visual slot fill started for ${params.pdfFileName} ` +
-    `(vision pages: ${validVisionPages.length}, batches: ${batches.length}, slots: ${params.slots.length}).`;
+    `(vision pages: ${validVisionPages.length}, batches: ${batches.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
   console.info(startedMessage);
   await params.onTrace?.({ message: startedMessage });
 
   const batchResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
   const completedSlotKeys = new Set<string>();
 
-  for (const [batchIndex, batch] of batches.entries()) {
-    const batchResult = await extractSlotsFromVisionPageBatch({
-      documentName: params.pdfFileName,
-      slots: params.slots,
-      visionPages: batch,
-      batchIndex,
-      totalBatches: batches.length,
-      totalVisionPages: validVisionPages.length,
-      onTrace: params.onTrace,
-      processStartedAtMs: params.processStartedAtMs,
-      processHardTimeoutMs: params.processHardTimeoutMs,
-    });
+  const settledBatchResults = await Promise.all(
+    batches.map(async (batch, batchIndex) => {
+      const batchResult = await extractSlotsFromVisionPageBatch({
+        documentName: params.pdfFileName,
+        slots: params.slots,
+        visionPages: batch,
+        batchIndex,
+        totalBatches: batches.length,
+        totalVisionPages: validVisionPages.length,
+        onTrace: params.onTrace,
+        processStartedAtMs: params.processStartedAtMs,
+        processHardTimeoutMs: params.processHardTimeoutMs,
+      });
 
+      return { batchIndex, batchResult };
+    }),
+  );
+
+  for (const { batchResult } of settledBatchResults) {
     batchResults.push(batchResult);
     batchResult.extracted_items.forEach((item) => {
       if (hasFilledValue(item.original_value)) {
         completedSlotKeys.add(item.slot_key);
       }
     });
-    await params.onProgress?.({
-      completedSlots: completedSlotKeys.size,
-      totalSlots: params.slots.length,
-    });
   }
+
+  await params.onProgress?.({
+    completedSlots: completedSlotKeys.size,
+    totalSlots: params.slots.length,
+  });
 
   const mergedResult = mergeSlotResults(params.slots, batchResults);
   const elapsedMs = Date.now() - startedAt;

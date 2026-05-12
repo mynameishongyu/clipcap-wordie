@@ -976,12 +976,9 @@ export function BatchGenerateModal({
             <Stack align="center" gap="sm">
               <Loader color="teal" />
               <Title order={4}>正在上传文件</Title>
-              <Text c="teal.2" fw={700} size="sm">
-                已处理 {submissionElapsedSeconds} 秒
-              </Text>
               <Text c="dimmed" size="sm" ta="center">
                 系统正在上传并解析 PDF，随后会创建批量任务。
-                这个过程可能需要一点时间，请稍候。
+                这个过程可能需要一点时间，请稍候。已处理 {submissionElapsedSeconds} 秒。
               </Text>
             </Stack>
           </Paper>

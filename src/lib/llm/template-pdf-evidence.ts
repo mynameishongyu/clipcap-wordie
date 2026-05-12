@@ -54,16 +54,20 @@ const visionLocateFetchDispatcher = new Agent({
 
 const TEMPLATE_PDF_LOCATE_REQUEST_TIMEOUT_MS = 180_000;
 const TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS = 90_000;
+const DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 1;
+const MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 8;
 
-function getTemplatePdfLocatePagesPerRequest() {
-  const rawValue = getOptionalEnv('TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST');
-  const parsedValue = rawValue ? Number(rawValue) : 1;
+function getTemplatePdfLocateLlmConcurrency() {
+  const rawValue = getOptionalEnv('TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY');
+  const parsedValue = rawValue
+    ? Number(rawValue)
+    : DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY;
 
   if (!Number.isInteger(parsedValue) || parsedValue < 1) {
-    return 1;
+    return DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY;
   }
 
-  return parsedValue;
+  return Math.min(MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY, parsedValue);
 }
 
 function buildLlmTraceConfigPayload(
@@ -80,8 +84,10 @@ function buildLlmTraceConfigPayload(
   };
 }
 
-function chunkPages<T>(items: T[], chunkSize: number) {
+function splitPagesByConcurrency<T>(items: T[], concurrency: number) {
   const chunks: T[][] = [];
+  const workerCount = Math.min(Math.max(1, concurrency), Math.max(1, items.length));
+  const chunkSize = Math.ceil(items.length / workerCount);
 
   for (let index = 0; index < items.length; index += chunkSize) {
     chunks.push(items.slice(index, index + chunkSize));
@@ -1128,16 +1134,14 @@ export async function buildTemplatePdfEvidence(input: {
   const visionConfig = getLlmRuntimeConfig('vision');
   const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
   const visionProvider = visionConfig.provider;
-  const pageBatches = chunkPages(
-    input.visionPages,
-    getTemplatePdfLocatePagesPerRequest(),
-  );
+  const llmConcurrency = getTemplatePdfLocateLlmConcurrency();
+  const pageBatches = splitPagesByConcurrency(input.visionPages, llmConcurrency);
 
   await input.onTrace?.({
     message:
       `[Template PDF Locate] Visual location started for ${input.pdfFileName} ` +
       `(pages: ${input.visionPages.length}, batches: ${pageBatches.length}, slots: ${slots.length}, ` +
-      `provider: ${visionProvider}, model: ${visionConfig.model}, bbox_target_mode: ${targetMode}).`,
+      `llm_concurrency: ${llmConcurrency}, provider: ${visionProvider}, model: ${visionConfig.model}, bbox_target_mode: ${targetMode}).`,
   });
   await input.onTrace?.({
     message:
@@ -1145,6 +1149,7 @@ export async function buildTemplatePdfEvidence(input: {
       JSON.stringify(
         buildLlmTraceConfigPayload(visionTraceConfig, {
           PDF_BBOX_TARGET_MODE: targetMode,
+          TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY: llmConcurrency,
         }),
       ),
   });
@@ -1158,28 +1163,32 @@ export async function buildTemplatePdfEvidence(input: {
     TemplatePdfEvidenceResult['matches'][number]
   >();
 
-  for (const [pageBatchIndex, pageBatch] of pageBatches.entries()) {
-    let rawMatches: VisionLocateCandidate[];
+  const settledBatchResults = await Promise.all(
+    pageBatches.map(async (pageBatch, pageBatchIndex) => {
+      try {
+        const rawMatches = await locateSlotsInPageBatch({
+          pdfFileName: input.pdfFileName,
+          pageBatch,
+          pageBatchIndex,
+          totalPageBatches: pageBatches.length,
+          slots,
+          targetMode,
+          onTrace: input.onTrace,
+        });
 
-    try {
-      rawMatches = await locateSlotsInPageBatch({
-        pdfFileName: input.pdfFileName,
-        pageBatch,
-        pageBatchIndex,
-        totalPageBatches: pageBatches.length,
-        slots,
-        targetMode,
-        onTrace: input.onTrace,
-      });
-    } catch (error) {
-      const failedMessage =
-        `[Template PDF Locate] Visual location batch ${pageBatchIndex + 1}/${pageBatches.length} skipped after failure: ` +
-        `${error instanceof Error ? error.message : String(error)}`;
-      console.error(failedMessage);
-      await input.onTrace?.({ message: failedMessage });
-      continue;
-    }
+        return { pageBatchIndex, rawMatches };
+      } catch (error) {
+        const failedMessage =
+          `[Template PDF Locate] Visual location batch ${pageBatchIndex + 1}/${pageBatches.length} skipped after failure: ` +
+          `${error instanceof Error ? error.message : String(error)}`;
+        console.error(failedMessage);
+        await input.onTrace?.({ message: failedMessage });
+        return { pageBatchIndex, rawMatches: [] };
+      }
+    }),
+  );
 
+  for (const { rawMatches } of settledBatchResults) {
     for (const candidate of rawMatches) {
       const slotKey = String(candidate.slot_key ?? '');
       const slot = slotByKey.get(slotKey);
