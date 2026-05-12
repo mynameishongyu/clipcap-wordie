@@ -1887,7 +1887,7 @@ export function SlotReviewWorkspace() {
       color: 'teal',
       title: '已暂存新的框选内容',
       message: isAddingItem
-        ? '当前只是暂存新槽位的候选值，填写槽位含义后点击“保存新增”才会真正加入模板。'
+        ? '当前只是暂存新槽位的候选值，填写槽位来源后点击“保存新增”才会真正加入模板。'
         : '当前只是暂存候选值，点击槽位上的“保存”后才会真正更新槽位抽取值。',
     });
   };
@@ -2166,7 +2166,7 @@ export function SlotReviewWorkspace() {
   const currentDocumentName =
     payload.documentInfo.document_name || payload.fileName;
   const docxPreviewDescription = isAddingItem
-    ? '正在手动新增槽位。请先在左侧 DOCX 预览中框选一段连续文本作为槽位抽取值，再在右侧填写槽位含义并点击“保存新增”。'
+    ? '正在手动新增槽位。请先在左侧 DOCX 预览中框选一段连续文本作为槽位抽取值，再在右侧填写槽位来源并点击“保存新增”。'
     : editingItem
       ? `正在修改：${editingItem.field_category}。请先在左侧 DOCX 预览中框选一段连续文本，再点击右侧“保存”才会正式写回槽位。`
       : `当前文件：${currentDocumentName}`;
@@ -2425,7 +2425,7 @@ export function SlotReviewWorkspace() {
                                     color: 'yellow',
                                     title: '新增槽位信息不完整',
                                     message:
-                                      '请先在 DOCX 预览中框选槽位抽取值，并填写槽位含义后再保存新增槽位。',
+                                      '请先在 DOCX 预览中框选槽位抽取值，并填写槽位来源后再保存新增槽位。',
                                   });
                                   return;
                                 }
@@ -2491,7 +2491,7 @@ export function SlotReviewWorkspace() {
                           value={pendingNewItemSelection}
                         />
                         <TextInput
-                          label="槽位含义"
+                          label="槽位来源"
                           size="xs"
                           styles={{
                             input: {
@@ -2513,7 +2513,7 @@ export function SlotReviewWorkspace() {
                         />
                         <Text c="yellow" size="xs">
                           新增中：槽位抽取值必须通过 DOCX
-                          预览框选生成，不能手动输入；槽位含义填写后才能保存新增。
+                          预览框选生成，不能手动输入；槽位来源填写后才能保存新增。
                         </Text>
                       </Stack>
                     </Card>
@@ -2795,7 +2795,7 @@ export function SlotReviewWorkspace() {
                             value={item.original_value}
                           />
                           <TextInput
-                            label="槽位含义"
+                            label="槽位来源"
                             size="xs"
                             styles={{
                               input: {
