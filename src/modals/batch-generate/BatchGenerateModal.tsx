@@ -132,7 +132,7 @@ function dataUrlToObjectUrl(dataUrl: string) {
   const [header, base64Payload] = dataUrl.split(',', 2);
 
   if (!header || !base64Payload) {
-    throw new Error('OCR 图片数据无效，无法生成预览链接。');
+    throw new Error('PDF 页面图片数据无效，无法生成预览链接。');
   }
 
   const mimeTypeMatch = header.match(/^data:(.*?);base64$/);
@@ -151,7 +151,7 @@ function getStatusColor(status: string) {
   switch (status) {
     case 'uploaded':
       return 'blue';
-    case 'ocr_completed':
+    case 'pdf_pages_ready':
       return 'blue';
     case 'running':
     case 'ocr_running':
@@ -178,7 +178,7 @@ function getStatusLabel(status: string) {
       return '处理中';
     case 'ocr_running':
       return '处理中';
-    case 'ocr_completed':
+    case 'pdf_pages_ready':
       return '处理中';
     case 'slot_filling':
       return '处理中';
@@ -195,9 +195,14 @@ function getStatusLabel(status: string) {
 
 function formatElapsedSeconds(item: GenerationTaskItemSummary, now: number, startedAt: number | null) {
   if (
-    ['uploaded', 'running', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(
-      item.status,
-    ) &&
+    [
+      'uploaded',
+      'running',
+      'pending',
+      'ocr_running',
+      'pdf_pages_ready',
+      'slot_filling',
+    ].includes(item.status) &&
     startedAt
   ) {
     return Math.max(item.elapsed_seconds, Math.floor((now - startedAt) / 1000));
@@ -220,6 +225,7 @@ export function BatchGenerateModal({
   const [taskId, setTaskId] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
+  const [submissionStartedAt, setSubmissionStartedAt] = useState<number | null>(null);
   const [itemStartedAtById, setItemStartedAtById] = useState<Record<string, number>>({});
   const createGenerationTaskMutation = useCreateGenerationTask();
   const processGenerationTaskItemMutation = useProcessGenerationTaskItem();
@@ -247,9 +253,9 @@ export function BatchGenerateModal({
         return;
       }
 
-      if (trigger === 'trace' && item.status !== 'ocr_completed') {
+      if (trigger === 'trace' && item.status !== 'pdf_pages_ready') {
         console.log(
-          `[Batch Generate][${item.source_pdf_name}] Slot fill launch deferred for task item ${item.id}; trace arrived before status became ocr_completed (trigger: ${trigger}, current status: ${item.status}).`,
+          `[Batch Generate][${item.source_pdf_name}] Slot fill launch deferred for task item ${item.id}; trace arrived before status became pdf_pages_ready (trigger: ${trigger}, current status: ${item.status}).`,
         );
         const existingTimeouts = pendingSlotFillRefreshTimeoutsRef.current.get(item.id) ?? [];
 
@@ -351,12 +357,20 @@ export function BatchGenerateModal({
     !hasRowParseError &&
     !hasUnparsedRows;
   const isSubmittingTask = !taskId && (createGenerationTaskMutation.isPending || isPreparingFiles);
+  const submissionElapsedSeconds = submissionStartedAt
+    ? Math.max(0, Math.floor((tick - submissionStartedAt) / 1000))
+    : 0;
 
   const taskItems = taskQuery.data?.items ?? [];
   const hasRunningItems = taskItems.some((item) =>
-    ['uploaded', 'running', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(
-      item.status,
-    ),
+    [
+      'uploaded',
+      'running',
+      'pending',
+      'ocr_running',
+      'pdf_pages_ready',
+      'slot_filling',
+    ].includes(item.status),
   );
   const succeededCount = taskItems.filter((item) =>
     ['review_pending', 'reviewed'].includes(item.status),
@@ -376,7 +390,7 @@ export function BatchGenerateModal({
   };
 
   useEffect(() => {
-    if (!hasRunningItems) {
+    if (!hasRunningItems && !isSubmittingTask) {
       return undefined;
     }
 
@@ -387,7 +401,7 @@ export function BatchGenerateModal({
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [hasRunningItems]);
+  }, [hasRunningItems, isSubmittingTask]);
 
   useEffect(() => {
     return () => {
@@ -443,7 +457,7 @@ export function BatchGenerateModal({
         current[item.id] ? current : { ...current, [item.id]: clientStartedAt },
       );
       console.log(
-        `[Batch Generate][${item.source_pdf_name}] Starting OCR for task item ${item.id} via /api/generation-task-items/${item.id}/ocr.`,
+        `[Batch Generate][${item.source_pdf_name}] Preparing PDF page images for task item ${item.id} via /api/generation-task-items/${item.id}/ocr.`,
       );
 
       void processGenerationTaskItemMutation
@@ -472,12 +486,12 @@ export function BatchGenerateModal({
     }
 
     taskQuery.data.items.forEach((item) => {
-      if (item.status !== 'ocr_completed') {
+      if (item.status !== 'pdf_pages_ready') {
         return;
       }
 
       console.log(
-        `[Batch Generate][${item.source_pdf_name}] OCR completed detected by polling for task item ${item.id}; current status is ${item.status}.`,
+        `[Batch Generate][${item.source_pdf_name}] PDF page images ready detected by polling for task item ${item.id}; current status is ${item.status}.`,
       );
       launchSlotFillForItem(item, 'polling');
     });
@@ -683,9 +697,12 @@ export function BatchGenerateModal({
           return;
         }
 
-        if (line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')) {
+        if (
+          line.includes('PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填') ||
+          line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')
+        ) {
           console.log(
-            `[Batch Generate][${item.source_pdf_name}] OCR completion trace observed for task item ${item.id}; current polled status is ${item.status}.`,
+            `[Batch Generate][${item.source_pdf_name}] PDF page ready trace observed for task item ${item.id}; current polled status is ${item.status}.`,
           );
           launchSlotFillForItem(item, 'trace');
           console.log(`[Batch Generate][${item.source_pdf_name}] ${line}`);
@@ -785,6 +802,7 @@ export function BatchGenerateModal({
     }
 
     setIsPreparingFiles(true);
+    setSubmissionStartedAt(Date.now());
     logSubmissionStage({
       title: '正在准备文件',
       description: '正在解析 PDF 并准备批量任务输入，回填将使用上传 PDF 的全部页面。',
@@ -809,15 +827,15 @@ export function BatchGenerateModal({
             }),
           );
           logSubmissionStage({
-            title: '正在生成 OCR 图片',
+            title: '正在生成 PDF 页面图片',
             description:
-              `${file.name}：正在生成 OCR 图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页）。`,
+              `${file.name}：正在生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页）。`,
           });
           const ocrVisionPages = await renderPdfPagesForVision(file, selectedOriginalPageNumbers);
           logSubmissionStage({
-            title: 'OCR 图片生成完成',
+            title: 'PDF 页面图片生成完成',
             description:
-              `${file.name}：已生成 ${ocrVisionPages.length} 张 OCR 图片，准备上传到存储。`,
+              `${file.name}：已生成 ${ocrVisionPages.length} 张 PDF 页面图片，准备上传到存储。`,
           });
 
           const currentImages = window.clipcapOcrImages ?? [];
@@ -847,7 +865,7 @@ export function BatchGenerateModal({
           });
 
           console.info(
-            `[Batch Generate][${file.name}] OCR images prepared: ${ocrVisionPages.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
+            `[Batch Generate][${file.name}] PDF page images prepared: ${ocrVisionPages.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
           );
           ocrVisionPages.forEach((visionPage, index) => {
             const uploadedPageNumber = uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
@@ -861,7 +879,7 @@ export function BatchGenerateModal({
               )?.previewUrl ?? '';
 
             console.info(
-              `[Batch Generate][${file.name}][OCR Image] uploaded page ${uploadedPageNumber}, original PDF page ${originalPageNumber}: ${previewUrl}`,
+              `[Batch Generate][${file.name}][PDF Page Image] uploaded page ${uploadedPageNumber}, original PDF page ${originalPageNumber}: ${previewUrl}`,
             );
           });
 
@@ -904,6 +922,7 @@ export function BatchGenerateModal({
       });
     } finally {
       setIsPreparingFiles(false);
+      setSubmissionStartedAt(null);
     }
   };
 
@@ -957,6 +976,9 @@ export function BatchGenerateModal({
             <Stack align="center" gap="sm">
               <Loader color="teal" />
               <Title order={4}>正在上传文件</Title>
+              <Text c="teal.2" fw={700} size="sm">
+                已处理 {submissionElapsedSeconds} 秒
+              </Text>
               <Text c="dimmed" size="sm" ta="center">
                 系统正在上传并解析 PDF，随后会创建批量任务。
                 这个过程可能需要一点时间，请稍候。
@@ -1144,7 +1166,14 @@ export function BatchGenerateModal({
                       </Text>
                     ) : null}
 
-                    {['uploaded', 'running', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(item.status) && item.slot_total_count > 0 ? (
+                    {[
+                      'uploaded',
+                      'running',
+                      'pending',
+                      'ocr_running',
+                      'pdf_pages_ready',
+                      'slot_filling',
+                    ].includes(item.status) && item.slot_total_count > 0 ? (
                       <Text c="dimmed" size="sm">
                         已完成 {item.slot_completed_count} 个槽位，待抽取 {getPendingSlotCount(item)} 个槽位
                       </Text>

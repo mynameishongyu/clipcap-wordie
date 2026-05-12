@@ -1,11 +1,9 @@
 import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
-import {
-  getOptionalEnv,
-  getVisionLlmModel,
-} from '@/src/lib/llm/env';
+import { getVisionLlmModel } from '@/src/lib/llm/env';
 import {
   buildChatCompletionBody,
+  buildChatCompletionHeaders,
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
@@ -56,7 +54,9 @@ export interface PdfVisionPageInput {
 interface ModelMatch {
   value?: string;
   snippet?: string;
-  page_number?: number | null;
+  evidence_text?: string;
+  page_number?: number | string | null;
+  confidence?: number | null;
 }
 
 interface ModelResultCandidate {
@@ -95,10 +95,11 @@ const PDF_SLOT_FILL_VISION_TIMEOUT_PER_PAGE_MS = 15000;
 const PDF_SLOT_FILL_VISION_TIMEOUT_PER_SLOT_MS = 20000;
 const PDF_SLOT_FILL_VISION_TIMEOUT_MAX_MS = 300000;
 const MAX_VISION_REQUEST_RETRIES = 2;
+const DIRECT_VISION_PAGES_PER_REQUEST = 2;
+const LEGACY_VISION_OCR_PAGES_PER_REQUEST = 2;
+const LEGACY_VISION_OCR_BATCH_CONCURRENCY = 1;
 const MAX_TEXT_PAGES_PER_CHUNK = 8;
 const MAX_TEXT_CHARS_PER_CHUNK = 12000;
-const DEFAULT_VISION_OCR_PAGES_PER_REQUEST = 2;
-const DEFAULT_VISION_OCR_BATCH_CONCURRENCY = 6;
 const MAX_TEXT_SLOT_BATCH_CONCURRENCY = 2;
 const MAX_TEXT_SLOTS_PER_REQUEST = 10;
 const PROCESS_HARD_TIMEOUT_MS = 300000;
@@ -112,34 +113,12 @@ const llmFetchDispatcher = new Agent({
   },
 });
 
-function getConfiguredPositiveInteger(name: string, fallback: number) {
-  const rawValue = getOptionalEnv(name);
-
-  if (!rawValue) {
-    return fallback;
-  }
-
-  const parsed = Number.parseInt(rawValue, 10);
-
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a positive integer when configured.`);
-  }
-
-  return parsed;
-}
-
 function getVisionOcrPagesPerRequest() {
-  return getConfiguredPositiveInteger(
-    'VISION_OCR_PAGES_PER_REQUEST',
-    DEFAULT_VISION_OCR_PAGES_PER_REQUEST,
-  );
+  return LEGACY_VISION_OCR_PAGES_PER_REQUEST;
 }
 
 function getVisionOcrBatchConcurrency() {
-  return getConfiguredPositiveInteger(
-    'VISION_OCR_BATCH_CONCURRENCY',
-    DEFAULT_VISION_OCR_BATCH_CONCURRENCY,
-  );
+  return LEGACY_VISION_OCR_BATCH_CONCURRENCY;
 }
 
 function normalizeJsonText(rawContent: string) {
@@ -345,17 +324,6 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function formatOcrTraceText(text: string) {
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-  const escaped = normalized.replace(/\n/g, '\\n');
-
-  if (escaped.length <= 1500) {
-    return escaped;
-  }
-
-  return `${escaped.slice(0, 1500)}...(truncated)`;
-}
-
 function stringifyTraceJson(value: unknown) {
   return JSON.stringify(value);
 }
@@ -529,6 +497,11 @@ function shouldRetryPdfFillRequest(error: unknown) {
 
   return (
     error.message.includes('fetch failed') ||
+    error.message.includes('PDF direct vision fill request failed (429)') ||
+    error.message.includes('PDF direct vision fill request failed (500)') ||
+    error.message.includes('PDF direct vision fill request failed (502)') ||
+    error.message.includes('PDF direct vision fill request failed (503)') ||
+    error.message.includes('PDF direct vision fill request failed (504)') ||
     error.message.includes('PDF fill model request failed (429)') ||
     error.message.includes('PDF fill model request failed (500)') ||
     error.message.includes('PDF fill model request failed (502)') ||
@@ -857,10 +830,9 @@ async function extractSlotWithTextModel(input: {
             meaning_to_applicant: input.slot.meaning_to_applicant,
             original_value: extractedValue,
             evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
-            evidence_page_numbers:
-              typeof firstMatch?.page_number === 'number'
-                ? [firstMatch.page_number]
-                : input.pageNumbers,
+            evidence_page_numbers: resolveMatchPageNumber(firstMatch)
+              ? [resolveMatchPageNumber(firstMatch) as number]
+              : input.pageNumbers,
             notes: '',
             confidence: null,
           },
@@ -1382,7 +1354,8 @@ function resolveEvidenceSnippet(
   extractedValue: string,
   firstMatch?: ModelMatch,
 ) {
-  const snippet = firstMatch?.snippet?.trim() || '';
+  const snippet =
+    firstMatch?.snippet?.trim() || firstMatch?.evidence_text?.trim() || '';
 
   if (!snippet) {
     return extractedValue;
@@ -1393,6 +1366,22 @@ function resolveEvidenceSnippet(
   }
 
   return snippet;
+}
+
+function resolveMatchPageNumber(firstMatch?: ModelMatch) {
+  if (typeof firstMatch?.page_number === 'number') {
+    return firstMatch.page_number;
+  }
+
+  if (typeof firstMatch?.page_number === 'string') {
+    const parsed = Number.parseInt(firstMatch.page_number, 10);
+
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return null;
 }
 
 function buildSlotBatches<T>(items: T[], batchSize: number) {
@@ -1768,12 +1757,12 @@ async function extractAllSlotsWithTextModel(input: {
               evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
               evidence_page_numbers:
                 firstResult?.matches
-                  ?.map((match) => match?.page_number)
+                  ?.map((match) => resolveMatchPageNumber(match))
                   .filter(
                     (value): value is number => typeof value === 'number',
                   ) ??
-                (typeof firstMatch?.page_number === 'number'
-                  ? [firstMatch.page_number]
+                (resolveMatchPageNumber(firstMatch)
+                  ? [resolveMatchPageNumber(firstMatch) as number]
                   : input.pageNumbers),
               notes: '',
               confidence: null,
@@ -1847,6 +1836,417 @@ async function extractAllSlotsWithTextModel(input: {
   }
 
   throw new Error('PDF slot fill failed after multiple attempts.');
+}
+
+function buildDirectVisionPageBatches(visionPages: PdfVisionPageInput[]) {
+  const batches: PdfVisionPageInput[][] = [];
+
+  for (
+    let index = 0;
+    index < visionPages.length;
+    index += DIRECT_VISION_PAGES_PER_REQUEST
+  ) {
+    batches.push(visionPages.slice(index, index + DIRECT_VISION_PAGES_PER_REQUEST));
+  }
+
+  return batches;
+}
+
+function buildDirectVisionSlotFillPromptPayload(input: {
+  documentName: string;
+  slots: GenerationSlotSchemaItem[];
+  pageNumbers: number[];
+}) {
+  return {
+    task:
+      'Inspect the provided new PDF page images directly and fill only the requested template slots. Do not run or return full OCR text.',
+    document_name: input.documentName,
+    page_numbers: input.pageNumbers,
+    slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
+    strict_requirements: [
+      'Return JSON only.',
+      'Return the exact same slot_key copied from slot_definitions.',
+      'slot_source describes where the template slot value came from.',
+      'reference_example_pdf_evidence contains the reviewed example PDF page number, bbox, visible example value, and source text. Use it as a visual/location clue and value-type clue.',
+      'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
+      'Do not copy example_slot_value unless the same value is visible in the new PDF images.',
+      'For each slot, return a value only if it is visible or strongly inferable from the provided new PDF page images.',
+      'For dates, accept equivalent visible formats such as 2026/3/30, 2026-03-30, 2026.3.30, and return final_value in Chinese format such as 2026年3月30日.',
+      'For money amounts, preserve decimals and units when visible. 3400 and 3400元 are equivalent, but final_value should match the template slot format when possible.',
+      'matches[0].value must equal final_value. matches[0].evidence_text should include the visible source value and nearby label/context. matches[0].page_number must be one of page_numbers.',
+    ],
+    output_schema: {
+      results: input.slots.map((slot) => ({
+        slot_key: slot.slot_key,
+        slot_name: slot.field_category,
+        final_value: 'final extracted value, or empty string when not found',
+        matches: [
+          {
+            value: 'matched value',
+            evidence_text: 'visible source value and nearby label/context',
+            page_number: input.pageNumbers[0] ?? 1,
+            confidence: 0.9,
+          },
+        ],
+      })),
+    },
+  };
+}
+
+async function extractSlotsFromVisionPageBatch(input: {
+  documentName: string;
+  slots: GenerationSlotSchemaItem[];
+  visionPages: PdfVisionPageInput[];
+  batchIndex: number;
+  totalBatches: number;
+  totalVisionPages: number;
+  onTrace?: (trace: { message: string }) => Promise<void> | void;
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+}) {
+  for (let attempt = 1; attempt <= MAX_VISION_REQUEST_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const requestStartedAt = Date.now();
+    const requestTimeoutMs = getVisionRequestTimeoutMs({
+      pageCount: input.visionPages.length,
+      slotCount: input.slots.length,
+      attempt,
+    });
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+    let heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
+
+    try {
+      const pageNumbers = input.visionPages.map((page) => page.page_number);
+      const pageSizeSummary = input.visionPages.map((page) => ({
+        pageNumber: page.page_number,
+        bytes: estimateDataUrlBytes(page.image_data_url),
+      }));
+      const totalImageBytes = pageSizeSummary.reduce(
+        (sum, entry) => sum + entry.bytes,
+        0,
+      );
+      const requestLabel = `visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches}`;
+      const promptPayload = buildDirectVisionSlotFillPromptPayload({
+        documentName: input.documentName,
+        slots: input.slots,
+        pageNumbers,
+      });
+      const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+
+      await input.onTrace?.({
+        message: `[PDF Fill][DirectVisionPrompt][${requestLabel}] ${stringifyTraceJson({
+          route: '/api/generation-task-items/[taskItemId]/slot-fill',
+          config_scope: 'VISION_LLM',
+          model: getVisionLlmModel(),
+          provider: visionTraceConfig.provider,
+          model_env_name: visionTraceConfig.modelEnvName,
+          thinking_enabled_env_name:
+            visionTraceConfig.thinkingEnabledEnvName,
+          thinking_enabled: visionTraceConfig.thinkingEnabled,
+          reasoning_effort_env_name:
+            visionTraceConfig.reasoningEffortEnvName,
+          reasoning_effort: visionTraceConfig.reasoningEffort,
+          extra_body: visionTraceConfig.extraBody,
+          request_label: requestLabel,
+          page_numbers: pageNumbers,
+          total_vision_pages: input.totalVisionPages,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content: promptPayload,
+            },
+          ],
+        })}`,
+      });
+
+      const requestStartedMessage =
+        `[PDF Fill][DirectVision] Starting ${requestLabel} for ${input.documentName} ` +
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, pages: ${pageNumbers.join(
+          ',',
+        )}, slots: ${input.slots.length}, timeout: ${formatElapsedMs(
+          requestTimeoutMs,
+        )}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
+          {
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          },
+        )}).`;
+      console.info(requestStartedMessage);
+      await input.onTrace?.({ message: requestStartedMessage });
+
+      heartbeatIntervalId = setInterval(() => {
+        const elapsedMs = Date.now() - requestStartedAt;
+        const heartbeatMessage =
+          `[PDF Fill][DirectVision] Waiting on ${requestLabel} for ${input.documentName} ` +
+          `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(
+            elapsedMs,
+          )} / timeout: ${formatElapsedMs(requestTimeoutMs)}, pages: ${pageNumbers.join(
+            ',',
+          )}, slots: ${input.slots.length}${formatProcessBudgetSuffix({
+            processStartedAtMs: input.processStartedAtMs,
+            processHardTimeoutMs: input.processHardTimeoutMs,
+          })}).`;
+        console.info(heartbeatMessage);
+        void input.onTrace?.({ message: heartbeatMessage });
+      }, 15000);
+
+      const content: Array<
+        | { type: 'image_url'; image_url: { url: string } }
+        | { type: 'text'; text: string }
+      > = [
+        {
+          type: 'text',
+          text: JSON.stringify(promptPayload),
+        },
+      ];
+
+      input.visionPages.forEach((page) => {
+        content.push({
+          type: 'text',
+          text: `New PDF page ${page.page_number}${
+            typeof page.original_page_number === 'number'
+              ? ` (original uploaded PDF page ${page.original_page_number})`
+              : ''
+          }`,
+        });
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: page.image_data_url,
+          },
+        });
+      });
+
+      const llmConfig = getLlmRuntimeConfig('vision');
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+        method: 'POST',
+        headers: buildChatCompletionHeaders(llmConfig),
+        dispatcher: llmFetchDispatcher,
+        signal: controller.signal,
+        body: JSON.stringify(
+          buildChatCompletionBody(llmConfig, {
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
+              },
+              {
+                role: 'user',
+                content,
+              },
+            ],
+          }),
+        ),
+      } as UndiciFetchInit);
+
+      if (!upstream.ok) {
+        const details = await upstream.text();
+        throw new Error(
+          `PDF direct vision fill request failed (${upstream.status}): ${details}`,
+        );
+      }
+
+      const payload = (await upstream.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
+      const rawContent = payload?.choices?.[0]?.message?.content;
+
+      if (typeof rawContent !== 'string' || !rawContent.trim()) {
+        return {
+          document_summary: '',
+          extracted_items: [],
+        };
+      }
+
+      await input.onTrace?.({
+        message: `[PDF Fill][DirectVisionRaw][${requestLabel}] ${rawContent}`,
+      });
+
+      const normalized = parseModelJson<{
+        results?: ModelResultCandidate[];
+        extracted_items?: Array<z.infer<typeof generationExtractedItemSchema>>;
+      }>(rawContent);
+      const parsedExtractedItems = generationPdfFillResultSchema.safeParse({
+        document_summary: '',
+        extracted_items: normalized.extracted_items ?? [],
+      });
+      const extractedItemsFromSchema = parsedExtractedItems.success
+        ? parsedExtractedItems.data.extracted_items
+        : [];
+      const extractedItemsFromResults = input.slots.flatMap((slot) => {
+        const firstResult = findResultForSlot(slot, normalized.results, {
+          fallbackToSingleResult: input.slots.length === 1,
+        });
+        const firstMatch = firstResult?.matches?.find((match) => {
+          const value = match?.value?.trim() || '';
+          const evidence =
+            match?.snippet?.trim() || match?.evidence_text?.trim() || '';
+
+          return Boolean(value) && Boolean(evidence);
+        });
+
+        if (!firstResult && !firstMatch) {
+          return [];
+        }
+
+        const extractedValue = resolveExtractedValue(
+          slot,
+          firstResult,
+          firstMatch,
+        );
+        const matchPageNumber = resolveMatchPageNumber(firstMatch);
+
+        return [
+          {
+            slot_key: slot.slot_key,
+            field_category: slot.field_category,
+            meaning_to_applicant: slot.meaning_to_applicant,
+            original_value: extractedValue,
+            evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
+            evidence_page_numbers: matchPageNumber ? [matchPageNumber] : pageNumbers,
+            notes: '',
+            confidence:
+              typeof firstMatch?.confidence === 'number'
+                ? firstMatch.confidence
+                : null,
+          },
+        ];
+      });
+      const result = {
+        document_summary: '',
+        extracted_items:
+          extractedItemsFromSchema.length > 0
+            ? extractedItemsFromSchema
+            : extractedItemsFromResults,
+      };
+      const requestElapsedMs = Date.now() - requestStartedAt;
+      const completedMessage =
+        `[PDF Fill][DirectVision] Completed ${requestLabel} for ${input.documentName} ` +
+        `with ${result.extracted_items.filter((item) => hasFilledValue(item.original_value)).length}/${input.slots.length} filled slots in ${formatElapsedMs(
+          requestElapsedMs,
+        )}.`;
+      console.info(completedMessage);
+      await input.onTrace?.({ message: completedMessage });
+
+      return result;
+    } catch (error) {
+      const normalizedError = wrapFetchFailure(error, {
+        stage: 'vision-slot-fill',
+        documentName: input.documentName,
+        model: getLlmRuntimeConfig('vision').model,
+        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
+        attempt,
+      });
+      const shouldRetry =
+        attempt < MAX_VISION_REQUEST_RETRIES &&
+        shouldRetryPdfFillRequest(normalizedError);
+      const failedMessage =
+        `[PDF Fill][DirectVision] Failed visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches} ` +
+        `for ${input.documentName} (attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}): ${getErrorMessage(
+          normalizedError,
+        )}`;
+      console.error(failedMessage, normalizedError);
+      await input.onTrace?.({ message: failedMessage });
+
+      if (!shouldRetry) {
+        throw normalizedError;
+      }
+
+      await sleep(1500 * attempt);
+    } finally {
+      if (heartbeatIntervalId) {
+        clearInterval(heartbeatIntervalId);
+      }
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw new Error('PDF direct vision slot fill failed after multiple attempts.');
+}
+
+export async function fillSlotsFromVisionPages(params: {
+  pdfFileName: string;
+  slots: GenerationSlotSchemaItem[];
+  visionPages: PdfVisionPageInput[];
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+  onProgress?: (progress: {
+    completedSlots: number;
+    totalSlots: number;
+  }) => Promise<void> | void;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  const validVisionPages = params.visionPages.filter((page) =>
+    page.image_data_url.startsWith('data:image/'),
+  );
+
+  if (validVisionPages.length === 0) {
+    throw new Error('当前任务缺少可用于视觉回填的新 PDF 页面图片。');
+  }
+
+  await params.onProgress?.({
+    completedSlots: 0,
+    totalSlots: params.slots.length,
+  });
+
+  const startedAt = Date.now();
+  const batches = buildDirectVisionPageBatches(validVisionPages);
+  const startedMessage =
+    `[PDF Fill][DirectVision] Direct visual slot fill started for ${params.pdfFileName} ` +
+    `(vision pages: ${validVisionPages.length}, batches: ${batches.length}, slots: ${params.slots.length}).`;
+  console.info(startedMessage);
+  await params.onTrace?.({ message: startedMessage });
+
+  const batchResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
+  const completedSlotKeys = new Set<string>();
+
+  for (const [batchIndex, batch] of batches.entries()) {
+    const batchResult = await extractSlotsFromVisionPageBatch({
+      documentName: params.pdfFileName,
+      slots: params.slots,
+      visionPages: batch,
+      batchIndex,
+      totalBatches: batches.length,
+      totalVisionPages: validVisionPages.length,
+      onTrace: params.onTrace,
+      processStartedAtMs: params.processStartedAtMs,
+      processHardTimeoutMs: params.processHardTimeoutMs,
+    });
+
+    batchResults.push(batchResult);
+    batchResult.extracted_items.forEach((item) => {
+      if (hasFilledValue(item.original_value)) {
+        completedSlotKeys.add(item.slot_key);
+      }
+    });
+    await params.onProgress?.({
+      completedSlots: completedSlotKeys.size,
+      totalSlots: params.slots.length,
+    });
+  }
+
+  const mergedResult = mergeSlotResults(params.slots, batchResults);
+  const elapsedMs = Date.now() - startedAt;
+  const completedSlots = mergedResult.extracted_items.filter((item) =>
+    hasFilledValue(item.original_value),
+  ).length;
+  const completedMessage =
+    `[PDF Fill][DirectVision] Direct visual slot fill completed for ${params.pdfFileName} ` +
+    `in ${formatElapsedMs(elapsedMs)} with ${completedSlots}/${params.slots.length} filled slots.`;
+  console.info(completedMessage);
+  await params.onTrace?.({ message: completedMessage });
+
+  return mergedResult;
 }
 
 export async function fillSlotsFromTextPages(params: {

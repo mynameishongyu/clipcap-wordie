@@ -1,18 +1,12 @@
 import { after, NextResponse } from 'next/server';
 import {
-  buildTextSlotFillPromptPayload,
-  extractPdfTextFromVisionPages,
-} from '@/src/lib/llm/fill-template-from-pdf';
-import {
   appendProcessingTrace,
   buildFallbackReviewPayload,
   createUnauthorizedResponse,
   generationTaskItemSelect,
   type GenerationTaskItemRecord,
   getErrorMessage,
-  loadVisionPagesFromStoredAssets,
   normalizeOcrImageAssets,
-  normalizePages,
   normalizeSelectedOriginalPageNumbers,
   normalizeVisionPages,
   recalculateTaskSummary,
@@ -23,20 +17,16 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
-const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
 
-async function runGenerationTaskItemOcr(params: {
+async function runGenerationTaskItemPagePreparation(params: {
   item: GenerationTaskItemRecord;
   actorEmail: string | null;
 }) {
   const admin = createSupabaseAdminClient();
   const startedAt = new Date();
-  const processStartedAtMs = startedAt.getTime();
   const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
     ? params.item.llm_input.slot_schema
     : [];
-  const pages = normalizePages(params.item.llm_input?.pages);
   const precomputedVisionPages = normalizeVisionPages(params.item.llm_input?.vision_pages);
   const ocrImageAssets = normalizeOcrImageAssets(params.item.llm_input?.ocr_image_assets);
   const selectedOriginalPageNumbers = normalizeSelectedOriginalPageNumbers(
@@ -49,12 +39,11 @@ async function runGenerationTaskItemOcr(params: {
     }
 
     if (
-      pages.length === 0 &&
       precomputedVisionPages.length === 0 &&
       ocrImageAssets.length === 0 &&
       selectedOriginalPageNumbers.length === 0
     ) {
-      throw new Error('当前任务缺少可处理的 PDF 页码范围，请重新创建批量任务后再试。');
+      throw new Error('当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。');
     }
 
     await admin
@@ -70,17 +59,6 @@ async function runGenerationTaskItemOcr(params: {
       })
       .eq('id', params.item.id);
 
-    await appendProcessingTrace(
-      admin,
-      params.item.id,
-      `开始 OCR：${params.item.source_pdf_name}，共 ${slotSchema.length} 个槽位。`,
-    );
-    await appendProcessingTrace(
-      admin,
-      params.item.id,
-      `OCR 路由：/api/generation-task-items/${params.item.id}/ocr`,
-    );
-
     await admin
       .from('generation_tasks')
       .update({
@@ -89,103 +67,58 @@ async function runGenerationTaskItemOcr(params: {
       })
       .eq('id', params.item.task_id);
 
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `开始准备新 PDF 页面图片：${params.item.source_pdf_name}，共 ${slotSchema.length} 个槽位。`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `页面准备路由：/api/generation-task-items/${params.item.id}/ocr`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      '当前流程已跳过新 PDF OCR；页面图片准备完成后将直接调用 VISION_LLM 进行视觉槽位回填。',
+    );
+
     await logEvent({
       ownerId: params.item.owner_id,
       actorEmail: params.actorEmail,
       level: 'info',
-      eventType: 'generation_task_item_ocr_started',
-      message: `Started OCR for ${params.item.source_pdf_name}.`,
+      eventType: 'generation_task_item_pdf_pages_ready_started',
+      message: `Started PDF page preparation for ${params.item.source_pdf_name}.`,
       route: '/api/generation-task-items/[taskItemId]/ocr',
       templateId: params.item.template_id,
       taskId: params.item.task_id,
       taskItemId: params.item.id,
       payload: {
         slotCount: slotSchema.length,
-        pageCount: pages.length,
         visionPageCount: precomputedVisionPages.length,
         ocrImageAssetCount: ocrImageAssets.length,
-        likelyScanned: params.item.llm_input?.likely_scanned === true,
-        forceOcr: params.item.llm_input?.force_ocr === true,
+        selectedPageCount: selectedOriginalPageNumbers.length,
       },
     });
 
-    const visionPages =
-      precomputedVisionPages.length > 0
-        ? precomputedVisionPages
-        : await loadVisionPagesFromStoredAssets({
-            admin,
-            ocrImageAssets,
-          });
-
-    if (visionPages.length > 0) {
-      await appendProcessingTrace(
-        admin,
-        params.item.id,
-        `已在后台读取 OCR 页图 ${visionPages.length} 页。`,
-      );
-    }
-
-    const ocrPages = await extractPdfTextFromVisionPages({
-      pdfFileName: params.item.source_pdf_name,
-      slots: slotSchema,
-      visionPages,
-      processStartedAtMs,
-      processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
-      processReserveMs: PROCESS_ROUTE_FINALIZATION_RESERVE_MS,
-      onTrace: async ({ message }) => {
-        await appendProcessingTrace(admin, params.item.id, message);
-      },
-      onProgress: async ({ completedSlots, totalSlots }) => {
-        await admin
-          .from('generation_task_items')
-          .update({
-            slot_total_count: totalSlots,
-            slot_completed_count: completedSlots,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', params.item.id);
-      },
-    });
-
-    const totalTextLength = ocrPages.reduce((sum, page) => sum + page.text.length, 0);
-    const slotFillPromptPreview = {
-      route: `/api/generation-task-items/${params.item.id}/slot-fill`,
-      request_label: 'after-ocr-preview',
-      document_name: params.item.source_pdf_name,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
-        },
-        {
-          role: 'user',
-          content: buildTextSlotFillPromptPayload({
-            documentName: params.item.source_pdf_name,
-            slots: slotSchema,
-            pageNumbers: ocrPages.map((page) => page.page_number),
-            chunkText: ocrPages
-              .sort((left, right) => left.page_number - right.page_number)
-              .map((page) => `[Page ${page.page_number}]\n${page.text}`)
-              .join('\n'),
-          }),
-        },
-      ],
-    };
     const elapsedSeconds = Math.max(
       1,
-      Math.round((Date.now() - new Date(params.item.started_at ?? startedAt.toISOString()).getTime()) / 1000),
+      Math.round(
+        (Date.now() -
+          new Date(params.item.started_at ?? startedAt.toISOString()).getTime()) /
+          1000,
+      ),
     );
 
-    const { data: updatedOcrItem, error: updatedOcrItemError } = await admin
+    const { data: updatedItem, error: updatedItemError } = await admin
       .from('generation_task_items')
       .update({
-        status: 'ocr_completed',
+        status: 'pdf_pages_ready',
         elapsed_seconds: elapsedSeconds,
         llm_input: {
           ...(params.item.llm_input ?? {}),
-          pages: ocrPages,
-          total_text_length: totalTextLength,
+          pages: [],
+          total_text_length: 0,
         },
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
@@ -194,55 +127,44 @@ async function runGenerationTaskItemOcr(params: {
       .select('id, status')
       .single();
 
-    if (updatedOcrItemError) {
-      throw updatedOcrItemError;
+    if (updatedItemError) {
+      throw updatedItemError;
     }
 
-    if (!updatedOcrItem || updatedOcrItem.status !== 'ocr_completed') {
-      throw new Error('OCR completed status was not persisted correctly before slot-fill handoff.');
+    if (!updatedItem || updatedItem.status !== 'pdf_pages_ready') {
+      throw new Error('PDF page ready status was not persisted correctly before slot-fill handoff.');
     }
 
     await recalculateTaskSummary(admin, params.item.task_id);
-
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `OCR 完成：共得到 ${ocrPages.length} 页可用文本，等待槽位回填。`,
+      `新 PDF 页面图片准备完成：共 ${precomputedVisionPages.length || ocrImageAssets.length} 页，等待视觉槽位回填。`,
     );
     await appendProcessingTrace(
       admin,
       params.item.id,
-      'OCR 已完成，前端轮询检测到后将自动启动槽位回填。',
+      'PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填。',
     );
     await appendProcessingTrace(
       admin,
       params.item.id,
       `下一步路由：/api/generation-task-items/${params.item.id}/slot-fill`,
     );
-    await appendProcessingTrace(
-      admin,
-      params.item.id,
-      `OCR 状态已持久化为 ${updatedOcrItem.status}。`,
-    );
-    await appendProcessingTrace(
-      admin,
-      params.item.id,
-      `[PDF Fill][TextPromptPreview][AfterOCR] ${JSON.stringify(slotFillPromptPreview)}`,
-    );
 
     await logEvent({
       ownerId: params.item.owner_id,
       actorEmail: params.actorEmail,
       level: 'info',
-      eventType: 'generation_task_item_ocr_completed',
-      message: `OCR completed for ${params.item.source_pdf_name}.`,
+      eventType: 'generation_task_item_pdf_pages_ready_completed',
+      message: `PDF pages prepared for ${params.item.source_pdf_name}.`,
       route: '/api/generation-task-items/[taskItemId]/ocr',
       templateId: params.item.template_id,
       taskId: params.item.task_id,
       taskItemId: params.item.id,
       payload: {
-        ocrPageCount: ocrPages.length,
-        totalTextLength,
+        visionPageCount: precomputedVisionPages.length,
+        ocrImageAssetCount: ocrImageAssets.length,
         elapsedSeconds,
       },
     });
@@ -264,16 +186,15 @@ async function runGenerationTaskItemOcr(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `OCR 失败，已转为人工核查：${getErrorMessage(error)}`,
+      `新 PDF 页面图片准备失败，已转为人工核查：${getErrorMessage(error)}`,
     );
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[RouteErrorDetails][OCR] ${JSON.stringify(
+      `[RouteErrorDetails][PagePreparation] ${JSON.stringify(
         buildErrorLogPayload(error, {
           sourcePdfName: params.item.source_pdf_name,
           slotCount: slotSchema.length,
-          pageCount: pages.length,
           visionPageCount: precomputedVisionPages.length,
           ocrImageAssetCount: ocrImageAssets.length,
         }),
@@ -286,7 +207,7 @@ async function runGenerationTaskItemOcr(params: {
       ownerId: params.item.owner_id,
       actorEmail: params.actorEmail,
       level: 'error',
-      eventType: 'generation_task_item_ocr_failed',
+      eventType: 'generation_task_item_pdf_pages_ready_failed',
       message: getErrorMessage(error),
       route: '/api/generation-task-items/[taskItemId]/ocr',
       templateId: params.item.template_id,
@@ -295,7 +216,6 @@ async function runGenerationTaskItemOcr(params: {
       payload: buildErrorLogPayload(error, {
         sourcePdfName: params.item.source_pdf_name,
         slotCount: slotSchema.length,
-        pageCount: pages.length,
         visionPageCount: precomputedVisionPages.length,
         ocrImageAssetCount: ocrImageAssets.length,
       }),
@@ -340,7 +260,15 @@ export async function POST(
       return createUnauthorizedResponse();
     }
 
-    if (['review_pending', 'reviewed', 'succeeded', 'ocr_completed', 'slot_filling'].includes(item.status)) {
+    if (
+      [
+        'review_pending',
+        'reviewed',
+        'succeeded',
+        'pdf_pages_ready',
+        'slot_filling',
+      ].includes(item.status)
+    ) {
       return NextResponse.json({
         data: {
           item,
@@ -357,7 +285,7 @@ export async function POST(
     }
 
     after(async () => {
-      await runGenerationTaskItemOcr({
+      await runGenerationTaskItemPagePreparation({
         item,
         actorEmail: user.email ?? null,
       });
@@ -387,7 +315,7 @@ export async function POST(
       ownerId: user.id,
       actorEmail: user.email ?? null,
       level: 'error',
-      eventType: 'generation_task_item_ocr_request_failed',
+      eventType: 'generation_task_item_pdf_pages_ready_request_failed',
       message,
       route: '/api/generation-task-items/[taskItemId]/ocr',
       taskItemId,
@@ -396,7 +324,7 @@ export async function POST(
 
     return NextResponse.json(
       {
-        code: 'GENERATION_TASK_ITEM_OCR_FAILED',
+        code: 'GENERATION_TASK_ITEM_PDF_PAGES_READY_FAILED',
         message,
       },
       { status: 500 },

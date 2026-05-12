@@ -81,7 +81,7 @@ const runningItemStatuses = [
   'running',
   'pending',
   'ocr_running',
-  'ocr_completed',
+  'pdf_pages_ready',
   'slot_filling',
 ];
 

@@ -1,5 +1,5 @@
 import { after, NextResponse } from 'next/server';
-import { fillSlotsFromTextPages } from '@/src/lib/llm/fill-template-from-pdf';
+import { fillSlotsFromVisionPages } from '@/src/lib/llm/fill-template-from-pdf';
 import {
   appendProcessingTrace,
   buildFallbackReviewPayload,
@@ -7,7 +7,9 @@ import {
   generationTaskItemSelect,
   type GenerationTaskItemRecord,
   getErrorMessage,
-  normalizePages,
+  loadVisionPagesFromStoredAssets,
+  normalizeOcrImageAssets,
+  normalizeVisionPages,
   recalculateTaskSummary,
   updateSlotProgress,
 } from '@/src/lib/generation-task-items/runtime';
@@ -17,8 +19,8 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
+
 const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
-const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
 
 async function runGenerationTaskItemSlotFill(params: {
   item: GenerationTaskItemRecord;
@@ -30,7 +32,12 @@ async function runGenerationTaskItemSlotFill(params: {
   const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
     ? params.item.llm_input.slot_schema
     : [];
-  const pages = normalizePages(params.item.llm_input?.pages);
+  const precomputedVisionPages = normalizeVisionPages(
+    params.item.llm_input?.vision_pages,
+  );
+  const ocrImageAssets = normalizeOcrImageAssets(
+    params.item.llm_input?.ocr_image_assets,
+  );
   const pipelineStartedAt = params.item.started_at
     ? new Date(params.item.started_at)
     : startedAt;
@@ -40,8 +47,20 @@ async function runGenerationTaskItemSlotFill(params: {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
     }
 
-    if (pages.length === 0) {
-      throw new Error('当前任务缺少 OCR 文本结果，请先完成 OCR 后再进行槽位回填。');
+    if (precomputedVisionPages.length === 0 && ocrImageAssets.length === 0) {
+      throw new Error('当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。');
+    }
+
+    const visionPages =
+      precomputedVisionPages.length > 0
+        ? precomputedVisionPages
+        : await loadVisionPagesFromStoredAssets({
+            admin,
+            ocrImageAssets,
+          });
+
+    if (visionPages.length === 0) {
+      throw new Error('当前任务没有可读取的新 PDF 页面图片。');
     }
 
     await admin
@@ -56,36 +75,37 @@ async function runGenerationTaskItemSlotFill(params: {
       })
       .eq('id', params.item.id);
 
-    const llmStartMessage =
-      `即将开始 LLM 槽位回填：PDF=${params.item.source_pdf_name}，槽位数=${slotSchema.length}，OCR文本页=${pages.length}。`;
-    console.log('[Generation Task Item] LLM extraction starting', {
-      taskItemId: params.item.id,
-      taskId: params.item.task_id,
-      sourcePdfName: params.item.source_pdf_name,
-      slotCount: slotSchema.length,
-      textPageCount: pages.length,
-    });
     await appendProcessingTrace(
       admin,
       params.item.id,
       `槽位回填路由：/api/generation-task-items/${params.item.id}/slot-fill`,
     );
-    await appendProcessingTrace(admin, params.item.id, llmStartMessage);
     await appendProcessingTrace(
       admin,
       params.item.id,
-      '槽位回填阶段：正在组装 Prompt，并准备向 LLM 发起请求。',
+      `即将开始 VISION_LLM 视觉槽位回填：PDF=${params.item.source_pdf_name}，槽位数=${slotSchema.length}，页面图片=${visionPages.length}。`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      '槽位回填阶段：跳过新 PDF OCR，直接使用槽位来源、示例 PDF 定位信息和新 PDF 页面图片调用 VISION_LLM。',
     );
 
-    let lastLoggedCompletedSlots = -1;
+    console.log('[Generation Task Item] Direct visual slot fill starting', {
+      taskItemId: params.item.id,
+      taskId: params.item.task_id,
+      sourcePdfName: params.item.source_pdf_name,
+      slotCount: slotSchema.length,
+      visionPageCount: visionPages.length,
+    });
 
-    const llmOutput = await fillSlotsFromTextPages({
+    let lastLoggedCompletedSlots = -1;
+    const llmOutput = await fillSlotsFromVisionPages({
       pdfFileName: params.item.source_pdf_name,
       slots: slotSchema,
-      pages,
+      visionPages,
       processStartedAtMs,
       processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
-      processReserveMs: PROCESS_ROUTE_FINALIZATION_RESERVE_MS,
       onTrace: async ({ message }) => {
         await appendProcessingTrace(admin, params.item.id, message);
       },
@@ -153,7 +173,6 @@ async function runGenerationTaskItemSlotFill(params: {
     }
 
     await recalculateTaskSummary(admin, params.item.task_id);
-
     await appendProcessingTrace(
       admin,
       params.item.id,
@@ -176,10 +195,12 @@ async function runGenerationTaskItemSlotFill(params: {
         slotCount: slotSchema.length,
         completedSlots,
         pendingSlots: Math.max(0, slotSchema.length - completedSlots),
+        visionPageCount: visionPages.length,
       },
     });
   } catch (error) {
     const fallbackReviewPayload = buildFallbackReviewPayload(slotSchema);
+
     await admin
       .from('generation_task_items')
       .update({
@@ -204,7 +225,8 @@ async function runGenerationTaskItemSlotFill(params: {
         buildErrorLogPayload(error, {
           sourcePdfName: params.item.source_pdf_name,
           slotCount: slotSchema.length,
-          pageCount: pages.length,
+          visionPageCount: precomputedVisionPages.length,
+          ocrImageAssetCount: ocrImageAssets.length,
         }),
       )}`,
     );
@@ -224,7 +246,8 @@ async function runGenerationTaskItemSlotFill(params: {
       payload: buildErrorLogPayload(error, {
         sourcePdfName: params.item.source_pdf_name,
         slotCount: slotSchema.length,
-        pageCount: pages.length,
+        visionPageCount: precomputedVisionPages.length,
+        ocrImageAssetCount: ocrImageAssets.length,
       }),
     });
   }
@@ -283,11 +306,11 @@ export async function POST(
       });
     }
 
-    if (item.status !== 'ocr_completed') {
+    if (item.status !== 'pdf_pages_ready') {
       return NextResponse.json(
         {
-          code: 'GENERATION_TASK_ITEM_OCR_NOT_READY',
-          message: '当前任务项尚未完成 OCR，暂时不能开始槽位回填。',
+          code: 'GENERATION_TASK_ITEM_PDF_PAGES_NOT_READY',
+          message: '当前任务的新 PDF 页面图片尚未准备完成，暂时不能开始槽位回填。',
         },
         { status: 409 },
       );

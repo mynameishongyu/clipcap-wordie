@@ -224,9 +224,14 @@ export async function recalculateTaskSummary(admin: AdminClient, taskId: string)
   const failedItems = items?.filter((item) => item.status === 'failed').length ?? 0;
   const hasRunningItems =
     items?.some((item) =>
-      ['running', 'uploaded', 'pending', 'ocr_running', 'ocr_completed', 'slot_filling'].includes(
-        item.status,
-      ),
+      [
+        'running',
+        'uploaded',
+        'pending',
+        'ocr_running',
+        'pdf_pages_ready',
+        'slot_filling',
+      ].includes(item.status),
     ) ?? false;
 
   const nextStatus = hasRunningItems
