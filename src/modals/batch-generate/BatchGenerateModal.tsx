@@ -11,7 +11,6 @@ import {
   Progress,
   Stack,
   Text,
-  TextInput,
   Title,
 } from '@mantine/core';
 import type { ContextModalProps } from '@mantine/modals';
@@ -39,8 +38,6 @@ interface UploadRow {
   parsedPdf: Awaited<ReturnType<typeof parsePdf>> | null;
   isParsing: boolean;
   parseError: string | null;
-  pageSelectionMode: 'custom';
-  pageRangeInput: string;
   forceOcr: boolean;
 }
 
@@ -96,8 +93,6 @@ function createUploadRow(): UploadRow {
     parsedPdf: null,
     isParsing: false,
     parseError: null,
-    pageSelectionMode: 'custom',
-    pageRangeInput: '',
     forceOcr: false,
   };
 }
@@ -150,70 +145,6 @@ function dataUrlToObjectUrl(dataUrl: string) {
   }
 
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
-}
-
-function parseSelectedPageNumbers(input: string, totalPages: number) {
-  const normalized = input.replace(/[，；;\s]+/g, ',').trim();
-
-  if (!normalized) {
-    return { pageNumbers: [] as number[], error: '请输入页码范围' };
-  }
-
-  const values = new Set<number>();
-  const parts = normalized.split(',').map((part) => part.trim()).filter(Boolean);
-
-  for (const part of parts) {
-    const rangeMatch = part.match(/^(\d+)-(\d+)$/);
-
-    if (rangeMatch) {
-      const start = Number(rangeMatch[1]);
-      const end = Number(rangeMatch[2]);
-
-      if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0) {
-        return { pageNumbers: [] as number[], error: `页码范围 "${part}" 无效` };
-      }
-
-      if (start > end) {
-        return { pageNumbers: [] as number[], error: `页码范围 "${part}" 起始页不能大于结束页` };
-      }
-
-      if (end > totalPages) {
-        return {
-          pageNumbers: [] as number[],
-          error: `页码范围 "${part}" 超出总页数 ${totalPages} 页`,
-        };
-      }
-
-      for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
-        values.add(pageNumber);
-      }
-
-      continue;
-    }
-
-    const pageNumber = Number(part);
-
-    if (!Number.isInteger(pageNumber) || pageNumber <= 0) {
-      return { pageNumbers: [] as number[], error: `页码 "${part}" 无效` };
-    }
-
-    if (pageNumber > totalPages) {
-      return {
-        pageNumbers: [] as number[],
-        error: `页码 "${part}" 超出总页数 ${totalPages} 页`,
-      };
-    }
-
-    values.add(pageNumber);
-  }
-
-  const pageNumbers = Array.from(values).sort((left, right) => left - right);
-
-  if (pageNumbers.length === 0) {
-    return { pageNumbers, error: '请选择至少 1 页' };
-  }
-
-  return { pageNumbers, error: null };
 }
 
 function getStatusColor(status: string) {
@@ -287,8 +218,9 @@ export function BatchGenerateModal({
   const queryClient = useQueryClient();
   const [rows, setRows] = useState<UploadRow[]>([createUploadRow()]);
   const [taskId, setTaskId] = useState<string | null>(null);
-  const [tick, setTick] = useState(Date.now());
+  const [tick, setTick] = useState(() => Date.now());
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
+  const [itemStartedAtById, setItemStartedAtById] = useState<Record<string, number>>({});
   const createGenerationTaskMutation = useCreateGenerationTask();
   const processGenerationTaskItemMutation = useProcessGenerationTaskItem();
   const startGenerationTaskItemSlotFillMutation = useStartGenerationTaskItemSlotFill();
@@ -296,7 +228,6 @@ export function BatchGenerateModal({
   const launchedOcrItemIdsRef = useRef<Set<string>>(new Set());
   const launchedSlotFillItemIdsRef = useRef<Set<string>>(new Set());
   const pendingSlotFillRefreshTimeoutsRef = useRef<Map<string, number[]>>(new Map());
-  const itemStartedAtRef = useRef<Map<string, number>>(new Map());
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const refreshTaskLists = async () => {
     await Promise.all([
@@ -399,26 +330,16 @@ export function BatchGenerateModal({
     () =>
       rows.map((row) => {
         const totalPages = row.parsedPdf?.pages.length ?? 0;
-        const allPageNumbers = totalPages > 0 ? buildFullPageNumbers(totalPages) : [];
-        const customSelection =
-          totalPages > 0
-            ? parseSelectedPageNumbers(row.pageRangeInput, totalPages)
-            : { pageNumbers: [] as number[], error: null as string | null };
-        const selectedPageNumbers = customSelection.pageNumbers;
-        const selectionError = customSelection.error;
+        const selectedPageNumbers = totalPages > 0 ? buildFullPageNumbers(totalPages) : [];
 
         return {
           rowId: row.id,
           totalPages,
           selectedPageNumbers,
-          selectionError,
           selectedPageRangeLabel: formatCompactPageRanges(selectedPageNumbers),
         };
       }),
     [rows],
-  );
-  const hasInvalidSelection = rowSelectionStates.some(
-    (state) => state.totalPages > 0 && Boolean(state.selectionError),
   );
 
   const canSubmit =
@@ -428,8 +349,7 @@ export function BatchGenerateModal({
     !taskId &&
     !hasParsingRows &&
     !hasRowParseError &&
-    !hasUnparsedRows &&
-    !hasInvalidSelection;
+    !hasUnparsedRows;
   const isSubmittingTask = !taskId && (createGenerationTaskMutation.isPending || isPreparingFiles);
 
   const taskItems = taskQuery.data?.items ?? [];
@@ -518,7 +438,10 @@ export function BatchGenerateModal({
       }
 
       launchedOcrItemIdsRef.current.add(item.id);
-      itemStartedAtRef.current.set(item.id, Date.now());
+      const clientStartedAt = Date.now();
+      setItemStartedAtById((current) =>
+        current[item.id] ? current : { ...current, [item.id]: clientStartedAt },
+      );
       console.log(
         `[Batch Generate][${item.source_pdf_name}] Starting OCR for task item ${item.id} via /api/generation-task-items/${item.id}/ocr.`,
       );
@@ -829,8 +752,6 @@ export function BatchGenerateModal({
       parsedPdf: null,
       isParsing: Boolean(file),
       parseError: null,
-      pageSelectionMode: 'custom',
-      pageRangeInput: '',
       forceOcr: false,
     });
 
@@ -866,7 +787,7 @@ export function BatchGenerateModal({
     setIsPreparingFiles(true);
     logSubmissionStage({
       title: '正在准备文件',
-      description: '正在检查页码范围并准备批量任务输入。',
+      description: '正在解析 PDF 并准备批量任务输入，回填将使用上传 PDF 的全部页面。',
     });
 
     try {
@@ -988,7 +909,7 @@ export function BatchGenerateModal({
 
   const modalDescription = useMemo(() => {
     if (!taskId) {
-      return '每条记录上传一个 PDF。创建任务前会先在本地解析 PDF，扫描件会自动挑选需要送入视觉模型的页。';
+      return '每条记录上传一个 PDF。创建任务前会先在本地解析 PDF，并使用全部页面作为槽位回填来源。';
     }
 
     if (taskQuery.isLoading) {
@@ -1112,90 +1033,25 @@ export function BatchGenerateModal({
                       }}
                     >
                       <Stack gap="sm">
-                        <Text fw={600} size="sm">
-                          回填页范围
-                        </Text>
-
-                        <Text c="dimmed" size="xs">
-                          总页数：{row.parsedPdf.pages.length} 页
-                        </Text>
-
-                        <TextInput
-                          description="支持 1-5、1,3,5、1-5,9,12-16"
-                          error={
-                            rowSelectionStates.find((state) => state.rowId === row.id)
-                              ?.selectionError ?? undefined
-                          }
-                          label="页码范围"
-                          placeholder="例如：1-5,9,12-16"
-                          radius="lg"
-                          size="sm"
-                          value={row.pageRangeInput}
-                          onChange={(event) => {
-                            updateRow(row.id, {
-                              pageRangeInput: event.currentTarget.value,
-                            });
-                          }}
-                        />
-
-                        <Text c="yellow" fw={600} size="xs">
-                          使用全部页面处理时间较长
-                        </Text>
-
                         {(() => {
                           const selectionState = rowSelectionStates.find(
                             (state) => state.rowId === row.id,
                           );
 
-                          if (!selectionState || selectionState.selectedPageNumbers.length === 0) {
+                          if (!selectionState) {
                             return null;
                           }
 
                           return (
-                            <Stack gap={6}>
+                            <Group gap="xs">
+                              <Badge color="teal" radius="xl" variant="light">
+                                全部页面
+                              </Badge>
                               <Text c="dimmed" size="xs">
                                 将上传 {selectionState.selectedPageNumbers.length} 页，对应原 PDF 第{' '}
-                                {selectionState.selectedPageRangeLabel} 页
+                                {selectionState.selectedPageRangeLabel} 页，全部参与槽位回填。
                               </Text>
-                              <Box
-                                style={{
-                                  display: 'grid',
-                                  gridTemplateColumns: 'repeat(auto-fill, minmax(40px, 1fr))',
-                                  gap: 8,
-                                }}
-                              >
-                                {buildFullPageNumbers(row.parsedPdf.pages.length).map((pageNumber) => {
-                                  const isSelected = selectionState.selectedPageNumbers.includes(pageNumber);
-
-                                  return (
-                                    <Box
-                                      key={`${row.id}-page-${pageNumber}`}
-                                      style={{
-                                        borderRadius: 10,
-                                        padding: '6px 0',
-                                        textAlign: 'center',
-                                        fontSize: 12,
-                                        fontWeight: 600,
-                                        border: `1px solid ${
-                                          isSelected
-                                            ? 'rgba(32, 201, 151, 0.52)'
-                                            : 'rgba(255,255,255,0.10)'
-                                        }`,
-                                        background: isSelected
-                                          ? 'rgba(32, 201, 151, 0.14)'
-                                          : 'rgba(255,255,255,0.03)',
-                                        color: isSelected ? '#d8fff1' : 'var(--mantine-color-dimmed)',
-                                      }}
-                                    >
-                                      {pageNumber}
-                                    </Box>
-                                  );
-                                })}
-                              </Box>
-                              <Text c="dimmed" size="xs">
-                                仅会基于所选页面进行槽位回填，未选择页面中的证据不会参与抽取。
-                              </Text>
-                            </Stack>
+                            </Group>
                           );
                         })()}
                       </Stack>
@@ -1263,7 +1119,7 @@ export function BatchGenerateModal({
 
           <Stack gap="md">
             {taskItems.map((item, index) => {
-              const clientStartedAt = itemStartedAtRef.current.get(item.id) ?? null;
+              const clientStartedAt = itemStartedAtById[item.id] ?? null;
               const elapsedSeconds = formatElapsedSeconds(item, tick, clientStartedAt);
               const isReviewed = false;
               return (
