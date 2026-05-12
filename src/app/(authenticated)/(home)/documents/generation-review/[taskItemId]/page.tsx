@@ -3,6 +3,7 @@
 import {
   Alert,
   Badge,
+  Box,
   Button,
   Card,
   Container,
@@ -11,7 +12,6 @@ import {
   Loader,
   Paper,
   ScrollArea,
-  SimpleGrid,
   Stack,
   Text,
   TextInput,
@@ -35,7 +35,6 @@ import {
   useReviewGenerationTaskItem,
 } from '@/src/querys/use-generation-task-runtime';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
-import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import type {
   DocBlock,
@@ -57,6 +56,13 @@ interface TemplateOriginalSlot {
   paragraph_title: string;
 }
 
+interface GenerationPdfPreviewPage {
+  pageNumber: number;
+  originalPageNumber: number;
+  imageUrl: string;
+  storagePath: string;
+}
+
 interface TextDecoration {
   itemId: string;
   start: number;
@@ -67,6 +73,33 @@ interface ParagraphDecoration extends TextDecoration {
   segmentId: string;
   continuesFromPrevious: boolean;
   continuesToNext: boolean;
+}
+
+const PDF_PREVIEW_BASE_WIDTH = 1020;
+const PDF_PREVIEW_MIN_ZOOM = 0.45;
+const PDF_PREVIEW_MAX_ZOOM = 2.2;
+const PDF_PREVIEW_ZOOM_STEP = 0.1;
+const PDF_PREVIEW_MAX_DEVICE_PIXEL_RATIO = 2;
+const PDF_PREVIEW_IMAGE_SMOOTHING_QUALITY = 'high';
+const DEFAULT_PDF_PREVIEW_SHARPEN_STRENGTH = 0.25;
+const DOCX_PREVIEW_FONT_SCALE = 0.72;
+
+function getPdfPreviewSharpenStrength() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_PREVIEW_SHARPEN_STRENGTH,
+  );
+
+  if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+    return DEFAULT_PDF_PREVIEW_SHARPEN_STRENGTH;
+  }
+
+  return parsedValue;
+}
+
+const PDF_PREVIEW_SHARPEN_STRENGTH = getPdfPreviewSharpenStrength();
+
+function clampPdfZoom(value: number) {
+  return Math.min(PDF_PREVIEW_MAX_ZOOM, Math.max(PDF_PREVIEW_MIN_ZOOM, value));
 }
 
 function normalizeSlotText(value: string) {
@@ -216,31 +249,170 @@ function textStyleToCss(style: TextStyleSnapshot): CSSProperties {
     textDecoration: style.underline ? 'underline' : undefined,
     color: style.color || undefined,
     backgroundColor: style.backgroundColor || undefined,
-    fontSize: style.fontSizePt ? `${style.fontSizePt}pt` : undefined,
+    fontSize: style.fontSizePt ? `${style.fontSizePt * DOCX_PREVIEW_FONT_SCALE}pt` : undefined,
     fontFamily: style.fontFamily || undefined,
     whiteSpace: 'pre-wrap',
   };
 }
 
-function StablePdfPreviewFrame({ src }: { src: string }) {
-  const [stableSrc] = useState(src);
+function getPreviewDevicePixelRatio() {
+  const rawRatio =
+    typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
+
+  if (!Number.isFinite(rawRatio) || rawRatio <= 0) {
+    return 1;
+  }
+
+  return Math.min(PDF_PREVIEW_MAX_DEVICE_PIXEL_RATIO, rawRatio);
+}
+
+function getPreviewSmoothingQuality(): ImageSmoothingQuality {
+  const quality = PDF_PREVIEW_IMAGE_SMOOTHING_QUALITY.trim().toLowerCase();
+
+  if (quality === 'low' || quality === 'medium' || quality === 'high') {
+    return quality;
+  }
+
+  return 'high';
+}
+
+function sharpenCanvas(canvas: HTMLCanvasElement, strength: number) {
+  if (strength <= 0) {
+    return;
+  }
+
+  const context = canvas.getContext('2d');
+  const { width, height } = canvas;
+
+  if (!context || width < 3 || height < 3) {
+    return;
+  }
+
+  try {
+    const imageData = context.getImageData(0, 0, width, height);
+    const source = imageData.data;
+    const output = new Uint8ClampedArray(source);
+    const centerWeight = 1 + strength * 4;
+
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const index = (y * width + x) * 4;
+        const topIndex = index - width * 4;
+        const bottomIndex = index + width * 4;
+        const leftIndex = index - 4;
+        const rightIndex = index + 4;
+
+        for (let channel = 0; channel < 3; channel += 1) {
+          output[index + channel] = Math.max(
+            0,
+            Math.min(
+              255,
+              source[index + channel] * centerWeight -
+                source[topIndex + channel] * strength -
+                source[bottomIndex + channel] * strength -
+                source[leftIndex + channel] * strength -
+                source[rightIndex + channel] * strength,
+            ),
+          );
+        }
+      }
+    }
+
+    imageData.data.set(output);
+    context.putImageData(imageData, 0, 0);
+  } catch {
+    // Signed URLs can be cross-origin; the image still displays even if canvas sharpening is skipped.
+  }
+}
+
+function PdfPreviewPageCanvas({
+  alt,
+  displayWidth,
+  imageUrl,
+  pageNumber,
+}: {
+  alt: string;
+  displayWidth: number;
+  imageUrl: string;
+  pageNumber: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+
+    if (!canvas || !imageUrl) {
+      return;
+    }
+
+    let isDisposed = false;
+    const image = new Image();
+
+    image.onload = () => {
+      if (isDisposed || !canvasRef.current) {
+        return;
+      }
+
+      const ratio = getPreviewDevicePixelRatio();
+      const cssWidth = Math.max(1, Math.round(displayWidth));
+      const cssHeight = Math.max(
+        1,
+        Math.round(cssWidth * (image.naturalHeight / image.naturalWidth)),
+      );
+      const canvasWidth = Math.max(1, Math.round(cssWidth * ratio));
+      const canvasHeight = Math.max(1, Math.round(cssHeight * ratio));
+      const context = canvasRef.current.getContext('2d');
+
+      if (!context) {
+        return;
+      }
+
+      canvasRef.current.width = canvasWidth;
+      canvasRef.current.height = canvasHeight;
+      canvasRef.current.style.width = `${cssWidth}px`;
+      canvasRef.current.style.height = `${cssHeight}px`;
+      canvasRef.current.dataset.pageNumber = String(pageNumber);
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = getPreviewSmoothingQuality();
+      context.clearRect(0, 0, canvasWidth, canvasHeight);
+      context.drawImage(
+        image,
+        0,
+        0,
+        image.naturalWidth,
+        image.naturalHeight,
+        0,
+        0,
+        canvasWidth,
+        canvasHeight,
+      );
+      sharpenCanvas(canvasRef.current, PDF_PREVIEW_SHARPEN_STRENGTH);
+    };
+
+    image.src = imageUrl;
+
+    return () => {
+      isDisposed = true;
+    };
+  }, [displayWidth, imageUrl, pageNumber]);
 
   return (
-    <iframe
-      src={stableSrc}
+    <canvas
+      aria-label={alt}
+      ref={canvasRef}
       style={{
-        width: '100%',
-        height: '100%',
-        minHeight: '420px',
         display: 'block',
-        border: '1px solid var(--mantine-color-gray-3)',
-        borderRadius: '16px',
-        backgroundColor: '#fff',
+        width: displayWidth,
+        height: 'auto',
+        borderRadius: 12,
+        background: '#fff',
+        boxShadow: '0 18px 50px rgba(0, 0, 0, 0.32)',
+        pointerEvents: 'none',
       }}
-      title="上传 PDF 预览"
     />
   );
 }
+
 function collectParagraphDecorations(
   segments: TextSegment[],
   items: TemplateOriginalSlot[],
@@ -440,7 +612,7 @@ function renderParagraphBlock(
         textIndent: isLikelyTitle || block.align === 'center' ? 0 : '2em',
         lineHeight: 1.65,
         fontWeight: isLikelyTitle ? 700 : undefined,
-        fontSize: isLikelyTitle ? '20px' : undefined,
+        fontSize: isLikelyTitle ? '14px' : undefined,
       }}
     >
       {block.segments.length === 0 ? <span>&nbsp;</span> : null}
@@ -769,17 +941,13 @@ export default function GenerationReviewPage() {
   const taskItemQuery = useGenerationTaskItem(taskItemId);
   const reviewMutation = useReviewGenerationTaskItem();
   const templatePreviewViewportRef = useRef<HTMLDivElement | null>(null);
+  const pdfPreviewViewportRef = useRef<HTMLDivElement | null>(null);
+  const pdfPageRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const initializedTaskItemIdRef = useRef<string | null>(null);
   const [items, setItems] = useState<EditableReviewedItem[]>([]);
   const [activeOriginalSlotKey, setActiveOriginalSlotKey] = useState<string | null>(null);
   const [activeFilledSlotKey, setActiveFilledSlotKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    initializedTaskItemIdRef.current = null;
-    setItems([]);
-    setActiveOriginalSlotKey(null);
-    setActiveFilledSlotKey(null);
-  }, [taskItemId]);
+  const [pdfZoom, setPdfZoom] = useState(1);
 
   useEffect(() => {
     if (!taskItemQuery.data?.item) {
@@ -825,30 +993,17 @@ export default function GenerationReviewPage() {
   const templatePreviewDocument = normalizeParsedDocument(
     taskItemQuery.data?.item.template_preview_document ?? null,
   );
-  const originalSlots = useMemo(() => {
-    const normalizedSlots = normalizeTemplateOriginalSlots(
-      taskItemQuery.data?.item.template_preview_slots ?? null,
-    );
-
-    if (
-      !templatePreviewDocument ||
-      !taskItemQuery.data?.item.template_preview_upload_text
-    ) {
-      return normalizedSlots;
-    }
-
-    return resolveStructuredOriginalSlots(
-      templatePreviewDocument,
-      taskItemQuery.data.item.template_preview_upload_text,
-      normalizedSlots,
-    );
-  }, [
-    taskItemQuery.data?.item.template_preview_slots,
-    taskItemQuery.data?.item.template_preview_upload_text,
-    templatePreviewDocument,
-  ]);
-  const activeOriginalSlot =
-    originalSlots.find((slot) => slot.slot_key === activeOriginalSlotKey) ?? null;
+  const normalizedOriginalSlots = normalizeTemplateOriginalSlots(
+    taskItemQuery.data?.item.template_preview_slots ?? null,
+  );
+  const originalSlots =
+    templatePreviewDocument && taskItemQuery.data?.item.template_preview_upload_text
+      ? resolveStructuredOriginalSlots(
+          templatePreviewDocument,
+          taskItemQuery.data.item.template_preview_upload_text,
+          normalizedOriginalSlots,
+        )
+      : normalizedOriginalSlots;
   const activeFilledItem =
     items.find((item) => item.slot_key === activeFilledSlotKey) ?? null;
   const pendingManualFillItems = useMemo(
@@ -856,16 +1011,25 @@ export default function GenerationReviewPage() {
     [items],
   );
   const stablePdfPreviewUrl = taskItemQuery.data?.item.pdf_preview_url ?? null;
-  const uploadedPageNumberMapping = useMemo(
+  const pdfPreviewPages = useMemo(
     () =>
-      normalizeUploadedPageNumberMapping(
-        taskItemQuery.data?.item.llm_input &&
-          typeof taskItemQuery.data.item.llm_input === 'object'
-          ? (taskItemQuery.data.item.llm_input as { uploaded_page_number_mapping?: unknown })
-              .uploaded_page_number_mapping
-          : null,
-      ),
-    [taskItemQuery.data?.item.llm_input],
+      ((taskItemQuery.data?.item.pdf_preview_pages ?? []) as GenerationPdfPreviewPage[])
+        .filter(
+          (page) =>
+            typeof page.pageNumber === 'number' &&
+            typeof page.originalPageNumber === 'number' &&
+            typeof page.imageUrl === 'string' &&
+            page.imageUrl.trim().length > 0,
+        )
+        .sort((left, right) => left.pageNumber - right.pageNumber),
+    [taskItemQuery.data?.item.pdf_preview_pages],
+  );
+  const uploadedPageNumberMapping = normalizeUploadedPageNumberMapping(
+    taskItemQuery.data?.item.llm_input &&
+      typeof taskItemQuery.data.item.llm_input === 'object'
+      ? (taskItemQuery.data.item.llm_input as { uploaded_page_number_mapping?: unknown })
+          .uploaded_page_number_mapping
+      : null,
   );
   const selectedPageRangeLabel = useMemo(() => {
     if (
@@ -905,6 +1069,12 @@ export default function GenerationReviewPage() {
     [items],
   );
 
+  const activePdfPageNumber =
+    activeFilledItem?.evidence_page_numbers?.find((pageNumber) => pageNumber > 0) ?? null;
+  const updatePdfZoom = (updater: (currentZoom: number) => number) => {
+    setPdfZoom((currentZoom) => clampPdfZoom(updater(currentZoom)));
+  };
+
   useEffect(() => {
     if (!activeOriginalSlotKey || !templatePreviewViewportRef.current) {
       return;
@@ -929,6 +1099,24 @@ export default function GenerationReviewPage() {
       behavior: 'smooth',
     });
   }, [activeOriginalSlotKey, structuredTemplatePreview]);
+
+  useEffect(() => {
+    if (!activePdfPageNumber || !pdfPreviewViewportRef.current) {
+      return;
+    }
+
+    const viewport = pdfPreviewViewportRef.current;
+    const target = pdfPageRefs.current[activePdfPageNumber];
+
+    if (!target) {
+      return;
+    }
+
+    viewport.scrollTo({
+      top: Math.max(0, target.offsetTop - 28),
+      behavior: 'smooth',
+    });
+  }, [activePdfPageNumber, pdfPreviewPages.length]);
 
   const closeReviewWindow = (didReview: boolean) => {
     if (typeof window !== 'undefined' && window.opener && !window.opener.closed && taskItemId) {
@@ -990,7 +1178,6 @@ export default function GenerationReviewPage() {
 
   const { item, task } = taskItemQuery.data;
   const canDownload = item.status === 'reviewed';
-  const reviewedDocxDefaultFileName = `${task.template_name_snapshot}-${item.source_pdf_name.replace(/\.pdf$/i, '')}-核查结果.docx`;
 
   const handleSaveReview = async () => {
     try {
@@ -1025,9 +1212,9 @@ export default function GenerationReviewPage() {
   };
 
   return (
-    <Container py="lg" size={1320}>
-      <Stack gap="md">
-        <Paper p="md" radius="xl" withBorder>
+    <Container py="md" size={1760} style={{ fontSize: 12 }}>
+      <Stack gap="sm">
+        <Paper p="sm" radius="xl" withBorder>
           <Group justify="space-between" align="center">
             <Group gap="md" align="center">
               <Button
@@ -1038,7 +1225,7 @@ export default function GenerationReviewPage() {
               >
                 返回任务列表
               </Button>
-              <Title order={3}>批量生成任务核查</Title>
+              <Title order={3} size="h4">批量生成任务核查</Title>
               <Badge color={canDownload ? 'green' : 'teal'} radius="sm" variant="light">
                 {canDownload ? '核查完毕' : '待核查'}
               </Badge>
@@ -1051,342 +1238,296 @@ export default function GenerationReviewPage() {
           </Group>
         </Paper>
 
-        <SimpleGrid cols={{ base: 1, lg: 12 }} spacing="md" verticalSpacing="md">
-          <Stack gap="md" style={{ gridColumn: 'span 2' }}>
-            <Card padding="md" radius="xl" withBorder>
-              <Stack gap="md">
-                <Title order={5}>任务信息</Title>
-                <Divider />
-                <Group justify="space-between" align="flex-start">
-                  <Text c="dimmed" size="sm">文件</Text>
-                  <Text fw={600} size="sm">{item.source_pdf_name}</Text>
-                </Group>
-                <Group justify="space-between" align="flex-start">
-                  <Text c="dimmed" size="sm">任务 ID</Text>
-                  <Text fw={600} size="sm">{task.id.slice(0, 8)}</Text>
-                </Group>
-                <Group justify="space-between" align="flex-start">
-                  <Text c="dimmed" size="sm">创建时间</Text>
-                  <Text fw={600} size="sm">{new Date(task.created_at).toLocaleString('zh-CN')}</Text>
-                </Group>
-              </Stack>
-            </Card>
-
-            <Card padding="md" radius="xl" withBorder>
-              <Stack gap="sm">
-                <Title order={5}>核查步骤</Title>
-                <Divider />
-                {[ 
-                  ['1', '查看模板预览', '了解模板结构和槽位位置'],
-                  ['2', '核对 PDF 内容', '在 PDF 中找到对应信息'],
-                  ['3', '检查回填值', '回填值为空时需要人工补全'],
-                  ['4', '提交核查', '确认后提交核查结果'],
-                ].map(([step, title, description]) => (
-                  <Paper key={step} p="sm" radius="lg" withBorder>
-                    <Group align="flex-start" wrap="nowrap">
-                      <Badge color="teal" radius="xl" variant="light">{step}</Badge>
-                      <Stack gap={2}>
-                        <Text fw={600} size="sm">{title}</Text>
-                        <Text c="dimmed" size="xs">{description}</Text>
-                      </Stack>
-                    </Group>
-                  </Paper>
-                ))}
-              </Stack>
-            </Card>
-
-            <Card padding="md" radius="xl" withBorder>
-              <Stack gap="sm">
-                <Title order={5}>操作提示</Title>
-                <Divider />
-                <Text c="dimmed" size="sm">点击模板槽位卡片可在左侧 DOCX 预览中高亮定位。</Text>
-                <Text c="dimmed" size="sm">对照 PDF 内容后，如回填值为空，需要手动填写后再提交核查。</Text>
-                <Text c="dimmed" size="sm">本页已移除筛选、备注和证据预览，减少核查干扰。</Text>
-              </Stack>
-            </Card>
-          </Stack>
-
-          <Stack gap="md" style={{ gridColumn: 'span 10' }}>
-            <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md" verticalSpacing="md">
-              <Card padding="md" radius="xl" withBorder>
-                <Stack gap="sm">
-                  <Group justify="space-between" align="center">
-                    <Group gap="sm" align="center">
-                      <Title order={5}>模板预览</Title>
-                      <Text c="dimmed" size="sm">
-                        模板：{task.template_name_snapshot}
-                      </Text>
-                    </Group>
-                  </Group>
-                  <Divider />
-                  {structuredTemplatePreview ? (
-                    <ScrollArea
-                      h={420}
-                      offsetScrollbars
-                      scrollbarSize={8}
-                      type="always"
-                      viewportRef={templatePreviewViewportRef}
+        <Box
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'minmax(260px, 0.72fr) minmax(640px, 1.9fr) minmax(300px, 0.8fr)',
+            gap: 12,
+            minHeight: 'calc(100vh - 116px)',
+          }}
+        >
+          <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
+            <Stack gap="xs" h="100%">
+              <Group justify="space-between" align="flex-start">
+                <div>
+                  <Title order={5}>DOCX 模板预览</Title>
+                  <Text c="dimmed" size="xs">
+                    模板：{task.template_name_snapshot}
+                  </Text>
+                </div>
+                <Badge color="teal" radius="sm" variant="light">
+                  {originalSlots.length} 个槽位
+                </Badge>
+              </Group>
+              <Divider />
+              {structuredTemplatePreview || item.template_preview_html ? (
+                <ScrollArea
+                  offsetScrollbars
+                  scrollbarSize={8}
+                  style={{ flex: 1, minHeight: 0 }}
+                  type="always"
+                  viewportRef={templatePreviewViewportRef}
+                >
+                  <Paper
+                    p="md"
+                    radius="lg"
+                    style={{
+                      minWidth: 280,
+                      background: '#f7fbf9',
+                      border: '1px solid #dbe9e1',
+                      color: '#18211d',
+                      lineHeight: 1.55,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: '100%',
+                        fontFamily: '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
+                        fontSize: '11px',
+                        lineHeight: 1.55,
+                        whiteSpace: 'normal',
+                        wordBreak: 'break-word',
+                      }}
                     >
-                      <div style={{ width: '100%', minWidth: '100%' }}>
-                        <Paper
-                          p="lg"
-                          radius="lg"
-                          style={{
-                            width: '100%',
-                            minWidth: '100%',
-                            boxSizing: 'border-box',
-                            background: '#f7fbf9',
-                            border: '1px solid #dbe9e1',
-                            color: '#18211d',
-                            lineHeight: 1.65,
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: '100%',
-                              fontFamily: '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
-                              fontSize: '16px',
-                              lineHeight: 1.65,
-                              whiteSpace: 'normal',
-                              wordBreak: 'break-word',
-                            }}
-                          >
-                            {structuredTemplatePreview}
-                          </div>
-                        </Paper>
-                      </div>
-                    </ScrollArea>
-                  ) : item.template_preview_html ? (
-                    <ScrollArea
-                      h={420}
-                      offsetScrollbars
-                      scrollbarSize={8}
-                      type="always"
-                      viewportRef={templatePreviewViewportRef}
-                    >
-                      <div style={{ width: '100%', minWidth: '100%' }}>
-                        <Paper
-                          p="lg"
-                          radius="lg"
-                          style={{
-                            width: '100%',
-                            minWidth: '100%',
-                            boxSizing: 'border-box',
-                            background: '#f7fbf9',
-                            border: '1px solid #dbe9e1',
-                            color: '#18211d',
-                            lineHeight: 1.65,
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: '100%',
-                              fontFamily: '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
-                              fontSize: '16px',
-                              lineHeight: 1.65,
-                              whiteSpace: 'normal',
-                              wordBreak: 'break-word',
-                            }}
-                            dangerouslySetInnerHTML={{ __html: item.template_preview_html }}
-                          />
-                        </Paper>
-                      </div>
-                    </ScrollArea>
-                  ) : (
-                    <Alert color="yellow" radius="xl" title="暂无模板预览">
-                      当前没有可显示的模板预览，但不会影响你继续核查槽位结果。
-                    </Alert>
-                  )}
-                </Stack>
-              </Card>
-
-              <Card padding="md" radius="xl" withBorder style={{ minHeight: 500 }}>
-                <Stack gap="sm" h="100%">
-                  <Group justify="space-between" align="center">
-                    <Group gap="sm">
-                      <Group gap="xs">
-                        <Title order={5}>PDF 预览</Title>
-                        {selectedPageRangeLabel ? (
-                          <Badge color="teal" radius="sm" variant="light">
-                            上传范围：原 PDF 第 {selectedPageRangeLabel} 页
-                          </Badge>
-                        ) : null}
-                      </Group>
-                      <Badge color="teal" radius="sm" variant="light">
-                        已上传：{item.source_pdf_name}
-                      </Badge>
-                    </Group>
-                  </Group>
-                  <Divider />
-                  {stablePdfPreviewUrl ? (
-                    <div style={{ minHeight: 420, flex: 1 }}>
-                      <StablePdfPreviewFrame src={stablePdfPreviewUrl} />
+                      {structuredTemplatePreview ? (
+                        structuredTemplatePreview
+                      ) : (
+                        <div dangerouslySetInnerHTML={{ __html: item.template_preview_html ?? '' }} />
+                      )}
                     </div>
-                  ) : (
-                    <Alert color="yellow" radius="xl" title="暂时无法预览 PDF">
-                      当前未能生成预览地址，但上传文件已经保存在任务中。你仍然可以完成槽位核查并保存结果。
-                    </Alert>
-                  )}
-                </Stack>
-              </Card>
-            </SimpleGrid>
+                  </Paper>
+                </ScrollArea>
+              ) : (
+                <Alert color="yellow" radius="xl" title="暂无模板预览">
+                  当前没有可显示的模板预览，但不会影响你继续核查槽位结果。
+                </Alert>
+              )}
+            </Stack>
+          </Card>
 
-            <SimpleGrid cols={{ base: 1, lg: 12 }} spacing="md" verticalSpacing="md">
-              <Card padding="md" radius="xl" withBorder style={{ gridColumn: 'span 8', height: 460 }}>
-                <Stack gap="sm" h="100%">
-                  <Group justify="space-between" align="center">
-                    <Title order={5}>模板原始槽位</Title>
-                    <Text c="dimmed" size="sm">共 {originalSlots.length} 个槽位</Text>
-                  </Group>
-                  <ScrollArea h="calc(100% - 32px)" offsetScrollbars>
-                    <SimpleGrid cols={{ base: 1, md: 2, xl: 3 }} spacing="sm" verticalSpacing="sm">
-                      {originalSlots.map((slot, index) => {
-                        const isActive = slot.slot_key === activeOriginalSlotKey;
-                        const linkedFilledSlotKey = resolveLinkedFilledSlotKey(slot, originalSlots, items);
-                        const linkedFilledItem =
-                          items.find((item) => item.slot_key === linkedFilledSlotKey) ?? null;
-                        return (
+          <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
+            <Stack gap="xs" h="100%">
+              <Group justify="space-between" align="flex-start">
+                <div>
+                  <Title order={5}>新 PDF 预览</Title>
+                  <Text c="dimmed" size="xs">
+                    当前 PDF：{item.source_pdf_name}
+                    {selectedPageRangeLabel ? `，上传范围：原 PDF 第 ${selectedPageRangeLabel} 页` : ''}
+                  </Text>
+                </div>
+                <Group gap="xs">
+                  <Button
+                    color="gray"
+                    radius="xl"
+                    size="compact-sm"
+                    variant="subtle"
+                    onClick={() => updatePdfZoom((currentZoom) => currentZoom - PDF_PREVIEW_ZOOM_STEP)}
+                  >
+                    缩小
+                  </Button>
+                  <Badge color="gray" radius="xl" variant="light">
+                    {Math.round(pdfZoom * 100)}%
+                  </Badge>
+                  <Button
+                    color="gray"
+                    radius="xl"
+                    size="compact-sm"
+                    variant="subtle"
+                    onClick={() => updatePdfZoom((currentZoom) => currentZoom + PDF_PREVIEW_ZOOM_STEP)}
+                  >
+                    放大
+                  </Button>
+                  <Button
+                    color="gray"
+                    radius="xl"
+                    size="compact-sm"
+                    variant="subtle"
+                    onClick={() => updatePdfZoom(() => 1)}
+                  >
+                    适宽
+                  </Button>
+                </Group>
+              </Group>
+              <Divider />
+              {pdfPreviewPages.length > 0 ? (
+                <ScrollArea
+                  offsetScrollbars
+                  scrollbarSize={8}
+                  style={{ flex: 1, minHeight: 0 }}
+                  type="always"
+                  viewportRef={pdfPreviewViewportRef}
+                >
+                  <Stack gap="md">
+                    {pdfPreviewPages.map((page) => {
+                      const zoomedPageWidth = PDF_PREVIEW_BASE_WIDTH * pdfZoom;
+                      const isActivePage = activePdfPageNumber === page.pageNumber;
+
+                      return (
+                        <Box
+                          key={page.pageNumber}
+                          ref={(node) => {
+                            pdfPageRefs.current[page.pageNumber] = node;
+                          }}
+                          style={{
+                            position: 'relative',
+                            display: 'flex',
+                            justifyContent: 'center',
+                            minWidth: Math.max(620, zoomedPageWidth + 28),
+                            padding: 12,
+                            background: '#101514',
+                            borderRadius: 18,
+                            boxShadow: isActivePage
+                              ? '0 0 0 2px rgba(18, 184, 134, 0.65)'
+                              : undefined,
+                          }}
+                        >
+                          <Badge
+                            color={isActivePage ? 'teal' : 'blue'}
+                            radius="sm"
+                            style={{
+                              position: 'absolute',
+                              left: 18,
+                              top: 18,
+                              zIndex: 3,
+                            }}
+                            variant="filled"
+                          >
+                            上传第 {page.pageNumber} 页 / 原 PDF 第 {page.originalPageNumber} 页
+                          </Badge>
+                          <PdfPreviewPageCanvas
+                            alt={`${item.source_pdf_name} 第 ${page.originalPageNumber} 页`}
+                            displayWidth={zoomedPageWidth}
+                            imageUrl={page.imageUrl}
+                            pageNumber={page.pageNumber}
+                          />
+                        </Box>
+                      );
+                    })}
+                  </Stack>
+                </ScrollArea>
+              ) : stablePdfPreviewUrl ? (
+                <Alert color="yellow" radius="xl" title="暂无页图预览">
+                  当前任务没有返回可用于页图预览的 OCR 图片；请回到批量生成重新上传，或先使用浏览器 PDF 预览地址进行核对。
+                </Alert>
+              ) : (
+                <Alert color="yellow" radius="xl" title="暂时无法预览 PDF">
+                  当前未能生成预览地址，但上传文件已经保存在任务中。你仍然可以完成槽位核查并保存结果。
+                </Alert>
+              )}
+            </Stack>
+          </Card>
+
+          <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
+            <Stack gap="xs" h="100%">
+              <Group justify="space-between" align="flex-start">
+                <div>
+                  <Title order={5}>回填槽位</Title>
+                  <Text c="dimmed" size="xs">
+                    点击槽位会联动左侧模板和中间 PDF 证据页。
+                  </Text>
+                </div>
+                <Badge color={pendingManualFillItems.length > 0 ? 'yellow' : 'teal'} radius="xl" variant="filled">
+                  {items.length} 个
+                </Badge>
+              </Group>
+              <Button
+                loading={reviewMutation.isPending}
+                radius="xl"
+                size="xs"
+                onClick={handleSaveReview}
+              >
+                提交核查
+              </Button>
+              <Divider />
+              {items.length > 0 ? (
+                <ScrollArea offsetScrollbars scrollbarSize={8} style={{ flex: 1, minHeight: 0 }} type="always">
+                  <Stack gap="sm">
+                    {items.map((slotItem, index) => {
+                      const isActive = slotItem.slot_key === activeFilledSlotKey;
+                      const linkedOriginalSlotKey = resolveLinkedOriginalSlotKey(
+                        slotItem,
+                        originalSlots,
+                        items,
+                      );
+                      const linkedOriginalSlot =
+                        originalSlots.find((slot) => slot.slot_key === linkedOriginalSlotKey) ?? null;
+
+                      return (
                         <Paper
-                          key={slot.slot_key}
+                          key={slotItem.slot_key}
                           p="sm"
                           radius="lg"
                           withBorder
                           style={{
-                            position: 'relative',
                             cursor: 'pointer',
-                            minHeight: 120,
                             borderColor: isActive ? 'var(--mantine-color-teal-5)' : undefined,
-                            background: isActive ? 'rgba(18, 184, 134, 0.06)' : undefined,
+                            background: isActive ? 'rgba(18, 184, 134, 0.08)' : undefined,
                           }}
-                            onClick={() => {
-                              setActiveOriginalSlotKey(slot.slot_key);
-                              setActiveFilledSlotKey(linkedFilledSlotKey);
-                            }}
-                          >
-                            <Stack gap={8}>
-                              <Badge
-                                color={isActive ? 'teal' : 'gray'}
-                                radius="sm"
-                                size="sm"
-                                variant="light"
-                                style={{
-                                  position: 'absolute',
-                                  top: 12,
-                                  right: 12,
-                                }}
-                              >
-                                #{index + 1}
+                          onClick={() => {
+                            setActiveFilledSlotKey(slotItem.slot_key);
+                            setActiveOriginalSlotKey(linkedOriginalSlotKey);
+                          }}
+                        >
+                          <Stack gap={6}>
+                            <Group justify="space-between" align="center">
+                              <Badge color={isActive ? 'teal' : 'gray'} radius="sm" variant="filled">
+                                {slotItem.field_category || `槽位 ${index + 1}`}
                               </Badge>
-                              <div style={{ paddingRight: 52 }}>
-                                <Text fw={700} size="sm">{slot.field_category}</Text>
-                                <Text c="dimmed" lineClamp={2} size="xs">
-                                  {slot.meaning_to_applicant || '未填写槽位说明'}
-                                </Text>
-                              </div>
-                            <div>
-                              <Text c="dimmed" size="xs">模板值</Text>
-                              <Text fw={600} lineClamp={2} size="sm">
-                                {slot.original_value || '未识别到模板槽位值'}
+                              <Text c="dimmed" size="xs">
+                                {formatEvidenceSource(slotItem.evidence_page_numbers ?? [], uploadedPageNumberMapping)}
                               </Text>
-                            </div>
+                            </Group>
+                            <Text c="dimmed" lineClamp={2} size="xs">
+                              槽位来源：{slotItem.meaning_to_applicant || '未填写'}
+                            </Text>
+                            <TextInput
+                              label="模板值"
+                              radius="lg"
+                              readOnly
+                              size="xs"
+                              value={linkedOriginalSlot?.original_value ?? ''}
+                            />
+                            <TextInput
+                              label="回填值"
+                              radius="lg"
+                              size="xs"
+                              value={slotItem.original_value}
+                              error={
+                                hasManualFillPending(slotItem.original_value)
+                                  ? '需人工确认'
+                                  : undefined
+                              }
+                              onChange={(event) => {
+                                const nextValue = event.currentTarget.value;
+                                setItems((currentItems) =>
+                                  currentItems.map((currentItem) =>
+                                    currentItem.slot_key === slotItem.slot_key
+                                      ? { ...currentItem, original_value: nextValue }
+                                      : currentItem,
+                                  ),
+                                );
+                              }}
+                              onClick={(event) => event.stopPropagation()}
+                            />
                           </Stack>
                         </Paper>
                       );
                     })}
-                    </SimpleGrid>
-                  </ScrollArea>
-                </Stack>
-              </Card>
-
-                <Card padding="md" radius="xl" withBorder style={{ gridColumn: 'span 4', minHeight: 460 }}>
-                  {activeOriginalSlot || activeFilledItem ? (
-                    <Stack gap="sm" h="100%">
-                      <Group justify="space-between" align="center">
-                        <Title order={5}>填写回填值</Title>
-                      </Group>
-                      <Text c="dimmed" size="sm">
-                        当前槽位：
-                        {activeFilledItem?.field_category ||
-                        activeOriginalSlot?.field_category ||
-                        '未选中槽位'}
-                    </Text>
-
-                    <TextInput
-                      label="槽位含义"
-                      radius="lg"
-                      readOnly
-                      size="sm"
-                      value={
-                        activeFilledItem?.meaning_to_applicant ??
-                        activeOriginalSlot?.meaning_to_applicant ??
-                        ''
-                      }
-                    />
-
-                    <TextInput
-                      label="模板原始槽位值"
-                      radius="lg"
-                      readOnly
-                      size="sm"
-                      value={activeOriginalSlot?.original_value ?? ''}
-                    />
-
-                      <TextInput
-                        label="回填值"
-                        radius="lg"
-                        size="sm"
-                        value={activeFilledItem?.original_value ?? ''}
-                        error={
-                          hasManualFillPending(activeFilledItem?.original_value)
-                            ? '当前回填值为空，需要人工填写'
-                            : undefined
-                        }
-                        onChange={(event) => {
-                          const nextValue = event.currentTarget.value;
-                          setItems((currentItems) =>
-                          currentItems.map((currentItem) =>
-                            currentItem.slot_key === activeFilledSlotKey
-                              ? { ...currentItem, original_value: nextValue }
-                              : currentItem,
-                          ),
-                        );
-                      }}
-                    />
-
-                    <TextInput
-                      label="证据位置"
-                      radius="lg"
-                      readOnly
-                      size="sm"
-                      value={formatEvidenceSource(
-                        activeFilledItem?.evidence_page_numbers ?? [],
-                        uploadedPageNumberMapping,
-                      )}
-                    />
-
-                      <Text c="dimmed" size="xs">
-                        模型抽取仅供参考，请结合 PDF 原文人工核对后再提交核查结果。
-                      </Text>
-                      {pendingManualFillItems.length > 0 ? (
-                        <Text c="dimmed" size="xs">
-                          当前仍有 {pendingManualFillItems.length} 个槽位回填值为空。如该槽位本就应为空，可直接提交；如需补全，请结合 PDF 原文手动填写。
-                        </Text>
-                      ) : null}
-                      {hasManualFillPending(activeFilledItem?.original_value) ? (
-                        <Alert color="yellow" radius="lg" title="需要人工补全">
-                          这个槽位当前回填值为空。如该槽位本就应为空，可保持不填；如需补全，请根据 PDF 原文手动填写。
-                        </Alert>
-                      ) : null}
-                    </Stack>
-                  ) : (
-                  <Alert color="yellow" radius="xl" title="暂无槽位结果">
-                    当前任务项还没有可核查的槽位，请先回到批量生成列表确认视觉模型是否成功返回结果。
-                  </Alert>
-                )}
-              </Card>
-            </SimpleGrid>
-          </Stack>
-        </SimpleGrid>
+                  </Stack>
+                </ScrollArea>
+              ) : (
+                <Alert color="yellow" radius="xl" title="暂无槽位结果">
+                  当前任务项还没有可核查的槽位，请先回到批量生成列表确认模型是否成功返回结果。
+                </Alert>
+              )}
+              {pendingManualFillItems.length > 0 ? (
+                <Text c="dimmed" size="xs">
+                  仍有 {pendingManualFillItems.length} 个槽位回填值为空；如该槽位本就应为空，可直接提交。
+                </Text>
+              ) : null}
+            </Stack>
+          </Card>
+        </Box>
 
         {isJsonPreviewDebugEnabled ? (
           <Card padding="md" radius="xl" withBorder>

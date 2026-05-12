@@ -2,18 +2,44 @@ import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
 import {
   getOptionalEnv,
-  getTextLlmModel,
   getVisionLlmModel,
 } from '@/src/lib/llm/env';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
+  getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
 
 export interface GenerationSlotSchemaItem {
   slot_key: string;
   field_category: string;
   meaning_to_applicant: string;
+  reference_pdf_evidence?: GenerationSlotReferencePdfEvidence | null;
+}
+
+export interface GenerationSlotReferencePdfEvidence {
+  example_pdf_file_name?: string;
+  example_page_number?: number;
+  example_bbox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  example_evidence_text?: string;
+  example_slot_value?: string;
+  example_confidence?: number | null;
+  example_match_type?: string;
+  example_page_storage_path?: string;
+  example_page_crop?: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    originalWidth: number;
+    originalHeight: number;
+    contentRatio: number;
+  } | null;
 }
 
 export interface PdfPageInput {
@@ -343,14 +369,9 @@ export function buildTextSlotFillPromptPayload(input: {
   return {
     document_name: input.documentName,
     slot_names: input.slots.map((slot) => slot.field_category),
-    slot_definitions: input.slots.map((slot) => ({
-      slot_key: slot.slot_key,
-      slot_name: slot.field_category,
-      slot_meaning:
-        slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-    })),
+    slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
     strict_requirement:
-      'Return the exact same slot_key copied from slot_definitions. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+      'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
     page_numbers: input.pageNumbers,
     content: input.chunkText,
     output_schema: {
@@ -428,7 +449,7 @@ function describeNetworkError(error: unknown) {
 function wrapFetchFailure(
   error: unknown,
   input: {
-    stage: 'vision-ocr' | 'text-slot-fill';
+    stage: 'vision-ocr' | 'vision-slot-fill' | 'text-slot-fill';
     documentName: string;
     model: string;
     baseUrl: string;
@@ -497,7 +518,7 @@ function shouldRetryVisionRequest(error: unknown) {
   );
 }
 
-function shouldRetryTextRequest(error: unknown) {
+function shouldRetryPdfFillRequest(error: unknown) {
   if (error instanceof DOMException && error.name === 'AbortError') {
     return true;
   }
@@ -508,6 +529,16 @@ function shouldRetryTextRequest(error: unknown) {
 
   return (
     error.message.includes('fetch failed') ||
+    error.message.includes('PDF fill model request failed (429)') ||
+    error.message.includes('PDF fill model request failed (500)') ||
+    error.message.includes('PDF fill model request failed (502)') ||
+    error.message.includes('PDF fill model request failed (503)') ||
+    error.message.includes('PDF fill model request failed (504)') ||
+    error.message.includes('Vision model request failed (429)') ||
+    error.message.includes('Vision model request failed (500)') ||
+    error.message.includes('Vision model request failed (502)') ||
+    error.message.includes('Vision model request failed (503)') ||
+    error.message.includes('Vision model request failed (504)') ||
     error.message.includes('Text model request failed (429)') ||
     error.message.includes('Text model request failed (500)') ||
     error.message.includes('Text model request failed (502)') ||
@@ -538,6 +569,36 @@ function getSlotSemanticHint(slotName: string) {
   }
 
   return 'Find the value that best matches the meaning of this slot.';
+}
+
+function buildSlotReferencePromptData(slot: GenerationSlotSchemaItem) {
+  const reference = slot.reference_pdf_evidence;
+
+  if (!reference) {
+    return null;
+  }
+
+  return {
+    example_pdf_file_name: reference.example_pdf_file_name ?? '',
+    example_page_number: reference.example_page_number ?? null,
+    example_bbox_normalized: reference.example_bbox ?? null,
+    example_evidence_text: reference.example_evidence_text ?? '',
+    example_slot_value: reference.example_slot_value ?? '',
+    example_confidence: reference.example_confidence ?? null,
+    example_match_type: reference.example_match_type ?? '',
+  };
+}
+
+function buildSlotDefinitionForPrompt(slot: GenerationSlotSchemaItem) {
+  return {
+    slot_key: slot.slot_key,
+    slot_name: slot.field_category,
+    slot_source:
+      slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
+    slot_meaning:
+      slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
+    reference_example_pdf_evidence: buildSlotReferencePromptData(slot),
+  };
 }
 
 function getSlotKeywords(slotName: string) {
@@ -678,7 +739,7 @@ async function extractSlotWithTextModel(input: {
     );
 
     try {
-      const llmConfig = getLlmRuntimeConfig('text');
+      const llmConfig = getLlmRuntimeConfig('vision');
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
@@ -701,11 +762,16 @@ async function extractSlotWithTextModel(input: {
                   document_name: input.documentName,
                   slot_key: input.slot.slot_key,
                   slot_name: input.slot.field_category,
+                  slot_source:
+                    input.slot.meaning_to_applicant ||
+                    getSlotSemanticHint(input.slot.field_category),
                   slot_hint:
                     input.slot.meaning_to_applicant ||
                     getSlotSemanticHint(input.slot.field_category),
+                  reference_example_pdf_evidence:
+                    buildSlotReferencePromptData(input.slot),
                   strict_requirement:
-                    'Return the exact same slot_key in results[0].slot_key. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
+                    'Return the exact same slot_key in results[0].slot_key. Use slot_source and reference_example_pdf_evidence as example clues from the reviewed template PDF, but extract final_value only from this new PDF text chunk. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
                   page_numbers: input.pageNumbers,
                   content: input.chunkText,
                   output_schema: {
@@ -734,7 +800,7 @@ async function extractSlotWithTextModel(input: {
       if (!upstream.ok) {
         const details = await upstream.text();
         throw new Error(
-          `Text model request failed (${upstream.status}): ${details}`,
+          `PDF fill model request failed (${upstream.status}): ${details}`,
         );
       }
 
@@ -802,14 +868,14 @@ async function extractSlotWithTextModel(input: {
       };
     } catch (error) {
       const normalizedError = wrapFetchFailure(error, {
-        stage: 'text-slot-fill',
+        stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('text').model,
-        baseUrl: getLlmRuntimeConfig('text').baseUrl,
+        model: getLlmRuntimeConfig('vision').model,
+        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
         attempt,
       });
       const shouldRetry =
-        attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryTextRequest(error);
+        attempt < MAX_TEXT_REQUEST_RETRIES && shouldRetryPdfFillRequest(error);
 
       if (!shouldRetry) {
         if (
@@ -817,7 +883,7 @@ async function extractSlotWithTextModel(input: {
           normalizedError.name === 'AbortError'
         ) {
           throw new Error(
-            'Text slot extraction timed out after multiple attempts.',
+            'PDF slot fill timed out after multiple attempts.',
           );
         }
 
@@ -830,7 +896,7 @@ async function extractSlotWithTextModel(input: {
     }
   }
 
-  throw new Error('Text slot extraction failed after multiple attempts.');
+  throw new Error('PDF slot fill failed after multiple attempts.');
 }
 
 async function extractTextFromVisionPages(input: {
@@ -1505,7 +1571,7 @@ async function extractAllSlotsWithTextModel(input: {
           (input.processReserveMs ?? PROCESS_ROUTE_FINALIZATION_RESERVE_MS)
       ) {
         throw new Error(
-          'Skipping text slot fill request because remaining /process budget is too low; handing off to manual review.',
+          'Skipping PDF slot fill request because remaining /process budget is too low; handing off to manual review.',
         );
       }
       const promptPayload = buildTextSlotFillPromptPayload({
@@ -1514,10 +1580,21 @@ async function extractAllSlotsWithTextModel(input: {
         pageNumbers: input.pageNumbers,
         chunkText: input.chunkText,
       });
+      const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
       await input.onTrace?.({
-        message: `[PDF Fill][TextPrompt][${requestLabel}] ${stringifyTraceJson({
+        message: `[PDF Fill][VisionPrompt][${requestLabel}] ${stringifyTraceJson({
           route: '/api/generation-task-items/[taskItemId]/slot-fill',
-          model: getTextLlmModel(),
+          config_scope: 'VISION_LLM',
+          model: getVisionLlmModel(),
+          provider: visionTraceConfig.provider,
+          model_env_name: visionTraceConfig.modelEnvName,
+          thinking_enabled_env_name:
+            visionTraceConfig.thinkingEnabledEnvName,
+          thinking_enabled: visionTraceConfig.thinkingEnabled,
+          reasoning_effort_env_name:
+            visionTraceConfig.reasoningEffortEnvName,
+          reasoning_effort: visionTraceConfig.reasoningEffort,
+          extra_body: visionTraceConfig.extraBody,
           request_label: requestLabel,
           messages: [
             {
@@ -1533,7 +1610,7 @@ async function extractAllSlotsWithTextModel(input: {
         })}`,
       });
       const requestStartedMessage =
-        `[PDF Fill][Text] Starting ${requestLabel} for ${input.documentName} ` +
+        `[PDF Fill][Vision] Starting ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix(
           {
             processStartedAtMs: input.processStartedAtMs,
@@ -1557,7 +1634,7 @@ async function extractAllSlotsWithTextModel(input: {
         ) {
           budgetAbortTriggered = true;
           const budgetAbortMessage =
-            `[PDF Fill][Text] Aborting ${requestLabel} for ${input.documentName} early ` +
+            `[PDF Fill][Vision] Aborting ${requestLabel} for ${input.documentName} early ` +
             `to preserve ${formatElapsedMs(
               input.processReserveMs ?? PROCESS_ROUTE_FINALIZATION_RESERVE_MS,
             )} for route finalization (process elapsed: ${formatElapsedMs(
@@ -1572,7 +1649,7 @@ async function extractAllSlotsWithTextModel(input: {
         }
 
         const heartbeatMessage =
-          `[PDF Fill][Text] Waiting on ${requestLabel} for ${input.documentName} ` +
+          `[PDF Fill][Vision] Waiting on ${requestLabel} for ${input.documentName} ` +
           `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, elapsed: ${formatElapsedMs(elapsedMs)} / timeout: ${formatElapsedMs(requestTimeoutMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix(
             {
               processStartedAtMs: input.processStartedAtMs,
@@ -1583,7 +1660,7 @@ async function extractAllSlotsWithTextModel(input: {
         void input.onTrace?.({ message: heartbeatMessage });
       }, 15000);
 
-      const llmConfig = getLlmRuntimeConfig('text');
+      const llmConfig = getLlmRuntimeConfig('vision');
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
@@ -1605,15 +1682,9 @@ async function extractAllSlotsWithTextModel(input: {
                 content: JSON.stringify({
                   document_name: input.documentName,
                   slot_names: input.slots.map((slot) => slot.field_category),
-                  slot_definitions: input.slots.map((slot) => ({
-                    slot_key: slot.slot_key,
-                    slot_name: slot.field_category,
-                    slot_meaning:
-                      slot.meaning_to_applicant ||
-                      getSlotSemanticHint(slot.field_category),
-                  })),
+                  slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
                   strict_requirement:
-                    'Return the exact same slot_key copied from slot_definitions. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+                    'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
                   page_numbers: input.pageNumbers,
                   content: input.chunkText,
                   output_schema: {
@@ -1640,7 +1711,7 @@ async function extractAllSlotsWithTextModel(input: {
       if (!upstream.ok) {
         const details = await upstream.text();
         throw new Error(
-          `Text model request failed (${upstream.status}): ${details}`,
+          `PDF fill model request failed (${upstream.status}): ${details}`,
         );
       }
 
@@ -1712,7 +1783,7 @@ async function extractAllSlotsWithTextModel(input: {
       };
       const requestElapsedMs = Date.now() - requestStartedAt;
       const requestCompletedMessage =
-        `[PDF Fill][Text] Completed ${requestLabel} for ${input.documentName} ` +
+        `[PDF Fill][Vision] Completed ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}) with ${result.extracted_items.filter((item) => hasFilledValue(item.original_value)).length}/${input.slots.length} filled slots in ${formatElapsedMs(requestElapsedMs)}${formatProcessBudgetSuffix(
           {
             processStartedAtMs: input.processStartedAtMs,
@@ -1725,16 +1796,16 @@ async function extractAllSlotsWithTextModel(input: {
       return result;
     } catch (error) {
       const normalizedError = wrapFetchFailure(error, {
-        stage: 'text-slot-fill',
+        stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('text').model,
-        baseUrl: getLlmRuntimeConfig('text').baseUrl,
+        model: getLlmRuntimeConfig('vision').model,
+        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
         attempt,
       });
       const requestLabel = input.requestLabel ?? 'full-text slot request';
       const requestElapsedMs = Date.now() - requestStartedAt;
       const requestFailedMessage =
-        `[PDF Fill][Text] Failed ${requestLabel} for ${input.documentName} ` +
+        `[PDF Fill][Vision] Failed ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}) after ${formatElapsedMs(requestElapsedMs)}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}${formatProcessBudgetSuffix(
           {
             processStartedAtMs: input.processStartedAtMs,
@@ -1745,12 +1816,12 @@ async function extractAllSlotsWithTextModel(input: {
       await input.onTrace?.({ message: requestFailedMessage });
       const shouldRetry =
         attempt < MAX_TEXT_REQUEST_RETRIES &&
-        shouldRetryTextRequest(normalizedError);
+        shouldRetryPdfFillRequest(normalizedError);
 
       if (!shouldRetry || budgetAbortTriggered) {
         if (budgetAbortTriggered) {
           throw new Error(
-            'Text slot fill request stopped early because remaining /process budget was too low; handing off to manual review.',
+            'PDF slot fill request stopped early because remaining /process budget was too low; handing off to manual review.',
           );
         }
 
@@ -1759,7 +1830,7 @@ async function extractAllSlotsWithTextModel(input: {
           normalizedError.name === 'AbortError'
         ) {
           throw new Error(
-            'Text slot extraction timed out after multiple attempts.',
+            'PDF slot fill timed out after multiple attempts.',
           );
         }
 
@@ -1775,7 +1846,7 @@ async function extractAllSlotsWithTextModel(input: {
     }
   }
 
-  throw new Error('Text slot extraction failed after multiple attempts.');
+  throw new Error('PDF slot fill failed after multiple attempts.');
 }
 
 export async function fillSlotsFromTextPages(params: {
@@ -1801,12 +1872,7 @@ export async function fillSlotsFromTextPages(params: {
   const fullTextInputPayload = {
     document_name: params.pdfFileName,
     page_numbers: allPageNumbers,
-    slot_definitions: params.slots.map((slot) => ({
-      slot_key: slot.slot_key,
-      slot_name: slot.field_category,
-      slot_meaning:
-        slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-    })),
+    slot_definitions: params.slots.map(buildSlotDefinitionForPrompt),
     content: fullDocumentText,
   };
 
@@ -1814,7 +1880,7 @@ export async function fillSlotsFromTextPages(params: {
     message: `[PDF Fill][TextInputData][Full] ${stringifyTraceJson(fullTextInputPayload)}`,
   });
 
-  const strategyMessage = `[PDF Fill] Text slot fill strategy for ${params.pdfFileName}: full-text all-slot request.`;
+  const strategyMessage = `[PDF Fill] Vision LLM slot fill strategy for ${params.pdfFileName}: OCR-text all-slot request.`;
   console.info(strategyMessage);
   await params.onTrace?.({ message: strategyMessage });
 
@@ -2115,7 +2181,7 @@ export async function fillTemplateSlotsFromPdf(params: {
 
     const textFillStartedAt = Date.now();
     const textFillStartedMessage =
-      `[PDF Fill] Text slot fill started for ${params.pdfFileName} ` +
+      `[PDF Fill] Vision LLM slot fill started for ${params.pdfFileName} ` +
       `(ocr pages with text: ${ocrPages.length}, slots: ${params.slots.length}).`;
     console.info(textFillStartedMessage);
     await params.onTrace?.({ message: textFillStartedMessage });
@@ -2131,7 +2197,7 @@ export async function fillTemplateSlotsFromPdf(params: {
       });
       const textFillElapsedMs = Date.now() - textFillStartedAt;
       const textFillCompletedMessage =
-        `[PDF Fill] Text slot fill completed for ${params.pdfFileName} in ${formatElapsedMs(textFillElapsedMs)} ` +
+        `[PDF Fill] Vision LLM slot fill completed for ${params.pdfFileName} in ${formatElapsedMs(textFillElapsedMs)} ` +
         `(ocr pages with text: ${ocrPages.length}, slots: ${params.slots.length}).`;
       console.info(textFillCompletedMessage);
       await params.onTrace?.({ message: textFillCompletedMessage });
@@ -2139,13 +2205,13 @@ export async function fillTemplateSlotsFromPdf(params: {
     } catch (error) {
       const textFillElapsedMs = Date.now() - textFillStartedAt;
       const textFillFailedMessage =
-        `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}: ` +
+        `[PDF Fill] Vision LLM slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}: ` +
         `${getErrorMessage(error)}`;
       console.error(textFillFailedMessage, error);
       await params.onTrace?.({ message: textFillFailedMessage });
       await params.onTrace?.({
         message:
-          `[PDF Fill][Text][ErrorDetails][TopLevel] ` +
+          `[PDF Fill][Vision][ErrorDetails][TopLevel] ` +
           `${JSON.stringify(
             buildTraceErrorDetails(error, {
               documentName: params.pdfFileName,
@@ -2158,7 +2224,7 @@ export async function fillTemplateSlotsFromPdf(params: {
 
   const textFillStartedAt = Date.now();
   const textFillStartedMessage =
-    `[PDF Fill] Text slot fill started for ${params.pdfFileName} ` +
+    `[PDF Fill] Vision LLM slot fill started for ${params.pdfFileName} ` +
     `(text pages: ${validPages.length}, slots: ${params.slots.length}).`;
   console.info(textFillStartedMessage);
   await params.onTrace?.({ message: textFillStartedMessage });
@@ -2174,7 +2240,7 @@ export async function fillTemplateSlotsFromPdf(params: {
     });
     const textFillElapsedMs = Date.now() - textFillStartedAt;
     const textFillCompletedMessage =
-      `[PDF Fill] Text slot fill completed for ${params.pdfFileName} in ${formatElapsedMs(textFillElapsedMs)} ` +
+      `[PDF Fill] Vision LLM slot fill completed for ${params.pdfFileName} in ${formatElapsedMs(textFillElapsedMs)} ` +
       `(text pages: ${validPages.length}, slots: ${params.slots.length}).`;
     console.info(textFillCompletedMessage);
     await params.onTrace?.({ message: textFillCompletedMessage });
@@ -2182,13 +2248,13 @@ export async function fillTemplateSlotsFromPdf(params: {
   } catch (error) {
     const textFillElapsedMs = Date.now() - textFillStartedAt;
     const textFillFailedMessage =
-      `[PDF Fill] Text slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}: ` +
+      `[PDF Fill] Vision LLM slot fill failed for ${params.pdfFileName} after ${formatElapsedMs(textFillElapsedMs)}: ` +
       `${getErrorMessage(error)}`;
     console.error(textFillFailedMessage, error);
     await params.onTrace?.({ message: textFillFailedMessage });
     await params.onTrace?.({
       message:
-        `[PDF Fill][Text][ErrorDetails][TopLevel] ` +
+        `[PDF Fill][Vision][ErrorDetails][TopLevel] ` +
         `${JSON.stringify(
           buildTraceErrorDetails(error, {
             documentName: params.pdfFileName,

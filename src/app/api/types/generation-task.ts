@@ -54,6 +54,29 @@ export const generationTaskItemDetailSchema = generationTaskItemSummarySchema.ex
   llm_output: z.any().nullable().optional(),
   review_payload: z.any().nullable().optional(),
   pdf_preview_url: z.string().nullable().optional(),
+  pdf_preview_pages: z
+    .array(
+      z.object({
+        pageNumber: z.number().int().positive(),
+        originalPageNumber: z.number().int().positive(),
+        imageUrl: z.string(),
+        storagePath: z.string(),
+        crop: z
+          .object({
+            left: z.number(),
+            top: z.number(),
+            width: z.number(),
+            height: z.number(),
+            originalWidth: z.number(),
+            originalHeight: z.number(),
+            contentRatio: z.number(),
+          })
+          .nullable()
+          .optional(),
+      }),
+    )
+    .optional()
+    .default([]),
   template_preview_html: z.string().nullable().optional(),
   template_preview_document: z.any().nullable().optional(),
   template_preview_slots: z.any().nullable().optional(),

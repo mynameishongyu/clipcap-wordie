@@ -216,6 +216,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             uploaded_page_number: uploadedPageNumber,
             original_page_number: originalPageNumber,
             storage_path: ocrImageStoragePath,
+            ...(visionPage.crop ? { crop: visionPage.crop } : {}),
           };
         }),
       );

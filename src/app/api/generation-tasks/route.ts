@@ -4,6 +4,7 @@ import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { getUserTemplateById } from '@/src/lib/data/templates-repository';
 import type {
   GenerationSlotSchemaItem,
+  GenerationSlotReferencePdfEvidence,
   PdfPageInput,
   PdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
@@ -20,6 +21,7 @@ interface UploadedFileMetadata {
     uploaded_page_number?: number;
     original_page_number?: number;
     storage_path?: string;
+    crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
   }>;
   parsed_pdf?: {
     pages?: Array<{ pageNumber?: number; text?: string }>;
@@ -52,6 +54,7 @@ function normalizeOcrImageAssets(metadata: UploadedFileMetadata | undefined) {
         uploaded_page_number: number;
         original_page_number: number;
         storage_path: string;
+        crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
       } =>
         typeof entry?.uploaded_page_number === 'number' &&
         Number.isInteger(entry.uploaded_page_number) &&
@@ -62,6 +65,12 @@ function normalizeOcrImageAssets(metadata: UploadedFileMetadata | undefined) {
         typeof entry?.storage_path === 'string' &&
         entry.storage_path.trim().length > 0,
     )
+    .map((entry) => ({
+      uploaded_page_number: entry.uploaded_page_number,
+      original_page_number: entry.original_page_number,
+      storage_path: entry.storage_path,
+      ...(entry.crop ? { crop: entry.crop } : {}),
+    }))
     .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
 }
 
@@ -101,12 +110,59 @@ function buildSlotSchemaFromPayload(
   payload: SlotReviewSessionPayload | null | undefined,
 ): GenerationSlotSchemaItem[] {
   const paragraphs = Array.isArray(payload?.extractionResult) ? payload.extractionResult : [];
+  const evidenceMatches = Array.isArray(payload?.pdfEvidence?.matches)
+    ? payload.pdfEvidence.matches
+    : [];
+  const evidencePages = Array.isArray(payload?.pdfEvidence?.pages)
+    ? payload.pdfEvidence.pages
+    : [];
+
+  const buildReferenceEvidence = (
+    paragraphIndex: number,
+    itemIndex: number,
+    item: ExtractionParagraph['items'][number],
+  ): GenerationSlotReferencePdfEvidence | null => {
+    const match =
+      evidenceMatches.find(
+        (candidate) =>
+          candidate.paragraph_result_index === paragraphIndex &&
+          candidate.item_index === itemIndex &&
+          candidate.sequence === item.sequence,
+      ) ??
+      evidenceMatches.find(
+        (candidate) =>
+          candidate.sequence === item.sequence &&
+          candidate.field_category === item.field_category &&
+          candidate.original_value === item.original_value,
+      );
+
+    if (!match) {
+      return null;
+    }
+
+    const page = evidencePages.find(
+      (candidate) => candidate.pageNumber === match.page_number,
+    );
+
+    return {
+      example_pdf_file_name: payload?.pdfEvidence?.pdfFileName ?? '',
+      example_page_number: match.page_number,
+      example_bbox: match.bbox ?? null,
+      example_evidence_text: match.evidence_text,
+      example_slot_value: match.original_value || item.original_value,
+      example_confidence: match.confidence,
+      example_match_type: match.match_type,
+      example_page_storage_path: page?.storagePath,
+      example_page_crop: page?.crop ?? null,
+    };
+  };
 
   return paragraphs.flatMap((paragraph: ExtractionParagraph, paragraphIndex) =>
     paragraph.items.map((item, itemIndex) => ({
       slot_key: `${paragraphIndex}-${itemIndex}-${item.sequence}`,
       field_category: item.field_category,
       meaning_to_applicant: item.meaning_to_applicant,
+      reference_pdf_evidence: buildReferenceEvidence(paragraphIndex, itemIndex, item),
     })),
   );
 }

@@ -13,6 +13,15 @@ export type OcrImageAsset = {
   uploaded_page_number: number;
   original_page_number: number;
   storage_path: string;
+  crop?: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    originalWidth: number;
+    originalHeight: number;
+    contentRatio: number;
+  } | null;
 };
 
 export type GenerationTaskItemRecord = {
@@ -44,6 +53,11 @@ export type GenerationTaskItemRecord = {
     total_text_length?: number;
     force_ocr?: boolean;
     selected_original_page_numbers?: number[];
+    uploaded_page_number_mapping?: Array<{
+      uploaded_page_number: number;
+      original_page_number: number;
+    }>;
+    selected_page_range_label?: string;
   } | null;
 };
 

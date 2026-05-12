@@ -3,6 +3,22 @@ import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
+type GenerationPdfPreviewPage = {
+  pageNumber: number;
+  originalPageNumber: number;
+  imageUrl: string;
+  storagePath: string;
+  crop?: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    originalWidth: number;
+    originalHeight: number;
+    contentRatio: number;
+  } | null;
+};
+
 function createUnauthorizedResponse() {
   return NextResponse.json(
     {
@@ -10,6 +26,81 @@ function createUnauthorizedResponse() {
       message: '请先登录后再继续。',
     },
     { status: 401 },
+  );
+}
+
+function normalizePdfPreviewPagesInput(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(
+      (
+        entry,
+      ): entry is {
+        uploaded_page_number: number;
+        original_page_number: number;
+        storage_path: string;
+        crop?: GenerationPdfPreviewPage['crop'];
+      } =>
+        !!entry &&
+        typeof entry === 'object' &&
+        typeof (entry as { uploaded_page_number?: unknown }).uploaded_page_number === 'number' &&
+        Number.isInteger((entry as { uploaded_page_number: number }).uploaded_page_number) &&
+        (entry as { uploaded_page_number: number }).uploaded_page_number > 0 &&
+        typeof (entry as { original_page_number?: unknown }).original_page_number === 'number' &&
+        Number.isInteger((entry as { original_page_number: number }).original_page_number) &&
+        (entry as { original_page_number: number }).original_page_number > 0 &&
+        typeof (entry as { storage_path?: unknown }).storage_path === 'string' &&
+        (entry as { storage_path: string }).storage_path.trim().length > 0,
+    )
+    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+}
+
+async function createGenerationPdfPreviewPages(input: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  llmInput: unknown;
+}): Promise<GenerationPdfPreviewPage[]> {
+  if (!input.llmInput || typeof input.llmInput !== 'object') {
+    return [];
+  }
+
+  const assets = normalizePdfPreviewPagesInput(
+    (input.llmInput as { ocr_image_assets?: unknown }).ocr_image_assets,
+  );
+
+  if (assets.length === 0) {
+    return [];
+  }
+
+  const signedPages = await Promise.all(
+    assets.map(async (asset): Promise<GenerationPdfPreviewPage | null> => {
+      const { data, error } = await input.admin.storage
+        .from('generation-pdfs')
+        .createSignedUrl(asset.storage_path, 60 * 60);
+
+      if (error || !data?.signedUrl) {
+        return null;
+      }
+
+      const page: GenerationPdfPreviewPage = {
+        pageNumber: asset.uploaded_page_number,
+        originalPageNumber: asset.original_page_number,
+        imageUrl: data.signedUrl,
+        storagePath: asset.storage_path,
+      };
+
+      if (asset.crop) {
+        page.crop = asset.crop;
+      }
+
+      return page;
+    }),
+  );
+
+  return signedPages.filter(
+    (page): page is GenerationPdfPreviewPage => Boolean(page),
   );
 }
 
@@ -73,6 +164,11 @@ export async function GET(
       throw signedUrlError;
     }
 
+    const pdfPreviewPages = await createGenerationPdfPreviewPages({
+      admin,
+      llmInput: item.llm_input,
+    });
+
     let templatePreviewHtml: string | null = null;
     let templatePreviewDocument: unknown = null;
     let templatePreviewSlots: unknown = null;
@@ -104,6 +200,7 @@ export async function GET(
         item: {
           ...item,
           pdf_preview_url: signedUrlData?.signedUrl ?? null,
+          pdf_preview_pages: pdfPreviewPages,
           template_preview_html: templatePreviewHtml,
           template_preview_document: templatePreviewDocument,
           template_preview_slots: templatePreviewSlots,
