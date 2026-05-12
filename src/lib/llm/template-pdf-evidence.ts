@@ -608,6 +608,33 @@ function getAmountCandidates(value: string) {
   return candidates;
 }
 
+function hasMatchingAmountCandidate(
+  leftValues: Set<string>,
+  rightValues: Set<string>,
+) {
+  for (const leftValue of leftValues) {
+    const leftNumber = Number(leftValue);
+
+    if (!Number.isFinite(leftNumber)) {
+      continue;
+    }
+
+    for (const rightValue of rightValues) {
+      const rightNumber = Number(rightValue);
+
+      if (!Number.isFinite(rightNumber)) {
+        continue;
+      }
+
+      if (Math.abs(leftNumber - rightNumber) < 0.005) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function isDateLikeSlot(slot: TemplatePdfLocateSlot) {
   const metadata = `${slot.field_category} ${slot.meaning_to_applicant}`;
 
@@ -670,6 +697,18 @@ function validateVisionEvidenceValue(input: {
     return { valid: true, reason: 'empty_original_value' };
   }
 
+  if (isAmountLikeSlot(input.slot)) {
+    const originalAmounts = getAmountCandidates(originalValue);
+    const evidenceAmounts = getAmountCandidates(evidenceText);
+
+    return {
+      valid:
+        originalAmounts.size > 0 &&
+        hasMatchingAmountCandidate(originalAmounts, evidenceAmounts),
+      reason: 'amount_value_mismatch',
+    };
+  }
+
   if (isIdentityLikeSlot(input.slot)) {
     const originalIdentity = normalizeIdentityValue(originalValue);
     const evidenceIdentity = normalizeIdentityValue(evidenceText);
@@ -690,18 +729,6 @@ function validateVisionEvidenceValue(input: {
     return {
       valid: originalDates.size > 0 && hasMatchingVariant(originalDates, evidenceDates),
       reason: 'date_value_mismatch',
-    };
-  }
-
-  if (isAmountLikeSlot(input.slot)) {
-    const originalAmounts = getAmountCandidates(originalValue);
-    const evidenceAmounts = getAmountCandidates(evidenceText);
-
-    return {
-      valid:
-        originalAmounts.size > 0 &&
-        hasMatchingVariant(originalAmounts, evidenceAmounts),
-      reason: 'amount_value_mismatch',
     };
   }
 

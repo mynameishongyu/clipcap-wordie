@@ -2326,15 +2326,6 @@ export function SlotReviewWorkspace() {
                   <Badge color="teal" radius="xl" variant="filled">
                     {visibleItems.length} 个
                   </Badge>
-                  <Button
-                    color="gray"
-                    radius="xl"
-                    size="compact-xs"
-                    variant="subtle"
-                    onClick={() => setIsSlotPanelCollapsed(true)}
-                  >
-                    收起
-                  </Button>
                 </Group>
               </Group>
               <Button
