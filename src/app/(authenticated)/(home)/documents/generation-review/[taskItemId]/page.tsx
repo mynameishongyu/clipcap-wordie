@@ -106,7 +106,11 @@ function clampPdfZoom(value: number) {
 }
 
 function normalizeSlotText(value: string) {
-  return value.trim();
+  return value
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/[，,。.:：；;、（）()\[\]【】《》<>“”"'`]/g, '')
+    .replace(/的/g, '');
 }
 
 function buildSlotSignature(fieldCategory: string, meaningToApplicant: string) {
@@ -887,6 +891,14 @@ function resolveLinkedFilledSlotKey(
   originalSlots: TemplateOriginalSlot[],
   filledItems: EditableReviewedItem[],
 ) {
+  const directKeyMatch = filledItems.find(
+    (currentItem) => currentItem.slot_key === slot.slot_key,
+  );
+
+  if (directKeyMatch) {
+    return directKeyMatch.slot_key;
+  }
+
   const signature = buildSlotSignature(slot.field_category, slot.meaning_to_applicant);
   const originalMatches = originalSlots.filter(
     (currentSlot) =>
@@ -907,9 +919,19 @@ function resolveLinkedFilledSlotKey(
   const fallbackByCategory = filledItems.filter(
     (currentItem) => normalizeSlotText(currentItem.field_category) === normalizeSlotText(slot.field_category),
   );
+  const originalCategoryMatches = originalSlots.filter(
+    (currentSlot) => normalizeSlotText(currentSlot.field_category) === normalizeSlotText(slot.field_category),
+  );
+  const originalCategoryMatchIndex = originalCategoryMatches.findIndex(
+    (currentSlot) => currentSlot.slot_key === slot.slot_key,
+  );
 
   if (originalMatchIndex >= 0 && fallbackByCategory[originalMatchIndex]) {
     return fallbackByCategory[originalMatchIndex].slot_key;
+  }
+
+  if (originalCategoryMatchIndex >= 0 && fallbackByCategory[originalCategoryMatchIndex]) {
+    return fallbackByCategory[originalCategoryMatchIndex].slot_key;
   }
 
   return filledMatches[0]?.slot_key ?? fallbackByCategory[0]?.slot_key ?? filledItems[0]?.slot_key ?? null;
@@ -920,6 +942,14 @@ function resolveLinkedOriginalSlotKey(
   originalSlots: TemplateOriginalSlot[],
   filledItems: EditableReviewedItem[],
 ) {
+  const directKeyMatch = originalSlots.find(
+    (currentSlot) => currentSlot.slot_key === item.slot_key,
+  );
+
+  if (directKeyMatch) {
+    return directKeyMatch.slot_key;
+  }
+
   const signature = buildSlotSignature(item.field_category, item.meaning_to_applicant);
   const filledMatches = filledItems.filter(
     (currentItem) =>
@@ -940,9 +970,19 @@ function resolveLinkedOriginalSlotKey(
   const fallbackByCategory = originalSlots.filter(
     (currentSlot) => normalizeSlotText(currentSlot.field_category) === normalizeSlotText(item.field_category),
   );
+  const filledCategoryMatches = filledItems.filter(
+    (currentItem) => normalizeSlotText(currentItem.field_category) === normalizeSlotText(item.field_category),
+  );
+  const filledCategoryMatchIndex = filledCategoryMatches.findIndex(
+    (currentItem) => currentItem.slot_key === item.slot_key,
+  );
 
   if (filledMatchIndex >= 0 && fallbackByCategory[filledMatchIndex]) {
     return fallbackByCategory[filledMatchIndex].slot_key;
+  }
+
+  if (filledCategoryMatchIndex >= 0 && fallbackByCategory[filledCategoryMatchIndex]) {
+    return fallbackByCategory[filledCategoryMatchIndex].slot_key;
   }
 
   return originalMatches[0]?.slot_key ?? fallbackByCategory[0]?.slot_key ?? originalSlots[0]?.slot_key ?? null;
@@ -1302,7 +1342,7 @@ export default function GenerationReviewPage() {
         <Box
           style={{
             display: 'grid',
-            gridTemplateColumns: 'minmax(260px, 0.72fr) minmax(640px, 1.9fr) minmax(300px, 0.8fr)',
+            gridTemplateColumns: 'minmax(260px, 0.66fr) minmax(760px, 2.45fr) minmax(240px, 0.55fr)',
             gap: 12,
             alignItems: 'stretch',
             height: 'calc(100vh - 116px)',
