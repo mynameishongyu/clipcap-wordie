@@ -129,7 +129,7 @@ function drawSlotKeyLabelText(params: {
           return;
         }
 
-        const strokeSize = Math.max(1, Math.round(params.cellSize * 0.58));
+        const strokeSize = Math.max(1, Math.round(params.cellSize * 0.78));
         const inset = Math.floor((params.cellSize - strokeSize) / 2);
 
         params.context.fillRect(
