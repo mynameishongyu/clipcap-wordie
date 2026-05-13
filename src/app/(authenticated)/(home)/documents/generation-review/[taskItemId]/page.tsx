@@ -54,6 +54,8 @@ interface TemplateOriginalSlot {
   original_doc_position: string;
   paragraph_index?: number;
   paragraph_title: string;
+  replacement_value?: string;
+  linked_filled_slot_key?: string;
 }
 
 interface GenerationPdfPreviewPage {
@@ -67,6 +69,7 @@ interface TextDecoration {
   itemId: string;
   start: number;
   end: number;
+  replacementText?: string;
 }
 
 interface ParagraphDecoration extends TextDecoration {
@@ -436,6 +439,7 @@ function collectParagraphDecorations(
     const preferredValues = [item.original_value.trim(), item.original_doc_position.trim()].filter(
       Boolean,
     );
+    const replacementText = item.replacement_value?.trim();
 
     if (preferredValues.length === 0) {
       return;
@@ -465,6 +469,7 @@ function collectParagraphDecorations(
             itemId: item.slot_key,
             start: nextRange.start,
             end: nextRange.end,
+            replacementText: replacementText || undefined,
           });
           return true;
         }
@@ -524,7 +529,18 @@ function renderSegmentContent(
     }
 
     const matchedText = segment.text.slice(decoration.start, decoration.end);
+    const shouldReplaceText = typeof decoration.replacementText === 'string';
+    const displayedText = shouldReplaceText
+      ? decoration.continuesFromPrevious
+        ? ''
+        : decoration.replacementText
+      : matchedText;
     const isActive = decoration.itemId === activeSlotKey;
+
+    if (shouldReplaceText && decoration.continuesFromPrevious) {
+      cursor = decoration.end;
+      return;
+    }
 
     nodes.push(
       <mark
@@ -563,7 +579,7 @@ function renderSegmentContent(
           transform: isActive ? 'translateY(-1px)' : undefined,
         }}
       >
-        {matchedText}
+        {displayedText}
       </mark>,
     );
 
@@ -932,6 +948,36 @@ function resolveLinkedOriginalSlotKey(
   return originalMatches[0]?.slot_key ?? fallbackByCategory[0]?.slot_key ?? originalSlots[0]?.slot_key ?? null;
 }
 
+function buildFilledPreviewSlots(
+  originalSlots: TemplateOriginalSlot[],
+  filledItems: EditableReviewedItem[],
+) {
+  return originalSlots.map((slot) => {
+    const linkedFilledSlotKey = resolveLinkedFilledSlotKey(
+      slot,
+      originalSlots,
+      filledItems,
+    );
+    const linkedFilledItem = filledItems.find(
+      (item) => item.slot_key === linkedFilledSlotKey,
+    );
+    const replacementValue = linkedFilledItem?.original_value?.trim();
+
+    if (!replacementValue) {
+      return {
+        ...slot,
+        linked_filled_slot_key: linkedFilledSlotKey ?? undefined,
+      };
+    }
+
+    return {
+      ...slot,
+      linked_filled_slot_key: linkedFilledSlotKey ?? undefined,
+      replacement_value: replacementValue,
+    };
+  });
+}
+
 export default function GenerationReviewPage() {
   const isJsonPreviewDebugEnabled = useJsonPreviewDebug();
   const router = useRouter();
@@ -990,20 +1036,35 @@ export default function GenerationReviewPage() {
     initializedTaskItemIdRef.current = taskItemId;
   }, [taskItemId, taskItemQuery.data]);
 
-  const templatePreviewDocument = normalizeParsedDocument(
-    taskItemQuery.data?.item.template_preview_document ?? null,
+  const templatePreviewDocumentInput =
+    taskItemQuery.data?.item.template_preview_document ?? null;
+  const templatePreviewSlotsInput =
+    taskItemQuery.data?.item.template_preview_slots ?? null;
+  const templatePreviewUploadText =
+    taskItemQuery.data?.item.template_preview_upload_text ?? null;
+  const templatePreviewDocument = useMemo(
+    () => normalizeParsedDocument(templatePreviewDocumentInput),
+    [templatePreviewDocumentInput],
   );
-  const normalizedOriginalSlots = normalizeTemplateOriginalSlots(
-    taskItemQuery.data?.item.template_preview_slots ?? null,
+  const normalizedOriginalSlots = useMemo(
+    () => normalizeTemplateOriginalSlots(templatePreviewSlotsInput),
+    [templatePreviewSlotsInput],
   );
-  const originalSlots =
-    templatePreviewDocument && taskItemQuery.data?.item.template_preview_upload_text
-      ? resolveStructuredOriginalSlots(
-          templatePreviewDocument,
-          taskItemQuery.data.item.template_preview_upload_text,
-          normalizedOriginalSlots,
-        )
-      : normalizedOriginalSlots;
+  const originalSlots = useMemo(
+    () =>
+      templatePreviewDocument && templatePreviewUploadText
+        ? resolveStructuredOriginalSlots(
+            templatePreviewDocument,
+            templatePreviewUploadText,
+            normalizedOriginalSlots,
+          )
+        : normalizedOriginalSlots,
+    [normalizedOriginalSlots, templatePreviewDocument, templatePreviewUploadText],
+  );
+  const filledPreviewSlots = useMemo(
+    () => buildFilledPreviewSlots(originalSlots, items),
+    [items, originalSlots],
+  );
   const activeFilledItem =
     items.find((item) => item.slot_key === activeFilledSlotKey) ?? null;
   const pendingManualFillItems = useMemo(
@@ -1050,11 +1111,11 @@ export default function GenerationReviewPage() {
       templatePreviewDocument
         ? renderStructuredBlocks(
             templatePreviewDocument.blocks,
-            originalSlots,
+            filledPreviewSlots,
             activeOriginalSlotKey,
           )
         : null,
-    [activeOriginalSlotKey, originalSlots, templatePreviewDocument],
+    [activeOriginalSlotKey, filledPreviewSlots, templatePreviewDocument],
   );
   const jsonPreview = useMemo(
     () =>
@@ -1243,7 +1304,9 @@ export default function GenerationReviewPage() {
             display: 'grid',
             gridTemplateColumns: 'minmax(260px, 0.72fr) minmax(640px, 1.9fr) minmax(300px, 0.8fr)',
             gap: 12,
-            minHeight: 'calc(100vh - 116px)',
+            alignItems: 'stretch',
+            height: 'calc(100vh - 116px)',
+            minHeight: 620,
           }}
         >
           <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
@@ -1252,7 +1315,7 @@ export default function GenerationReviewPage() {
                 <div>
                   <Title order={5}>DOCX 模板预览</Title>
                   <Text c="dimmed" size="xs">
-                    模板：{task.template_name_snapshot}
+                    已将回填值替换到模板预览：{task.template_name_snapshot}
                   </Text>
                 </div>
                 <Badge color="teal" radius="sm" variant="light">
