@@ -94,6 +94,9 @@ interface ModelMatch {
   snippet?: string;
   evidence_text?: string;
   source_reason?: string;
+  matched_reference_label?: string;
+  new_pdf_bbox?: [number, number, number, number] | null;
+  layout_match_score?: number | null;
   page_number?: number | string | null;
   confidence?: number | null;
 }
@@ -1428,7 +1431,57 @@ function resolveEvidenceSnippet(
 }
 
 function resolveSourceReason(firstMatch?: ModelMatch) {
-  return firstMatch?.source_reason?.trim() ?? '';
+  const parts = [];
+  const sourceReason = firstMatch?.source_reason?.trim();
+
+  if (sourceReason) {
+    parts.push(sourceReason);
+  }
+
+  if (firstMatch?.matched_reference_label) {
+    parts.push(`matched_reference_label=${firstMatch.matched_reference_label}`);
+  }
+
+  if (Array.isArray(firstMatch?.new_pdf_bbox)) {
+    parts.push(`new_pdf_bbox=${JSON.stringify(firstMatch.new_pdf_bbox)}`);
+  }
+
+  if (typeof firstMatch?.layout_match_score === 'number') {
+    parts.push(`layout_match_score=${firstMatch.layout_match_score}`);
+  }
+
+  return parts.join(' | ');
+}
+
+function getMatchLayoutScore(match?: ModelMatch) {
+  return typeof match?.layout_match_score === 'number'
+    ? match.layout_match_score
+    : -1;
+}
+
+function getMatchConfidence(match?: ModelMatch) {
+  return typeof match?.confidence === 'number' ? match.confidence : -1;
+}
+
+function resolveBestModelMatch(matches: ModelMatch[] | undefined) {
+  const validMatches =
+    matches?.filter((match) => {
+      const value = match?.value?.trim() || '';
+      const evidence =
+        match?.snippet?.trim() || match?.evidence_text?.trim() || '';
+
+      return Boolean(value) && Boolean(evidence);
+    }) ?? [];
+
+  return validMatches.sort((left, right) => {
+    const layoutScoreDiff = getMatchLayoutScore(right) - getMatchLayoutScore(left);
+
+    if (layoutScoreDiff !== 0) {
+      return layoutScoreDiff;
+    }
+
+    return getMatchConfidence(right) - getMatchConfidence(left);
+  })[0];
 }
 
 function resolveMatchPageNumber(firstMatch?: ModelMatch) {
@@ -1996,7 +2049,10 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'example_box_2d uses Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
       'Annotated reference example images contain orange boxes with small orange corner labels. The label text equals reference_example_pdf_evidence.example_annotation_label, usually the slot_key. These orange boxes are authoritative examples of where the template value came from.',
       'For each slot, first find the orange corner label matching reference_example_pdf_evidence.example_annotation_label on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.',
-      'Prefer the new PDF candidate whose surrounding layout and nearby label match the annotated reference box. Do not choose a semantically similar value from another form/row/field when a layout-equivalent source exists.',
+      'Before extracting a value for a slot, first identify the new PDF page whose overall document title, form type, section, and surrounding layout best match the annotated reference example page for that slot.',
+      'Prefer candidates on the layout-equivalent new PDF page and in the layout-equivalent region. Do not choose a semantically similar value from another form, table, row, or page when a layout-equivalent source exists.',
+      'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, the annotated reference box location is more important than generic semantic similarity. If the reference box is in a bottom signature/contact area, choose the corresponding bottom signature/contact area in the new PDF, not a basic information/application table.',
+      'If multiple candidates have the same visible value, choose the one whose surrounding layout and nearby label best match the annotated reference box.',
       'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
       'For reference_example_pdf_evidence.example_box_2d, page numbers refer to the provided annotated Reference example PDF page images with the same page_number; do not renumber these reference pages.',
       'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
@@ -2007,7 +2063,10 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'For dates, accept equivalent visible formats such as 2026/3/30, 2026-03-30, 2026.3.30, and return final_value in Chinese format such as 2026年3月30日.',
       'For money amounts, preserve decimals and units when visible. 3400 and 3400元 are equivalent, but final_value should match the template slot format when possible.',
       'matches[0].value must equal final_value. matches[0].evidence_text should include the visible source value and nearby label/context. matches[0].page_number must be one of page_numbers.',
-      'matches[0].source_reason is required. Explain briefly which annotated reference slot box was followed and why the chosen new PDF candidate is the corresponding source.',
+      'matches[0].matched_reference_label is required and must equal reference_example_pdf_evidence.example_annotation_label for the slot.',
+      'matches[0].new_pdf_bbox is required when a visible source exists. Use Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space around the chosen source on the new PDF image.',
+      'matches[0].layout_match_score is required when a visible source exists. Use 0-1, where 1 means the new PDF source has the same page/form/section/label layout as the annotated reference box.',
+      'matches[0].source_reason is required. Explain briefly which annotated reference slot box was followed, which page/form/section matched, and why semantically similar candidates on other pages were not selected.',
     ],
     output_schema: {
       results: input.slots.map((slot) => ({
@@ -2020,6 +2079,9 @@ function buildDirectVisionSlotFillPromptPayload(input: {
             evidence_text: 'visible source value and nearby label/context',
             source_reason:
               'why this value/source matches the annotated reference box and slot_source',
+            matched_reference_label: slot.slot_key,
+            new_pdf_bbox: [100, 100, 120, 200],
+            layout_match_score: 0.9,
             page_number: input.pageNumbers[0] ?? 1,
             confidence: 0.9,
           },
@@ -2275,13 +2337,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         const firstResult = findResultForSlot(slot, normalized.results, {
           fallbackToSingleResult: input.slots.length === 1,
         });
-        const firstMatch = firstResult?.matches?.find((match) => {
-          const value = match?.value?.trim() || '';
-          const evidence =
-            match?.snippet?.trim() || match?.evidence_text?.trim() || '';
-
-          return Boolean(value) && Boolean(evidence);
-        });
+        const firstMatch = resolveBestModelMatch(firstResult?.matches);
 
         if (!firstResult && !firstMatch) {
           return [];
