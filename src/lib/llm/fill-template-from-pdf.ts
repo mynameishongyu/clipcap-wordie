@@ -609,8 +609,6 @@ function buildSlotReferencePromptData(slot: GenerationSlotSchemaItem) {
     example_pdf_file_name: reference.example_pdf_file_name ?? '',
     example_page_number: reference.example_page_number ?? null,
     example_box_2d: exampleBox2d,
-    example_box_2d_format:
-      'Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
     example_annotation_label: exampleBox2d
       ? `${slot.slot_key} ${slot.field_category}`
       : '',
@@ -1996,6 +1994,7 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'Return the exact same slot_key copied from slot_definitions.',
       'slot_source describes where the template slot value came from.',
       'reference_example_pdf_evidence contains the reviewed example PDF page number, Gemini-style example_box_2d, visible example value, and source text.',
+      'example_box_2d uses Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
       'Annotated reference example images contain orange boxes labeled with slot_key and slot name. These orange boxes are authoritative examples of where the template value came from.',
       'For each slot, first find the orange box label matching the slot_key on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.',
       'Prefer the new PDF candidate whose surrounding layout and nearby label match the annotated reference box. Do not choose a semantically similar value from another form/row/field when a layout-equivalent source exists.',
