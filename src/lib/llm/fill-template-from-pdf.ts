@@ -40,6 +40,28 @@ export interface GenerationSlotReferencePdfEvidence {
   } | null;
 }
 
+type NormalizedBbox = NonNullable<
+  GenerationSlotReferencePdfEvidence['example_bbox']
+>;
+
+export function normalizedBboxToGeminiBox2d(
+  bbox: NormalizedBbox | null | undefined,
+) {
+  if (!bbox) {
+    return null;
+  }
+
+  const clampToGeminiRange = (value: number) =>
+    Math.min(1000, Math.max(0, Math.round(value * 1000)));
+
+  return [
+    clampToGeminiRange(bbox.y),
+    clampToGeminiRange(bbox.x),
+    clampToGeminiRange(bbox.y + bbox.height),
+    clampToGeminiRange(bbox.x + bbox.width),
+  ] as [number, number, number, number];
+}
+
 export interface PdfPageInput {
   page_number: number;
   text: string;
@@ -53,12 +75,24 @@ export interface PdfVisionPageInput {
 
 export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
   example_pdf_file_name?: string;
+  annotated_image_data_url?: string;
+  annotated_preview_url?: string;
+  annotated_storage_path?: string;
+  annotated_slots?: Array<{
+    slot_key: string;
+    slot_name: string;
+    slot_source: string;
+    example_box_2d: [number, number, number, number] | null;
+    example_evidence_text: string;
+    example_slot_value: string;
+  }>;
 }
 
 interface ModelMatch {
   value?: string;
   snippet?: string;
   evidence_text?: string;
+  source_reason?: string;
   page_number?: number | string | null;
   confidence?: number | null;
 }
@@ -569,17 +603,24 @@ function buildSlotReferencePromptData(slot: GenerationSlotSchemaItem) {
     return null;
   }
 
+  const exampleBox2d = normalizedBboxToGeminiBox2d(reference.example_bbox);
+
   return {
     example_pdf_file_name: reference.example_pdf_file_name ?? '',
     example_page_number: reference.example_page_number ?? null,
-    example_bbox_normalized: reference.example_bbox ?? null,
+    example_box_2d: exampleBox2d,
+    example_box_2d_format:
+      'Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
+    example_annotation_label: exampleBox2d
+      ? `${slot.slot_key} ${slot.field_category}`
+      : '',
     example_evidence_text: reference.example_evidence_text ?? '',
     example_slot_value: reference.example_slot_value ?? '',
     example_confidence: reference.example_confidence ?? null,
     example_match_type: reference.example_match_type ?? '',
     example_page_image_note:
       reference.example_bbox && reference.example_page_number
-        ? `If a reference example PDF image with page_number ${reference.example_page_number} is provided, the bbox is normalized against that image.`
+        ? `The annotated reference image for page_number ${reference.example_page_number} contains an orange box labeled "${slot.slot_key} ${slot.field_category}" for this slot.`
         : '',
   };
 }
@@ -763,8 +804,9 @@ async function extractSlotWithTextModel(input: {
                   slot_hint:
                     input.slot.meaning_to_applicant ||
                     getSlotSemanticHint(input.slot.field_category),
-                  reference_example_pdf_evidence:
-                    buildSlotReferencePromptData(input.slot),
+                  reference_example_pdf_evidence: buildSlotReferencePromptData(
+                    input.slot,
+                  ),
                   strict_requirement:
                     'Return the exact same slot_key in results[0].slot_key. Use slot_source and reference_example_pdf_evidence as example clues from the reviewed template PDF, but extract final_value only from this new PDF text chunk. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
                   page_numbers: input.pageNumbers,
@@ -876,9 +918,7 @@ async function extractSlotWithTextModel(input: {
           normalizedError instanceof DOMException &&
           normalizedError.name === 'AbortError'
         ) {
-          throw new Error(
-            'PDF slot fill timed out after multiple attempts.',
-          );
+          throw new Error('PDF slot fill timed out after multiple attempts.');
         }
 
         throw normalizedError;
@@ -1390,6 +1430,10 @@ function resolveEvidenceSnippet(
   return snippet;
 }
 
+function resolveSourceReason(firstMatch?: ModelMatch) {
+  return firstMatch?.source_reason?.trim() ?? '';
+}
+
 function resolveMatchPageNumber(firstMatch?: ModelMatch) {
   if (typeof firstMatch?.page_number === 'number') {
     return firstMatch.page_number;
@@ -1652,32 +1696,32 @@ async function extractAllSlotsWithTextModel(input: {
       });
       const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
       await input.onTrace?.({
-        message: `[PDF Fill][VisionPrompt][${requestLabel}] ${stringifyTraceJson({
-          route: '/api/generation-task-items/[taskItemId]/slot-fill',
-          config_scope: 'VISION_LLM',
-          model: getVisionLlmModel(),
-          provider: visionTraceConfig.provider,
-          model_env_name: visionTraceConfig.modelEnvName,
-          thinking_enabled_env_name:
-            visionTraceConfig.thinkingEnabledEnvName,
-          thinking_enabled: visionTraceConfig.thinkingEnabled,
-          reasoning_effort_env_name:
-            visionTraceConfig.reasoningEffortEnvName,
-          reasoning_effort: visionTraceConfig.reasoningEffort,
-          extra_body: visionTraceConfig.extraBody,
-          request_label: requestLabel,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
-            },
-            {
-              role: 'user',
-              content: promptPayload,
-            },
-          ],
-        })}`,
+        message: `[PDF Fill][VisionPrompt][${requestLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: getVisionLlmModel(),
+            provider: visionTraceConfig.provider,
+            model_env_name: visionTraceConfig.modelEnvName,
+            thinking_enabled_env_name: visionTraceConfig.thinkingEnabledEnvName,
+            thinking_enabled: visionTraceConfig.thinkingEnabled,
+            reasoning_effort_env_name: visionTraceConfig.reasoningEffortEnvName,
+            reasoning_effort: visionTraceConfig.reasoningEffort,
+            extra_body: visionTraceConfig.extraBody,
+            request_label: requestLabel,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
+              },
+              {
+                role: 'user',
+                content: promptPayload,
+              },
+            ],
+          },
+        )}`,
       });
       const requestStartedMessage =
         `[PDF Fill][Vision] Starting ${requestLabel} for ${input.documentName} ` +
@@ -1752,7 +1796,9 @@ async function extractAllSlotsWithTextModel(input: {
                 content: JSON.stringify({
                   document_name: input.documentName,
                   slot_names: input.slots.map((slot) => slot.field_category),
-                  slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
+                  slot_definitions: input.slots.map(
+                    buildSlotDefinitionForPrompt,
+                  ),
                   strict_requirement:
                     'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
                   page_numbers: input.pageNumbers,
@@ -1899,9 +1945,7 @@ async function extractAllSlotsWithTextModel(input: {
           normalizedError instanceof DOMException &&
           normalizedError.name === 'AbortError'
         ) {
-          throw new Error(
-            'PDF slot fill timed out after multiple attempts.',
-          );
+          throw new Error('PDF slot fill timed out after multiple attempts.');
         }
 
         throw normalizedError;
@@ -1942,8 +1986,7 @@ function buildDirectVisionSlotFillPromptPayload(input: {
   referencePageNumbers: number[];
 }) {
   return {
-    task:
-      'Inspect the provided new PDF page images directly and fill only the requested template slots. Do not run or return full OCR text.',
+    task: 'Inspect the provided new PDF page images directly and fill only the requested template slots. Do not run or return full OCR text.',
     document_name: input.documentName,
     page_numbers: input.pageNumbers,
     reference_example_pdf_page_numbers_with_bbox: input.referencePageNumbers,
@@ -1952,9 +1995,12 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'Return JSON only.',
       'Return the exact same slot_key copied from slot_definitions.',
       'slot_source describes where the template slot value came from.',
-      'reference_example_pdf_evidence contains the reviewed example PDF page number, bbox, visible example value, and source text. Use it as a visual/location clue and value-type clue.',
+      'reference_example_pdf_evidence contains the reviewed example PDF page number, Gemini-style example_box_2d, visible example value, and source text.',
+      'Annotated reference example images contain orange boxes labeled with slot_key and slot name. These orange boxes are authoritative examples of where the template value came from.',
+      'For each slot, first find the orange box label matching the slot_key on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.',
+      'Prefer the new PDF candidate whose surrounding layout and nearby label match the annotated reference box. Do not choose a semantically similar value from another form/row/field when a layout-equivalent source exists.',
       'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
-      'For reference_example_pdf_evidence.example_bbox_normalized, page numbers refer to the provided Reference example PDF page images with the same page_number; do not renumber these reference pages.',
+      'For reference_example_pdf_evidence.example_box_2d, page numbers refer to the provided annotated Reference example PDF page images with the same page_number; do not renumber these reference pages.',
       'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
       'For matches[0].page_number, use only the uploaded-page sequence shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". This is the only valid page numbering system.',
       'Do not use original PDF page numbers, page numbers printed inside the PDF image, screenshot page numbers, document page numbers, or reference example page numbers.',
@@ -1963,6 +2009,7 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'For dates, accept equivalent visible formats such as 2026/3/30, 2026-03-30, 2026.3.30, and return final_value in Chinese format such as 2026年3月30日.',
       'For money amounts, preserve decimals and units when visible. 3400 and 3400元 are equivalent, but final_value should match the template slot format when possible.',
       'matches[0].value must equal final_value. matches[0].evidence_text should include the visible source value and nearby label/context. matches[0].page_number must be one of page_numbers.',
+      'matches[0].source_reason is required. Explain briefly which annotated reference slot box was followed and why the chosen new PDF candidate is the corresponding source.',
     ],
     output_schema: {
       results: input.slots.map((slot) => ({
@@ -1973,6 +2020,8 @@ function buildDirectVisionSlotFillPromptPayload(input: {
           {
             value: 'matched value',
             evidence_text: 'visible source value and nearby label/context',
+            source_reason:
+              'why this value/source matches the annotated reference box and slot_source',
             page_number: input.pageNumbers[0] ?? 1,
             confidence: 0.9,
           },
@@ -2011,7 +2060,9 @@ async function extractSlotsFromVisionPageBatch(input: {
         new Set(
           input.visionPages
             .map((page) => page.page_number)
-            .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0),
+            .filter(
+              (pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0,
+            ),
         ),
       ).sort((left, right) => left - right);
       const uploadedPageNumberSet = new Set(allUploadedPageNumbers);
@@ -2037,37 +2088,37 @@ async function extractSlotsFromVisionPageBatch(input: {
       const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
 
       await input.onTrace?.({
-        message: `[PDF Fill][DirectVisionPrompt][${requestLabel}] ${stringifyTraceJson({
-          route: '/api/generation-task-items/[taskItemId]/slot-fill',
-          config_scope: 'VISION_LLM',
-          model: getVisionLlmModel(),
-          provider: visionTraceConfig.provider,
-          model_env_name: visionTraceConfig.modelEnvName,
-          thinking_enabled_env_name:
-            visionTraceConfig.thinkingEnabledEnvName,
-          thinking_enabled: visionTraceConfig.thinkingEnabled,
-          reasoning_effort_env_name:
-            visionTraceConfig.reasoningEffortEnvName,
-          reasoning_effort: visionTraceConfig.reasoningEffort,
-          extra_body: visionTraceConfig.extraBody,
-          request_label: requestLabel,
-          llm_concurrency_env_name: 'PDF_FILL_VISION_PAGES_LLM_CONCURRENCY',
-          llm_concurrency: llmConcurrency,
-          page_numbers: pageNumbers,
-          reference_example_page_numbers: referencePageNumbers,
-          total_vision_pages: input.totalVisionPages,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
-            },
-            {
-              role: 'user',
-              content: promptPayload,
-            },
-          ],
-        })}`,
+        message: `[PDF Fill][DirectVisionPrompt][${requestLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: getVisionLlmModel(),
+            provider: visionTraceConfig.provider,
+            model_env_name: visionTraceConfig.modelEnvName,
+            thinking_enabled_env_name: visionTraceConfig.thinkingEnabledEnvName,
+            thinking_enabled: visionTraceConfig.thinkingEnabled,
+            reasoning_effort_env_name: visionTraceConfig.reasoningEffortEnvName,
+            reasoning_effort: visionTraceConfig.reasoningEffort,
+            extra_body: visionTraceConfig.extraBody,
+            request_label: requestLabel,
+            llm_concurrency_env_name: 'PDF_FILL_VISION_PAGES_LLM_CONCURRENCY',
+            llm_concurrency: llmConcurrency,
+            page_numbers: pageNumbers,
+            reference_example_page_numbers: referencePageNumbers,
+            total_vision_pages: input.totalVisionPages,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
+              },
+              {
+                role: 'user',
+                content: promptPayload,
+              },
+            ],
+          },
+        )}`,
       });
 
       const requestStartedMessage =
@@ -2112,10 +2163,20 @@ async function extractSlotsFromVisionPageBatch(input: {
       ];
 
       input.referenceExamplePages.forEach((page) => {
+        const annotatedSlotsText = page.annotated_slots?.length
+          ? ` Annotated slot boxes on this page: ${page.annotated_slots
+              .map(
+                (slot) =>
+                  `${slot.slot_key} ${slot.slot_name} box_2d=${JSON.stringify(
+                    slot.example_box_2d,
+                  )} value="${slot.example_slot_value}" source="${slot.slot_source}"`,
+              )
+              .join('; ')}.`
+          : '';
         content.push({
           type: 'text',
           text:
-            `Reference example PDF page ${page.page_number}` +
+            `Annotated reference example PDF page ${page.page_number}` +
             `${
               typeof page.original_page_number === 'number'
                 ? ` (original example PDF page ${page.original_page_number})`
@@ -2124,12 +2185,12 @@ async function extractSlotsFromVisionPageBatch(input: {
               page.example_pdf_file_name
                 ? ` from ${page.example_pdf_file_name}`
                 : ''
-            }. Use only the bboxes listed in slot_definitions for this page as layout/source clues; do not extract final values from this example image.`,
+            }. Orange boxes show the reviewed template slot source positions and labels. Use these as layout/source clues; do not extract final values from this example image.${annotatedSlotsText}`,
         });
         content.push({
           type: 'image_url',
           image_url: {
-            url: page.image_data_url,
+            url: page.annotated_image_data_url ?? page.image_data_url,
           },
         });
       });
@@ -2249,7 +2310,7 @@ async function extractSlotsFromVisionPageBatch(input: {
             evidence_page_numbers: validMatchPageNumber
               ? [validMatchPageNumber]
               : pageNumbers,
-            notes: '',
+            notes: resolveSourceReason(firstMatch),
             confidence:
               typeof firstMatch?.confidence === 'number'
                 ? firstMatch.confidence
@@ -2306,7 +2367,9 @@ async function extractSlotsFromVisionPageBatch(input: {
     }
   }
 
-  throw new Error('PDF direct vision slot fill failed after multiple attempts.');
+  throw new Error(
+    'PDF direct vision slot fill failed after multiple attempts.',
+  );
 }
 
 export async function fillSlotsFromVisionPages(params: {
@@ -2352,11 +2415,11 @@ export async function fillSlotsFromVisionPages(params: {
     batches.map(async (batch, batchIndex) => {
       const batchResult = await extractSlotsFromVisionPageBatch({
         documentName: params.pdfFileName,
-      slots: params.slots,
-      visionPages: batch,
-      referenceExamplePages: params.referenceExamplePages ?? [],
-      batchIndex,
-      totalBatches: batches.length,
+        slots: params.slots,
+        visionPages: batch,
+        referenceExamplePages: params.referenceExamplePages ?? [],
+        batchIndex,
+        totalBatches: batches.length,
         totalVisionPages: validVisionPages.length,
         onTrace: params.onTrace,
         processStartedAtMs: params.processStartedAtMs,

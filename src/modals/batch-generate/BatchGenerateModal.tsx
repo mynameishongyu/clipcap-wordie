@@ -87,6 +87,21 @@ declare global {
         }>;
       };
     }>;
+    clipcapSlotFillReferenceImages?: Array<{
+      fileName: string;
+      taskItemId: string;
+      examplePdfFileName?: string | null;
+      referencePageNumber: number;
+      originalReferencePageNumber?: number;
+      slotKey: string;
+      slotName: string;
+      slotSource: string;
+      exampleBox2d: [number, number, number, number] | null;
+      exampleEvidenceText: string;
+      exampleSlotValue: string;
+      previewUrl: string;
+      storagePath?: string | null;
+    }>;
   }
 }
 
@@ -110,7 +125,9 @@ function formatCompactPageRanges(pageNumbers: number[]) {
     return '';
   }
 
-  const sorted = Array.from(new Set(pageNumbers)).sort((left, right) => left - right);
+  const sorted = Array.from(new Set(pageNumbers)).sort(
+    (left, right) => left - right,
+  );
   const ranges: string[] = [];
   let rangeStart = sorted[0]!;
   let previous = sorted[0]!;
@@ -123,12 +140,16 @@ function formatCompactPageRanges(pageNumbers: number[]) {
       continue;
     }
 
-    ranges.push(rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`);
+    ranges.push(
+      rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`,
+    );
     rangeStart = current;
     previous = current;
   }
 
-  ranges.push(rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`);
+  ranges.push(
+    rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`,
+  );
   return ranges.join('、');
 }
 
@@ -209,7 +230,11 @@ function getStatusLabel(status: string) {
   }
 }
 
-function formatElapsedSeconds(item: GenerationTaskItemSummary, now: number, startedAt: number | null) {
+function formatElapsedSeconds(
+  item: GenerationTaskItemSummary,
+  now: number,
+  startedAt: number | null,
+) {
   if (
     [
       'uploaded',
@@ -241,22 +266,33 @@ export function BatchGenerateModal({
   const [taskId, setTaskId] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
-  const [submissionStartedAt, setSubmissionStartedAt] = useState<number | null>(null);
-  const [itemStartedAtById, setItemStartedAtById] = useState<Record<string, number>>({});
+  const [submissionStartedAt, setSubmissionStartedAt] = useState<number | null>(
+    null,
+  );
+  const [itemStartedAtById, setItemStartedAtById] = useState<
+    Record<string, number>
+  >({});
   const createGenerationTaskMutation = useCreateGenerationTask();
   const processGenerationTaskItemMutation = useProcessGenerationTaskItem();
-  const startGenerationTaskItemSlotFillMutation = useStartGenerationTaskItemSlotFill();
+  const startGenerationTaskItemSlotFillMutation =
+    useStartGenerationTaskItemSlotFill();
   const taskQuery = useGenerationTask(taskId);
   const launchedOcrItemIdsRef = useRef<Set<string>>(new Set());
   const launchedSlotFillItemIdsRef = useRef<Set<string>>(new Set());
-  const pendingSlotFillRefreshTimeoutsRef = useRef<Map<string, number[]>>(new Map());
+  const pendingSlotFillRefreshTimeoutsRef = useRef<Map<string, number[]>>(
+    new Map(),
+  );
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const refreshTaskLists = async () => {
     await Promise.all([
       taskId
-        ? queryClient.invalidateQueries({ queryKey: ['generation-task', taskId] })
+        ? queryClient.invalidateQueries({
+            queryKey: ['generation-task', taskId],
+          })
         : Promise.resolve(),
-      queryClient.invalidateQueries({ queryKey: ['generation-template-tasks'] }),
+      queryClient.invalidateQueries({
+        queryKey: ['generation-template-tasks'],
+      }),
       queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
     ]);
   };
@@ -273,7 +309,8 @@ export function BatchGenerateModal({
         console.log(
           `[Batch Generate][${item.source_pdf_name}] Slot fill launch deferred for task item ${item.id}; trace arrived before status became pdf_pages_ready (trigger: ${trigger}, current status: ${item.status}).`,
         );
-        const existingTimeouts = pendingSlotFillRefreshTimeoutsRef.current.get(item.id) ?? [];
+        const existingTimeouts =
+          pendingSlotFillRefreshTimeoutsRef.current.get(item.id) ?? [];
 
         if (existingTimeouts.length === 0) {
           const retryDelaysMs = [800, 2000, 4000];
@@ -291,7 +328,9 @@ export function BatchGenerateModal({
         return;
       }
 
-      const pendingTimeouts = pendingSlotFillRefreshTimeoutsRef.current.get(item.id);
+      const pendingTimeouts = pendingSlotFillRefreshTimeoutsRef.current.get(
+        item.id,
+      );
       if (pendingTimeouts && pendingTimeouts.length > 0) {
         pendingTimeouts.forEach((timeoutId) => window.clearTimeout(timeoutId));
         pendingSlotFillRefreshTimeoutsRef.current.delete(item.id);
@@ -343,7 +382,9 @@ export function BatchGenerateModal({
     [startGenerationTaskItemSlotFillMutation],
   );
 
-  const rowsWithFiles = rows.filter((row): row is UploadRow & { file: File } => Boolean(row.file));
+  const rowsWithFiles = rows.filter((row): row is UploadRow & { file: File } =>
+    Boolean(row.file),
+  );
   const hasParsingRows = rowsWithFiles.some((row) => row.isParsing);
   const hasRowParseError = rowsWithFiles.some((row) => Boolean(row.parseError));
   const hasUnparsedRows = rowsWithFiles.some((row) => !row.parsedPdf);
@@ -352,7 +393,8 @@ export function BatchGenerateModal({
     () =>
       rows.map((row) => {
         const totalPages = row.parsedPdf?.pages.length ?? 0;
-        const selectedPageNumbers = totalPages > 0 ? buildFullPageNumbers(totalPages) : [];
+        const selectedPageNumbers =
+          totalPages > 0 ? buildFullPageNumbers(totalPages) : [];
 
         return {
           rowId: row.id,
@@ -372,7 +414,8 @@ export function BatchGenerateModal({
     !hasParsingRows &&
     !hasRowParseError &&
     !hasUnparsedRows;
-  const isSubmittingTask = !taskId && (createGenerationTaskMutation.isPending || isPreparingFiles);
+  const isSubmittingTask =
+    !taskId && (createGenerationTaskMutation.isPending || isPreparingFiles);
   const submissionElapsedSeconds = submissionStartedAt
     ? Math.max(0, Math.floor((tick - submissionStartedAt) / 1000))
     : 0;
@@ -391,11 +434,16 @@ export function BatchGenerateModal({
   const succeededCount = taskItems.filter((item) =>
     ['review_pending', 'reviewed'].includes(item.status),
   ).length;
-  const failedCount = taskItems.filter((item) => item.status === 'failed').length;
+  const failedCount = taskItems.filter(
+    (item) => item.status === 'failed',
+  ).length;
   const progressValue =
-    taskItems.length > 0 ? ((succeededCount + failedCount) / taskItems.length) * 100 : 0;
+    taskItems.length > 0
+      ? ((succeededCount + failedCount) / taskItems.length) * 100
+      : 0;
   const canCloseTaskModal =
-    !isPreparingFiles && (!taskId || (!taskQuery.isLoading && !hasRunningItems));
+    !isPreparingFiles &&
+    (!taskId || (!taskQuery.isLoading && !hasRunningItems));
   const closeModalWithRefresh = () => {
     if (!canCloseTaskModal) {
       return;
@@ -535,23 +583,33 @@ export function BatchGenerateModal({
 
       const previousLines = previousTrace ? previousTrace.split(/\r?\n/) : [];
       const nextLines = nextTrace.split(/\r?\n/);
-      const newLines = nextLines.slice(previousLines.length).filter((line) => line.trim().length > 0);
+      const newLines = nextLines
+        .slice(previousLines.length)
+        .filter((line) => line.trim().length > 0);
 
       newLines.forEach((line) => {
-        const ocrPageDataMatch = line.match(/^\[PDF Fill\]\[OCR\]\[PageData (\d+)\] (.+)$/);
-        const slotFillInputMatch = line.match(
+        const traceLine = line.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+/, '');
+        const ocrPageDataMatch = traceLine.match(
+          /^\[PDF Fill\]\[OCR\]\[PageData (\d+)\] (.+)$/,
+        );
+        const slotFillInputMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextInputData\]\[(.+)\] (.+)$/,
         );
-        const slotFillPromptMatch = line.match(
+        const slotFillPromptMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextPrompt\]\[(.+)\] (.+)$/,
         );
-        const slotFillPromptPreviewMatch = line.match(
+        const slotFillPromptPreviewMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextPromptPreview\]\[(.+)\] (.+)$/,
         );
-        const errorDetailsMatch = line.match(
+        const slotFillReferenceImagesMatch = traceLine.match(
+          /^\[PDF Fill\]\[ReferenceExampleImages\] (.+)$/,
+        );
+        const errorDetailsMatch = traceLine.match(
           /^\[PDF Fill\]\[(OCR|Text)\]\[ErrorDetails\]\[(.+)\] (.+)$/,
         );
-        const routeErrorDetailsMatch = line.match(/^\[RouteErrorDetails\]\[(.+)\] (.+)$/);
+        const routeErrorDetailsMatch = traceLine.match(
+          /^\[RouteErrorDetails\]\[(.+)\] (.+)$/,
+        );
 
         if (ocrPageDataMatch) {
           const uploadedPageNumber = Number(ocrPageDataMatch[1]);
@@ -604,7 +662,10 @@ export function BatchGenerateModal({
           };
           const currentEntries = window.clipcapSlotFillInputs ?? [];
           const nextEntries = currentEntries.filter(
-            (entry) => !(entry.fileName === item.source_pdf_name && entry.label === label),
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
           );
 
           nextEntries.push({
@@ -640,7 +701,10 @@ export function BatchGenerateModal({
           };
           const currentEntries = window.clipcapSlotFillPrompts ?? [];
           const nextEntries = currentEntries.filter(
-            (entry) => !(entry.fileName === item.source_pdf_name && entry.label === label),
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
           );
 
           nextEntries.push({
@@ -659,7 +723,8 @@ export function BatchGenerateModal({
 
           console.log(
             `[Batch Generate][${item.source_pdf_name}] Slot fill prompt via ${
-              parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
+              parsedPrompt.route ??
+              '/api/generation-task-items/[taskItemId]/slot-fill'
             } (${label})`,
             parsedPrompt,
           );
@@ -668,7 +733,9 @@ export function BatchGenerateModal({
 
         if (slotFillPromptPreviewMatch) {
           const label = slotFillPromptPreviewMatch[1] ?? 'AfterOCR';
-          const parsedPrompt = JSON.parse(slotFillPromptPreviewMatch[2] ?? '{}') as {
+          const parsedPrompt = JSON.parse(
+            slotFillPromptPreviewMatch[2] ?? '{}',
+          ) as {
             route?: string;
             request_label?: string;
             document_name?: string;
@@ -680,17 +747,114 @@ export function BatchGenerateModal({
 
           console.log(
             `[Batch Generate][${item.source_pdf_name}] Slot fill prompt preview via ${
-              parsedPrompt.route ?? '/api/generation-task-items/[taskItemId]/slot-fill'
+              parsedPrompt.route ??
+              '/api/generation-task-items/[taskItemId]/slot-fill'
             } (${label})`,
             parsedPrompt,
           );
           return;
         }
 
+        if (slotFillReferenceImagesMatch) {
+          const parsedReferenceImages = JSON.parse(
+            slotFillReferenceImagesMatch[1] ?? '{}',
+          ) as {
+            document_name?: string;
+            pages?: Array<{
+              example_pdf_file_name?: string | null;
+              page_number?: number;
+              original_page_number?: number;
+              annotated_preview_url?: string | null;
+              annotated_storage_path?: string | null;
+              annotated_slots?: Array<{
+                slot_key?: string;
+                slot_name?: string;
+                slot_source?: string;
+                example_box_2d?: [number, number, number, number] | null;
+                example_evidence_text?: string;
+                example_slot_value?: string;
+              }>;
+            }>;
+          };
+          const currentEntries = window.clipcapSlotFillReferenceImages ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          (parsedReferenceImages.pages ?? []).forEach((page) => {
+            const previewUrl = page.annotated_preview_url ?? '';
+
+            if (!previewUrl) {
+              return;
+            }
+
+            (page.annotated_slots ?? []).forEach((slot) => {
+              nextEntries.push({
+                fileName: item.source_pdf_name,
+                taskItemId: item.id,
+                examplePdfFileName: page.example_pdf_file_name ?? null,
+                referencePageNumber: page.page_number ?? 0,
+                originalReferencePageNumber: page.original_page_number,
+                slotKey: slot.slot_key ?? '',
+                slotName: slot.slot_name ?? '',
+                slotSource: slot.slot_source ?? '',
+                exampleBox2d: slot.example_box_2d ?? null,
+                exampleEvidenceText: slot.example_evidence_text ?? '',
+                exampleSlotValue: slot.example_slot_value ?? '',
+                previewUrl,
+                storagePath: page.annotated_storage_path ?? null,
+              });
+            });
+          });
+
+          window.clipcapSlotFillReferenceImages = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                if (left.referencePageNumber === right.referencePageNumber) {
+                  return left.slotKey.localeCompare(right.slotKey);
+                }
+
+                return left.referencePageNumber - right.referencePageNumber;
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill reference example images stored in window.clipcapSlotFillReferenceImages. Run window.open(window.clipcapSlotFillReferenceImages[0].previewUrl) to inspect the annotated example image.`,
+            window.clipcapSlotFillReferenceImages.filter(
+              (entry) =>
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id,
+            ),
+          );
+          window.clipcapSlotFillReferenceImages
+            .filter(
+              (entry) =>
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id,
+            )
+            .forEach((entry) => {
+              console.info(
+                `[Batch Generate][${item.source_pdf_name}][Slot Fill Reference Image] ` +
+                  `slot ${entry.slotKey} ${entry.slotName}, example PDF page ${entry.referencePageNumber}: ${entry.previewUrl}`,
+              );
+              console.info(entry.previewUrl);
+            });
+          return;
+        }
+
         if (errorDetailsMatch) {
           const scope = errorDetailsMatch[1] ?? 'Unknown';
           const label = errorDetailsMatch[2] ?? 'Unknown';
-          const parsedDetails = JSON.parse(errorDetailsMatch[3] ?? '{}') as Record<string, unknown>;
+          const parsedDetails = JSON.parse(
+            errorDetailsMatch[3] ?? '{}',
+          ) as Record<string, unknown>;
 
           console.error(
             `[Batch Generate][${item.source_pdf_name}] ${scope} error details (${label})`,
@@ -701,10 +865,9 @@ export function BatchGenerateModal({
 
         if (routeErrorDetailsMatch) {
           const scope = routeErrorDetailsMatch[1] ?? 'Unknown';
-          const parsedDetails = JSON.parse(routeErrorDetailsMatch[2] ?? '{}') as Record<
-            string,
-            unknown
-          >;
+          const parsedDetails = JSON.parse(
+            routeErrorDetailsMatch[2] ?? '{}',
+          ) as Record<string, unknown>;
 
           console.error(
             `[Batch Generate][${item.source_pdf_name}] Route error details (${scope})`,
@@ -714,7 +877,9 @@ export function BatchGenerateModal({
         }
 
         if (
-          line.includes('PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填') ||
+          line.includes(
+            'PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填',
+          ) ||
           line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')
         ) {
           console.log(
@@ -775,8 +940,13 @@ export function BatchGenerateModal({
     );
   };
 
-  const logSubmissionStage = (stage: { title: string; description: string }) => {
-    console.info(`[Batch Generate][Stage] ${stage.title}：${stage.description}`);
+  const logSubmissionStage = (stage: {
+    title: string;
+    description: string;
+  }) => {
+    console.info(
+      `[Batch Generate][Stage] ${stage.title}：${stage.description}`,
+    );
   };
 
   const handleSelectPdfFile = async (rowId: string, file: File | null) => {
@@ -807,7 +977,10 @@ export function BatchGenerateModal({
       updateRow(rowId, {
         parsedPdf: null,
         isParsing: false,
-        parseError: error instanceof Error ? error.message : 'PDF 解析失败，请重新选择文件。',
+        parseError:
+          error instanceof Error
+            ? error.message
+            : 'PDF 解析失败，请重新选择文件。',
       });
     }
   };
@@ -821,7 +994,8 @@ export function BatchGenerateModal({
     setSubmissionStartedAt(Date.now());
     logSubmissionStage({
       title: '正在准备文件',
-      description: '正在解析 PDF 并准备批量任务输入，回填将使用上传 PDF 的全部页面。',
+      description:
+        '正在解析 PDF 并准备批量任务输入，回填将使用上传 PDF 的全部页面。',
     });
 
     try {
@@ -829,13 +1003,16 @@ export function BatchGenerateModal({
         rowsWithFiles.map(async (row, rowIndex) => {
           const file = row.file;
           const parsedPdf = row.parsedPdf;
-          const rowSelectionState = rowSelectionStates.find((state) => state.rowId === row.id);
+          const rowSelectionState = rowSelectionStates.find(
+            (state) => state.rowId === row.id,
+          );
 
           if (!parsedPdf || !rowSelectionState) {
             throw new Error('当前 PDF 尚未解析完成，请稍候再试。');
           }
 
-          const selectedOriginalPageNumbers = rowSelectionState.selectedPageNumbers;
+          const selectedOriginalPageNumbers =
+            rowSelectionState.selectedPageNumbers;
           const uploadedPageNumberMapping = selectedOriginalPageNumbers.map(
             (originalPageNumber, index) => ({
               uploaded_page_number: index + 1,
@@ -844,23 +1021,29 @@ export function BatchGenerateModal({
           );
           logSubmissionStage({
             title: '正在生成 PDF 页面图片',
-            description:
-              `${file.name}：正在生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页）。`,
+            description: `${file.name}：正在生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页）。`,
           });
-          const ocrVisionPages = await renderPdfPagesForVision(file, selectedOriginalPageNumbers);
+          const ocrVisionPages = await renderPdfPagesForVision(
+            file,
+            selectedOriginalPageNumbers,
+          );
           logSubmissionStage({
             title: 'PDF 页面图片生成完成',
-            description:
-              `${file.name}：已生成 ${ocrVisionPages.length} 张 PDF 页面图片，准备上传到存储。`,
+            description: `${file.name}：已生成 ${ocrVisionPages.length} 张 PDF 页面图片，准备上传到存储。`,
           });
 
           const currentImages = window.clipcapOcrImages ?? [];
-          const nextImages = currentImages.filter((entry) => entry.fileName !== file.name);
+          const nextImages = currentImages.filter(
+            (entry) => entry.fileName !== file.name,
+          );
 
           ocrVisionPages.forEach((visionPage, index) => {
-            const uploadedPageNumber = uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
+            const uploadedPageNumber =
+              uploadedPageNumberMapping[index]?.uploaded_page_number ??
+              index + 1;
             const originalPageNumber =
-              uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
+              uploadedPageNumberMapping[index]?.original_page_number ??
+              visionPage.pageNumber;
             const previewUrl = pdfVisionPageToObjectUrl(visionPage);
 
             nextImages.push({
@@ -886,9 +1069,12 @@ export function BatchGenerateModal({
             `[Batch Generate][${file.name}] PDF page images prepared: ${ocrVisionPages.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
           );
           ocrVisionPages.forEach((visionPage, index) => {
-            const uploadedPageNumber = uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
+            const uploadedPageNumber =
+              uploadedPageNumberMapping[index]?.uploaded_page_number ??
+              index + 1;
             const originalPageNumber =
-              uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
+              uploadedPageNumberMapping[index]?.original_page_number ??
+              visionPage.pageNumber;
             const previewUrl =
               window.clipcapOcrImages?.find(
                 (entry) =>
@@ -923,7 +1109,9 @@ export function BatchGenerateModal({
 
       setTaskId(result.task.id);
       void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['generation-template-tasks'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['generation-template-tasks'],
+        }),
         queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
       ]);
       notifications.show({
@@ -936,7 +1124,9 @@ export function BatchGenerateModal({
         color: 'red',
         title: '创建任务失败',
         message:
-          error instanceof Error ? error.message : '批量生成任务创建失败，请稍后重试。',
+          error instanceof Error
+            ? error.message
+            : '批量生成任务创建失败，请稍后重试。',
       });
     } finally {
       setIsPreparingFiles(false);
@@ -996,7 +1186,8 @@ export function BatchGenerateModal({
               <Title order={4}>正在上传文件</Title>
               <Text c="dimmed" size="sm" ta="center">
                 系统正在上传并解析 PDF，随后会创建批量任务。
-                这个过程可能需要一点时间，请稍候。已处理 {submissionElapsedSeconds} 秒。
+                这个过程可能需要一点时间，请稍候。已处理{' '}
+                {submissionElapsedSeconds} 秒。
               </Text>
             </Stack>
           </Paper>
@@ -1004,263 +1195,287 @@ export function BatchGenerateModal({
       ) : null}
 
       <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={3}>批量生成任务</Title>
-        <Text c="dimmed" size="sm">
-          当前模板：{innerProps.templateName}。{modalDescription}
-        </Text>
-      </Stack>
+        <Stack gap="xs">
+          <Title order={3}>批量生成任务</Title>
+          <Text c="dimmed" size="sm">
+            当前模板：{innerProps.templateName}。{modalDescription}
+          </Text>
+        </Stack>
 
-      {!taskId ? (
-        <>
-          <Stack gap="md">
-            {rows.map((row, index) => (
-              <Paper key={row.id} p="md" radius="xl" withBorder>
-                <Stack gap="sm">
-                  <Group justify="space-between" align="center">
-                    <Text fw={700}>#{index + 1}</Text>
-                    {rows.length > 1 ? (
-                      <Button
-                        color="red"
-                        radius="xl"
-                        size="compact-sm"
-                        variant="subtle"
-                        onClick={() => {
-                          setRows((currentRows) =>
-                            currentRows.filter((currentRow) => currentRow.id !== row.id),
-                          );
-                        }}
-                      >
-                        删除
-                      </Button>
-                    ) : null}
-                  </Group>
-
-                  <input
-                    accept="application/pdf,.pdf"
-                    id={`generation-pdf-${row.id}`}
-                    style={{ display: 'none' }}
-                    type="file"
-                    onChange={(event) => {
-                      void handleSelectPdfFile(row.id, event.currentTarget.files?.[0] ?? null);
-                      event.currentTarget.value = '';
-                    }}
-                  />
-
-                  <Group justify="space-between" align="center">
-                    <Text c={row.file ? undefined : 'dimmed'} size="sm">
-                      {row.file ? row.file.name : '还未上传 PDF'}
-                    </Text>
-                    <Button
-                      component="label"
-                      htmlFor={`generation-pdf-${row.id}`}
-                      radius="xl"
-                      variant={row.file ? 'default' : 'light'}
-                    >
-                      {row.file ? '重新选择 PDF' : '上传 PDF'}
-                    </Button>
-                  </Group>
-                  {row.file && row.parsedPdf ? (
-                    <Paper
-                      p="sm"
-                      radius="lg"
-                      style={{
-                        background: 'rgba(255,255,255,0.03)',
-                        border: '1px solid rgba(255,255,255,0.06)',
-                      }}
-                    >
-                      <Stack gap="sm">
-                        {(() => {
-                          const selectionState = rowSelectionStates.find(
-                            (state) => state.rowId === row.id,
-                          );
-
-                          if (!selectionState) {
-                            return null;
-                          }
-
-                          return (
-                            <Group gap="xs">
-                              <Badge color="teal" radius="xl" variant="light">
-                                全部页面
-                              </Badge>
-                              <Text c="dimmed" size="xs">
-                                将上传 {selectionState.selectedPageNumbers.length} 页，对应原 PDF 第{' '}
-                                {selectionState.selectedPageRangeLabel} 页，全部参与槽位回填。
-                              </Text>
-                            </Group>
-                          );
-                        })()}
-                      </Stack>
-                    </Paper>
-                  ) : null}
-                </Stack>
-              </Paper>
-            ))}
-          </Stack>
-
-          <Group justify="space-between">
-            <Button
-              radius="xl"
-              variant="subtle"
-              onClick={() => {
-                setRows((currentRows) => [...currentRows, createUploadRow()]);
-              }}
-            >
-              添加记录
-            </Button>
-            <Group>
-              <Button color="gray" radius="xl" variant="subtle" onClick={closeModalWithRefresh}>
-                取消
-              </Button>
-              <Button
-                disabled={!canSubmit}
-                loading={createGenerationTaskMutation.isPending || isPreparingFiles}
-                radius="xl"
-                onClick={handleCreateTask}
-              >
-                {isPreparingFiles ? '正在解析 PDF' : '批量生成'}
-              </Button>
-            </Group>
-          </Group>
-        </>
-      ) : (
-        <>
-          <Paper p="md" radius="xl" withBorder>
-            <Stack gap="sm">
-              <Group justify="space-between" align="center">
-                <Group gap="sm">
-                  <Badge color="teal" radius="sm" variant="light">
-                    {taskQuery.data?.task.status === 'completed'
-                      ? '已完成'
-                      : taskQuery.data?.task.status === 'failed'
-                        ? '有失败项'
-                        : '执行中'}
-                  </Badge>
-                  <Text size="sm">
-                    已完成 {succeededCount} / {taskItems.length}
-                  </Text>
-                  {failedCount > 0 ? (
-                    <Text c="red" size="sm">
-                      失败 {failedCount} 项
-                    </Text>
-                  ) : null}
-                </Group>
-                <Text c="dimmed" size="sm">
-                  任务 ID：{taskId.slice(0, 8)}
-                </Text>
-              </Group>
-              <Progress radius="xl" value={progressValue} />
-            </Stack>
-          </Paper>
-
-          <Stack gap="md">
-            {taskItems.map((item, index) => {
-              const clientStartedAt = itemStartedAtById[item.id] ?? null;
-              const elapsedSeconds = formatElapsedSeconds(item, tick, clientStartedAt);
-              const isReviewed = false;
-              return (
-                <Paper key={item.id} p="md" radius="xl" withBorder>
+        {!taskId ? (
+          <>
+            <Stack gap="md">
+              {rows.map((row, index) => (
+                <Paper key={row.id} p="md" radius="xl" withBorder>
                   <Stack gap="sm">
-                    <Group justify="space-between" align="flex-start">
-                      <div>
-                        <Text fw={700}>#{index + 1}</Text>
-                        <Text size="sm">{item.source_pdf_name}</Text>
-                      </div>
-                      <Group gap="sm" align="center">
-                        <Badge color={getStatusColor(item.status)} radius="sm" variant="light">
-                          {getStatusLabel(item.status)}
-                        </Badge>
-                        <Text size="sm">处理中 {elapsedSeconds} 秒</Text>
-                      </Group>
+                    <Group justify="space-between" align="center">
+                      <Text fw={700}>#{index + 1}</Text>
+                      {rows.length > 1 ? (
+                        <Button
+                          color="red"
+                          radius="xl"
+                          size="compact-sm"
+                          variant="subtle"
+                          onClick={() => {
+                            setRows((currentRows) =>
+                              currentRows.filter(
+                                (currentRow) => currentRow.id !== row.id,
+                              ),
+                            );
+                          }}
+                        >
+                          删除
+                        </Button>
+                      ) : null}
                     </Group>
 
-                    {item.error_message ? (
-                      <Text c="red" size="sm">
-                        {item.error_message}
-                      </Text>
-                    ) : null}
+                    <input
+                      accept="application/pdf,.pdf"
+                      id={`generation-pdf-${row.id}`}
+                      style={{ display: 'none' }}
+                      type="file"
+                      onChange={(event) => {
+                        void handleSelectPdfFile(
+                          row.id,
+                          event.currentTarget.files?.[0] ?? null,
+                        );
+                        event.currentTarget.value = '';
+                      }}
+                    />
 
-                    {[
-                      'uploaded',
-                      'running',
-                      'pending',
-                      'ocr_running',
-                      'pdf_pages_ready',
-                      'slot_filling',
-                    ].includes(item.status) && item.slot_total_count > 0 ? (
-                      <Text c="dimmed" size="sm">
-                        已完成 {item.slot_completed_count} 个槽位，待抽取 {getPendingSlotCount(item)} 个槽位
+                    <Group justify="space-between" align="center">
+                      <Text c={row.file ? undefined : 'dimmed'} size="sm">
+                        {row.file ? row.file.name : '还未上传 PDF'}
                       </Text>
-                    ) : null}
+                      <Button
+                        component="label"
+                        htmlFor={`generation-pdf-${row.id}`}
+                        radius="xl"
+                        variant={row.file ? 'default' : 'light'}
+                      >
+                        {row.file ? '重新选择 PDF' : '上传 PDF'}
+                      </Button>
+                    </Group>
+                    {row.file && row.parsedPdf ? (
+                      <Paper
+                        p="sm"
+                        radius="lg"
+                        style={{
+                          background: 'rgba(255,255,255,0.03)',
+                          border: '1px solid rgba(255,255,255,0.06)',
+                        }}
+                      >
+                        <Stack gap="sm">
+                          {(() => {
+                            const selectionState = rowSelectionStates.find(
+                              (state) => state.rowId === row.id,
+                            );
 
-                    {item.status === 'review_pending' ? (
-                      <>
-                        <Divider />
-                        <Group justify="space-between" align="center">
-                          <Text c="dimmed" size="sm">
-                            {isReviewed
-                              ? '这个文件已经核查完毕，可以继续查看核查页或直接下载结果。'
-                              : '槽位结果已返回。请打开新的核查页确认后，再允许下载结果。'}
-                          </Text>
-                          <Group>
-                            <Button
-                              radius="xl"
-                              variant={isReviewed ? 'default' : 'light'}
-                              onClick={() => {
-                                window.open(
-                                  `/documents/generation-review/${item.id}`,
-                                  '_blank',
-                                  'noopener,noreferrer',
-                                );
-                              }}
-                            >
-                              {isReviewed ? '查看核查结果' : '去核查'}
-                            </Button>
-                            {isReviewed ? (
-                              <Button
-                                radius="xl"
-                                variant="default"
-                                onClick={() => {
-                                  requestReviewedDocxDownload({
-                                    taskItemId: item.id,
-                                    defaultFileName: `${innerProps.templateName}-${item.source_pdf_name.replace(/\.pdf$/i, '')}-核查结果.docx`,
-                                  });
-                                }}
-                              >
-                                下载结果
-                              </Button>
-                            ) : null}
-                          </Group>
-                        </Group>
-                      </>
+                            if (!selectionState) {
+                              return null;
+                            }
+
+                            return (
+                              <Group gap="xs">
+                                <Badge color="teal" radius="xl" variant="light">
+                                  全部页面
+                                </Badge>
+                                <Text c="dimmed" size="xs">
+                                  将上传{' '}
+                                  {selectionState.selectedPageNumbers.length}{' '}
+                                  页，对应原 PDF 第{' '}
+                                  {selectionState.selectedPageRangeLabel}{' '}
+                                  页，全部参与槽位回填。
+                                </Text>
+                              </Group>
+                            );
+                          })()}
+                        </Stack>
+                      </Paper>
                     ) : null}
                   </Stack>
                 </Paper>
-              );
-            })}
-          </Stack>
+              ))}
+            </Stack>
 
-          <Group justify="space-between">
-            <Button
-              radius="xl"
-              variant="subtle"
-              onClick={() => {
-                void refreshTaskLists();
-              }}
-            >
-              刷新状态
-            </Button>
-            <Button
-              disabled={!canCloseTaskModal}
-              radius="xl"
-              onClick={closeModalWithRefresh}
-            >
-              关闭
-            </Button>
-          </Group>
-        </>
-      )}
+            <Group justify="space-between">
+              <Button
+                radius="xl"
+                variant="subtle"
+                onClick={() => {
+                  setRows((currentRows) => [...currentRows, createUploadRow()]);
+                }}
+              >
+                添加记录
+              </Button>
+              <Group>
+                <Button
+                  color="gray"
+                  radius="xl"
+                  variant="subtle"
+                  onClick={closeModalWithRefresh}
+                >
+                  取消
+                </Button>
+                <Button
+                  disabled={!canSubmit}
+                  loading={
+                    createGenerationTaskMutation.isPending || isPreparingFiles
+                  }
+                  radius="xl"
+                  onClick={handleCreateTask}
+                >
+                  {isPreparingFiles ? '正在解析 PDF' : '批量生成'}
+                </Button>
+              </Group>
+            </Group>
+          </>
+        ) : (
+          <>
+            <Paper p="md" radius="xl" withBorder>
+              <Stack gap="sm">
+                <Group justify="space-between" align="center">
+                  <Group gap="sm">
+                    <Badge color="teal" radius="sm" variant="light">
+                      {taskQuery.data?.task.status === 'completed'
+                        ? '已完成'
+                        : taskQuery.data?.task.status === 'failed'
+                          ? '有失败项'
+                          : '执行中'}
+                    </Badge>
+                    <Text size="sm">
+                      已完成 {succeededCount} / {taskItems.length}
+                    </Text>
+                    {failedCount > 0 ? (
+                      <Text c="red" size="sm">
+                        失败 {failedCount} 项
+                      </Text>
+                    ) : null}
+                  </Group>
+                  <Text c="dimmed" size="sm">
+                    任务 ID：{taskId.slice(0, 8)}
+                  </Text>
+                </Group>
+                <Progress radius="xl" value={progressValue} />
+              </Stack>
+            </Paper>
+
+            <Stack gap="md">
+              {taskItems.map((item, index) => {
+                const clientStartedAt = itemStartedAtById[item.id] ?? null;
+                const elapsedSeconds = formatElapsedSeconds(
+                  item,
+                  tick,
+                  clientStartedAt,
+                );
+                const isReviewed = false;
+                return (
+                  <Paper key={item.id} p="md" radius="xl" withBorder>
+                    <Stack gap="sm">
+                      <Group justify="space-between" align="flex-start">
+                        <div>
+                          <Text fw={700}>#{index + 1}</Text>
+                          <Text size="sm">{item.source_pdf_name}</Text>
+                        </div>
+                        <Group gap="sm" align="center">
+                          <Badge
+                            color={getStatusColor(item.status)}
+                            radius="sm"
+                            variant="light"
+                          >
+                            {getStatusLabel(item.status)}
+                          </Badge>
+                          <Text size="sm">处理中 {elapsedSeconds} 秒</Text>
+                        </Group>
+                      </Group>
+
+                      {item.error_message ? (
+                        <Text c="red" size="sm">
+                          {item.error_message}
+                        </Text>
+                      ) : null}
+
+                      {[
+                        'uploaded',
+                        'running',
+                        'pending',
+                        'ocr_running',
+                        'pdf_pages_ready',
+                        'slot_filling',
+                      ].includes(item.status) && item.slot_total_count > 0 ? (
+                        <Text c="dimmed" size="sm">
+                          已完成 {item.slot_completed_count} 个槽位，待抽取{' '}
+                          {getPendingSlotCount(item)} 个槽位
+                        </Text>
+                      ) : null}
+
+                      {item.status === 'review_pending' ? (
+                        <>
+                          <Divider />
+                          <Group justify="space-between" align="center">
+                            <Text c="dimmed" size="sm">
+                              {isReviewed
+                                ? '这个文件已经核查完毕，可以继续查看核查页或直接下载结果。'
+                                : '槽位结果已返回。请打开新的核查页确认后，再允许下载结果。'}
+                            </Text>
+                            <Group>
+                              <Button
+                                radius="xl"
+                                variant={isReviewed ? 'default' : 'light'}
+                                onClick={() => {
+                                  window.open(
+                                    `/documents/generation-review/${item.id}`,
+                                    '_blank',
+                                    'noopener,noreferrer',
+                                  );
+                                }}
+                              >
+                                {isReviewed ? '查看核查结果' : '去核查'}
+                              </Button>
+                              {isReviewed ? (
+                                <Button
+                                  radius="xl"
+                                  variant="default"
+                                  onClick={() => {
+                                    requestReviewedDocxDownload({
+                                      taskItemId: item.id,
+                                      defaultFileName: `${innerProps.templateName}-${item.source_pdf_name.replace(/\.pdf$/i, '')}-核查结果.docx`,
+                                    });
+                                  }}
+                                >
+                                  下载结果
+                                </Button>
+                              ) : null}
+                            </Group>
+                          </Group>
+                        </>
+                      ) : null}
+                    </Stack>
+                  </Paper>
+                );
+              })}
+            </Stack>
+
+            <Group justify="space-between">
+              <Button
+                radius="xl"
+                variant="subtle"
+                onClick={() => {
+                  void refreshTaskLists();
+                }}
+              >
+                刷新状态
+              </Button>
+              <Button
+                disabled={!canCloseTaskModal}
+                radius="xl"
+                onClick={closeModalWithRefresh}
+              >
+                关闭
+              </Button>
+            </Group>
+          </>
+        )}
       </Stack>
     </Box>
   );

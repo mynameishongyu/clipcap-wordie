@@ -1,7 +1,10 @@
 import { after, NextResponse } from 'next/server';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { randomUUID } from 'crypto';
 import {
   fillSlotsFromVisionPages,
   type GenerationSlotSchemaItem,
+  normalizedBboxToGeminiBox2d,
   type ReferencePdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
 import {
@@ -58,8 +61,93 @@ function hasUsableReferenceBbox(slot: GenerationSlotSchemaItem) {
   );
 }
 
+type ReferenceSlotBox = {
+  slotKey: string;
+  slotName: string;
+  slotSource: string;
+  bbox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  exampleEvidenceText: string;
+  exampleSlotValue: string;
+};
+
+async function buildAnnotatedReferencePageDataUrl(params: {
+  imageBuffer: Buffer;
+  slotBoxes: ReferenceSlotBox[];
+}) {
+  const image = await loadImage(params.imageBuffer);
+  const width = image.width;
+  const height = image.height;
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext('2d');
+  const lineWidth = Math.max(4, Math.round(Math.min(width, height) * 0.004));
+  const fontSize = Math.max(18, Math.round(Math.min(width, height) * 0.018));
+
+  context.drawImage(image, 0, 0, width, height);
+  context.font = `700 ${fontSize}px sans-serif`;
+  context.textBaseline = 'top';
+
+  params.slotBoxes.forEach((slotBox, index) => {
+    const left = Math.max(0, Math.min(width, slotBox.bbox.x * width));
+    const top = Math.max(0, Math.min(height, slotBox.bbox.y * height));
+    const boxWidth = Math.max(
+      1,
+      Math.min(width - left, slotBox.bbox.width * width),
+    );
+    const boxHeight = Math.max(
+      1,
+      Math.min(height - top, slotBox.bbox.height * height),
+    );
+    const label = `${slotBox.slotKey} ${slotBox.slotName}`;
+    const labelMetrics = context.measureText(label);
+    const labelPaddingX = Math.max(8, Math.round(fontSize * 0.35));
+    const labelPaddingY = Math.max(5, Math.round(fontSize * 0.2));
+    const labelWidth = Math.min(
+      width - 2,
+      Math.ceil(labelMetrics.width + labelPaddingX * 2),
+    );
+    const labelHeight = Math.ceil(fontSize + labelPaddingY * 2);
+    const labelLeft = Math.min(left, width - labelWidth - 1);
+    const preferredLabelTop = top - labelHeight - lineWidth;
+    const labelTop =
+      preferredLabelTop >= 0
+        ? preferredLabelTop
+        : Math.min(height - labelHeight - 1, top + boxHeight + lineWidth);
+
+    context.fillStyle = 'rgba(255, 153, 0, 0.18)';
+    context.fillRect(left, top, boxWidth, boxHeight);
+    context.strokeStyle = '#ff9900';
+    context.lineWidth = lineWidth;
+    context.strokeRect(left, top, boxWidth, boxHeight);
+
+    context.fillStyle =
+      index % 2 === 0 ? 'rgba(255, 153, 0, 0.95)' : 'rgba(255, 111, 0, 0.95)';
+    context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
+    context.fillStyle = '#111111';
+    context.fillText(
+      label,
+      labelLeft + labelPaddingX,
+      labelTop + labelPaddingY,
+      labelWidth - labelPaddingX * 2,
+    );
+  });
+
+  const annotatedBuffer = canvas.toBuffer('image/png');
+
+  return {
+    dataUrl: `data:image/png;base64,${annotatedBuffer.toString('base64')}`,
+    buffer: annotatedBuffer,
+  };
+}
+
 async function loadReferenceExamplePagesWithBbox(params: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskItemId: string;
+  ownerId: string;
   slots: GenerationSlotSchemaItem[];
 }) {
   const pageAssetsByKey = new Map<
@@ -68,6 +156,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
       pageNumber: number;
       storagePath: string;
       examplePdfFileName?: string;
+      slotBoxes: ReferenceSlotBox[];
     }
   >();
   let skippedSlotsWithoutBbox = 0;
@@ -89,10 +178,34 @@ async function loadReferenceExamplePagesWithBbox(params: {
       continue;
     }
 
-    pageAssetsByKey.set(`${pageNumber}:${storagePath}`, {
+    const bbox = reference.example_bbox;
+
+    if (!bbox) {
+      skippedSlotsWithoutBbox += 1;
+      continue;
+    }
+
+    const pageAssetKey = `${pageNumber}:${storagePath}`;
+    const existingPageAsset = pageAssetsByKey.get(pageAssetKey);
+    const slotBox = {
+      slotKey: slot.slot_key,
+      slotName: slot.field_category,
+      slotSource: slot.meaning_to_applicant,
+      bbox,
+      exampleEvidenceText: reference.example_evidence_text ?? '',
+      exampleSlotValue: reference.example_slot_value ?? '',
+    } satisfies ReferenceSlotBox;
+
+    if (existingPageAsset) {
+      existingPageAsset.slotBoxes.push(slotBox);
+      continue;
+    }
+
+    pageAssetsByKey.set(pageAssetKey, {
       pageNumber,
       storagePath,
       examplePdfFileName: reference.example_pdf_file_name,
+      slotBoxes: [slotBox],
     });
   }
 
@@ -105,17 +218,87 @@ async function loadReferenceExamplePagesWithBbox(params: {
           .download(asset.storagePath);
 
         if (error || !fileBlob) {
-          throw error ?? new Error(`无法下载示例 PDF 页图: ${asset.storagePath}`);
+          throw (
+            error ?? new Error(`无法下载示例 PDF 页图: ${asset.storagePath}`)
+          );
         }
 
         const buffer = Buffer.from(await fileBlob.arrayBuffer());
         const mimeType =
           fileBlob.type || getMimeTypeFromStoragePath(asset.storagePath);
+        const imageDataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
+        let annotatedImageDataUrl: string | undefined;
+        let annotatedPreviewUrl: string | undefined;
+        let annotatedStoragePath: string | undefined;
+
+        try {
+          const annotatedImage = await buildAnnotatedReferencePageDataUrl({
+            imageBuffer: buffer,
+            slotBoxes: asset.slotBoxes,
+          });
+          annotatedImageDataUrl = annotatedImage.dataUrl;
+          annotatedStoragePath =
+            `${params.ownerId}/slot-fill-reference-annotations/${params.taskItemId}/` +
+            `${randomUUID()}-example-page-${asset.pageNumber}.png`;
+
+          const { error: uploadError } = await params.admin.storage
+            .from('generation-pdfs')
+            .upload(annotatedStoragePath, annotatedImage.buffer, {
+              contentType: 'image/png',
+              upsert: false,
+            });
+
+          if (uploadError) {
+            throw uploadError;
+          }
+
+          const { data: signedUrlData, error: signedUrlError } =
+            await params.admin.storage
+              .from('generation-pdfs')
+              .createSignedUrl(annotatedStoragePath, 60 * 60 * 24);
+
+          if (signedUrlError || !signedUrlData?.signedUrl) {
+            throw (
+              signedUrlError ??
+              new Error(`Missing signed URL for ${annotatedStoragePath}`)
+            );
+          }
+
+          annotatedPreviewUrl = signedUrlData.signedUrl;
+        } catch (error) {
+          annotatedPreviewUrl = undefined;
+          annotatedStoragePath = undefined;
+          console.warn(
+            '[PDF Fill][ReferenceExample] Failed to annotate reference page image',
+            {
+              pageNumber: asset.pageNumber,
+              storagePath: asset.storagePath,
+              error,
+            },
+          );
+        }
 
         return {
           page_number: asset.pageNumber,
           original_page_number: asset.pageNumber,
-          image_data_url: `data:${mimeType};base64,${buffer.toString('base64')}`,
+          image_data_url: imageDataUrl,
+          ...(annotatedImageDataUrl
+            ? { annotated_image_data_url: annotatedImageDataUrl }
+            : {}),
+          ...(annotatedPreviewUrl
+            ? { annotated_preview_url: annotatedPreviewUrl }
+            : {}),
+          ...(annotatedStoragePath
+            ? { annotated_storage_path: annotatedStoragePath }
+            : {}),
+          annotated_slots: asset.slotBoxes.map((slotBox) => ({
+            slot_key: slotBox.slotKey,
+            slot_name: slotBox.slotName,
+            slot_source: slotBox.slotSource,
+            example_box_2d: normalizedBboxToGeminiBox2d(slotBox.bbox),
+            example_evidence_text: slotBox.exampleEvidenceText,
+            example_slot_value: slotBox.exampleSlotValue,
+          })),
           example_pdf_file_name: asset.examplePdfFileName,
         } satisfies ReferencePdfVisionPageInput;
       }),
@@ -154,7 +337,9 @@ async function runGenerationTaskItemSlotFill(params: {
     }
 
     if (precomputedVisionPages.length === 0 && ocrImageAssets.length === 0) {
-      throw new Error('当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。');
+      throw new Error(
+        '当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。',
+      );
     }
 
     const visionPages =
@@ -171,6 +356,8 @@ async function runGenerationTaskItemSlotFill(params: {
 
     const referenceExamplePages = await loadReferenceExamplePagesWithBbox({
       admin,
+      taskItemId: params.item.id,
+      ownerId: params.item.owner_id,
       slots: slotSchema,
     });
 
@@ -206,6 +393,21 @@ async function runGenerationTaskItemSlotFill(params: {
       admin,
       params.item.id,
       `[PDF Fill][ReferenceExample] Using ${referenceExamplePages.pages.length} example PDF page image(s) with bbox for slot fill; skipped ${referenceExamplePages.skippedSlotsWithoutBbox} slot(s) without bbox and ${referenceExamplePages.skippedSlotsWithoutPageImage} slot(s) without stored example page image.`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][ReferenceExampleImages] ${JSON.stringify({
+        document_name: params.item.source_pdf_name,
+        pages: referenceExamplePages.pages.map((page) => ({
+          example_pdf_file_name: page.example_pdf_file_name ?? null,
+          page_number: page.page_number,
+          original_page_number: page.original_page_number ?? page.page_number,
+          annotated_preview_url: page.annotated_preview_url ?? null,
+          annotated_storage_path: page.annotated_storage_path ?? null,
+          annotated_slots: page.annotated_slots ?? [],
+        })),
+      })}`,
     );
 
     console.log('[Generation Task Item] Direct visual slot fill starting', {
@@ -429,7 +631,8 @@ export async function POST(
       return NextResponse.json(
         {
           code: 'GENERATION_TASK_ITEM_PDF_PAGES_NOT_READY',
-          message: '当前任务的新 PDF 页面图片尚未准备完成，暂时不能开始槽位回填。',
+          message:
+            '当前任务的新 PDF 页面图片尚未准备完成，暂时不能开始槽位回填。',
         },
         { status: 409 },
       );
