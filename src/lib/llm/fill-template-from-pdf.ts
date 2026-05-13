@@ -82,6 +82,7 @@ export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
     slot_key: string;
     slot_name: string;
     slot_source: string;
+    example_annotation_label?: string;
     example_box_2d: [number, number, number, number] | null;
     example_evidence_text: string;
     example_slot_value: string;
@@ -609,16 +610,14 @@ function buildSlotReferencePromptData(slot: GenerationSlotSchemaItem) {
     example_pdf_file_name: reference.example_pdf_file_name ?? '',
     example_page_number: reference.example_page_number ?? null,
     example_box_2d: exampleBox2d,
-    example_annotation_label: exampleBox2d
-      ? `${slot.slot_key} ${slot.field_category}`
-      : '',
+    example_annotation_label: exampleBox2d ? slot.slot_key : '',
     example_evidence_text: reference.example_evidence_text ?? '',
     example_slot_value: reference.example_slot_value ?? '',
     example_confidence: reference.example_confidence ?? null,
     example_match_type: reference.example_match_type ?? '',
     example_page_image_note:
       reference.example_bbox && reference.example_page_number
-        ? `The annotated reference image for page_number ${reference.example_page_number} contains an orange box labeled "${slot.slot_key} ${slot.field_category}" for this slot.`
+        ? `The annotated reference image for page_number ${reference.example_page_number} contains an orange corner label "${slot.slot_key}" for this slot.`
         : '',
   };
 }
@@ -1995,8 +1994,8 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'slot_source describes where the template slot value came from.',
       'reference_example_pdf_evidence contains the reviewed example PDF page number, Gemini-style example_box_2d, visible example value, and source text.',
       'example_box_2d uses Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
-      'Annotated reference example images contain orange boxes labeled with slot_key and slot name. These orange boxes are authoritative examples of where the template value came from.',
-      'For each slot, first find the orange box label matching the slot_key on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.',
+      'Annotated reference example images contain orange boxes with small orange corner labels. The label text equals reference_example_pdf_evidence.example_annotation_label, usually the slot_key. These orange boxes are authoritative examples of where the template value came from.',
+      'For each slot, first find the orange corner label matching reference_example_pdf_evidence.example_annotation_label on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.',
       'Prefer the new PDF candidate whose surrounding layout and nearby label match the annotated reference box. Do not choose a semantically similar value from another form/row/field when a layout-equivalent source exists.',
       'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
       'For reference_example_pdf_evidence.example_box_2d, page numbers refer to the provided annotated Reference example PDF page images with the same page_number; do not renumber these reference pages.',
@@ -2166,7 +2165,7 @@ async function extractSlotsFromVisionPageBatch(input: {
           ? ` Annotated slot boxes on this page: ${page.annotated_slots
               .map(
                 (slot) =>
-                  `${slot.slot_key} ${slot.slot_name} box_2d=${JSON.stringify(
+                  `label=${slot.example_annotation_label ?? slot.slot_key} slot_key=${slot.slot_key} ${slot.slot_name} box_2d=${JSON.stringify(
                     slot.example_box_2d,
                   )} value="${slot.example_slot_value}" source="${slot.slot_source}"`,
               )

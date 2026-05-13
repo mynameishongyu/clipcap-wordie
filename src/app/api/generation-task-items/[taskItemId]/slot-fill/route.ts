@@ -84,14 +84,16 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   const height = image.height;
   const canvas = createCanvas(width, height);
   const context = canvas.getContext('2d');
-  const lineWidth = Math.max(4, Math.round(Math.min(width, height) * 0.004));
-  const fontSize = Math.max(18, Math.round(Math.min(width, height) * 0.018));
+  const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
+  const labelFontSize = Math.max(16, Math.round(Math.min(width, height) * 0.012));
+  const labelPaddingX = Math.max(4, Math.round(labelFontSize * 0.35));
+  const labelPaddingY = Math.max(2, Math.round(labelFontSize * 0.2));
 
   context.drawImage(image, 0, 0, width, height);
-  context.font = `700 ${fontSize}px sans-serif`;
-  context.textBaseline = 'top';
+  context.font = `700 ${labelFontSize}px sans-serif`;
+  context.textBaseline = 'middle';
 
-  params.slotBoxes.forEach((slotBox, index) => {
+  params.slotBoxes.forEach((slotBox) => {
     const left = Math.max(0, Math.min(width, slotBox.bbox.x * width));
     const top = Math.max(0, Math.min(height, slotBox.bbox.y * height));
     const boxWidth = Math.max(
@@ -102,37 +104,33 @@ async function buildAnnotatedReferencePageDataUrl(params: {
       1,
       Math.min(height - top, slotBox.bbox.height * height),
     );
-    const label = `${slotBox.slotKey} ${slotBox.slotName}`;
-    const labelMetrics = context.measureText(label);
-    const labelPaddingX = Math.max(8, Math.round(fontSize * 0.35));
-    const labelPaddingY = Math.max(5, Math.round(fontSize * 0.2));
-    const labelWidth = Math.min(
-      width - 2,
-      Math.ceil(labelMetrics.width + labelPaddingX * 2),
-    );
-    const labelHeight = Math.ceil(fontSize + labelPaddingY * 2);
-    const labelLeft = Math.min(left, width - labelWidth - 1);
-    const preferredLabelTop = top - labelHeight - lineWidth;
-    const labelTop =
-      preferredLabelTop >= 0
-        ? preferredLabelTop
-        : Math.min(height - labelHeight - 1, top + boxHeight + lineWidth);
 
-    context.fillStyle = 'rgba(255, 153, 0, 0.18)';
+    context.fillStyle = 'rgba(255, 153, 0, 0.08)';
     context.fillRect(left, top, boxWidth, boxHeight);
     context.strokeStyle = '#ff9900';
     context.lineWidth = lineWidth;
     context.strokeRect(left, top, boxWidth, boxHeight);
 
-    context.fillStyle =
-      index % 2 === 0 ? 'rgba(255, 153, 0, 0.95)' : 'rgba(255, 111, 0, 0.95)';
+    const label = slotBox.slotKey;
+    const labelMetrics = context.measureText(label);
+    const labelWidth = labelMetrics.width + labelPaddingX * 2;
+    const labelHeight = labelFontSize + labelPaddingY * 2;
+    const labelLeft = Math.max(
+      0,
+      Math.min(width - labelWidth, left - lineWidth),
+    );
+    const labelTop = Math.max(
+      0,
+      Math.min(height - labelHeight, top - labelHeight - lineWidth),
+    );
+
+    context.fillStyle = 'rgba(255, 153, 0, 0.9)';
     context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
-    context.fillStyle = '#111111';
+    context.fillStyle = '#ffffff';
     context.fillText(
       label,
       labelLeft + labelPaddingX,
-      labelTop + labelPaddingY,
-      labelWidth - labelPaddingX * 2,
+      labelTop + labelHeight / 2,
     );
   });
 
@@ -295,6 +293,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
             slot_key: slotBox.slotKey,
             slot_name: slotBox.slotName,
             slot_source: slotBox.slotSource,
+            example_annotation_label: slotBox.slotKey,
             example_box_2d: normalizedBboxToGeminiBox2d(slotBox.bbox),
             example_evidence_text: slotBox.exampleEvidenceText,
             example_slot_value: slotBox.exampleSlotValue,
