@@ -2163,6 +2163,7 @@ export function SlotReviewWorkspace() {
   }
 
   const pdfEvidencePages = payload.pdfEvidence?.pages ?? [];
+  const hasPdfEvidence = Boolean(payload.pdfEvidence);
   const currentDocumentName =
     payload.documentInfo.document_name || payload.fileName;
   const docxPreviewDescription = isAddingItem
@@ -2222,6 +2223,7 @@ export function SlotReviewWorkspace() {
         align="stretch"
         gap="md"
         wrap="nowrap"
+        justify={hasPdfEvidence ? 'flex-start' : 'center'}
         style={{ minWidth: 0, overflow: 'hidden' }}
       >
         <Paper
@@ -2232,9 +2234,13 @@ export function SlotReviewWorkspace() {
             background:
               'linear-gradient(180deg, rgba(37, 37, 37, 0.98), rgba(29, 29, 29, 0.98))',
             borderColor: 'rgba(255, 255, 255, 0.14)',
-            flex: isSlotPanelCollapsed ? '0 0 54px' : '0 0 300px',
+            flex: isSlotPanelCollapsed
+              ? '0 0 54px'
+              : hasPdfEvidence
+                ? '0 0 300px'
+                : '0 0 420px',
             height: 'calc(100vh - 178px)',
-            minWidth: isSlotPanelCollapsed ? 54 : 280,
+            minWidth: isSlotPanelCollapsed ? 54 : hasPdfEvidence ? 280 : 380,
             order: 3,
             overflow: 'hidden',
           }}
@@ -2864,9 +2870,9 @@ export function SlotReviewWorkspace() {
             radius="xl"
             withBorder
             style={{
-              flex: '0 0 320px',
+              flex: hasPdfEvidence ? '0 0 320px' : '0 0 420px',
               height: 'calc(100vh - 178px)',
-              minWidth: 280,
+              minWidth: hasPdfEvidence ? 280 : 380,
               order: 1,
               overflow: 'hidden',
             }}

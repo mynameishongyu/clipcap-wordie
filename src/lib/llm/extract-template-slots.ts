@@ -16,7 +16,6 @@ const EXTRACTION_TIMEOUT_MS = 120000;
 const EXTRACTION_MAX_RETRIES = 2;
 const DEFAULT_MIN_PARAGRAPH_CHARACTER_COUNT = 6;
 const DEFAULT_TEMPLATE_EXTRACTION_LLM_CONCURRENCY = 2;
-const DEFAULT_TEMPLATE_EXTRACTION_PARAGRAPHS_PER_REQUEST = 1;
 const DEFAULT_TEMPLATE_EXTRACTION_REQUEST_INTERVAL_MS = 0;
 const EXTRACTION_WAIT_HEARTBEAT_MS = 15000;
 const TEMPLATE_EXTRACTION_LLM_CONNECT_TIMEOUT_MS = 60000;
@@ -158,13 +157,6 @@ function getTemplateExtractionMinParagraphCharacterCount() {
   return getConfiguredPositiveInteger(
     'TEMPLATE_EXTRACTION_MIN_PARAGRAPH_CHARACTER_COUNT',
     DEFAULT_MIN_PARAGRAPH_CHARACTER_COUNT,
-  );
-}
-
-function getTemplateExtractionParagraphsPerRequest() {
-  return getConfiguredPositiveInteger(
-    'TEMPLATE_EXTRACTION_PARAGRAPHS_PER_REQUEST',
-    DEFAULT_TEMPLATE_EXTRACTION_PARAGRAPHS_PER_REQUEST,
   );
 }
 
@@ -648,7 +640,12 @@ export function countExtractableParagraphsFromRawText(uploadText: string) {
     .length;
 }
 
-function chunkParagraphs(paragraphs: ExtractedParagraph[], batchSize: number) {
+function chunkParagraphsByConcurrency(
+  paragraphs: ExtractedParagraph[],
+  concurrency: number,
+) {
+  const workerCount = Math.max(1, Math.min(concurrency, paragraphs.length));
+  const batchSize = Math.ceil(paragraphs.length / workerCount);
   const batches: ExtractedParagraph[][] = [];
 
   for (let index = 0; index < paragraphs.length; index += batchSize) {
@@ -853,19 +850,18 @@ async function extractParagraphsConcurrently(params: {
   let completedParagraphs = 0;
   const totalParagraphs = params.paragraphs.length;
   const configuredConcurrency = getTemplateExtractionLlmConcurrency();
-  const paragraphsPerRequest = getTemplateExtractionParagraphsPerRequest();
-  const paragraphBatches = chunkParagraphs(
-    params.paragraphs,
-    paragraphsPerRequest,
-  );
   const concurrency = Math.max(
     1,
-    Math.min(configuredConcurrency, paragraphBatches.length),
+    Math.min(configuredConcurrency, totalParagraphs),
+  );
+  const paragraphBatches = chunkParagraphsByConcurrency(
+    params.paragraphs,
+    concurrency,
   );
 
   const startedMessage =
     `[Template Extract] LLM paragraph extraction started for ${params.fileName} ` +
-    `(paragraphs: ${totalParagraphs}, concurrency: ${concurrency}, paragraphs_per_request: ${paragraphsPerRequest}).`;
+    `(paragraphs: ${totalParagraphs}, llm_concurrency: ${concurrency}, paragraph_batches: ${paragraphBatches.length}).`;
   console.log(startedMessage);
   await params.onTrace?.({ message: startedMessage });
 
@@ -907,6 +903,13 @@ async function extractParagraphsConcurrently(params: {
   const failedResults = results.filter(
     (result): result is PromiseRejectedResult => result.status === 'rejected',
   );
+  const failedParagraphs = results.reduce((count, result, index) => {
+    if (result.status !== 'rejected') {
+      return count;
+    }
+
+    return count + (paragraphBatches[index]?.length ?? 0);
+  }, 0);
 
   for (const result of results) {
     if (result.status !== 'fulfilled') {
@@ -924,7 +927,7 @@ async function extractParagraphsConcurrently(params: {
     const partialMessage =
       `[Template Extract] Partial success for ${params.fileName}: ` +
       `${extractedParagraphs.length}/${totalParagraphs} paragraphs returned slots, ` +
-      `${failedResults.length} request batches failed. Continuing with successful paragraph results only.`;
+      `${failedResults.length} request batches (${failedParagraphs} paragraphs) failed. Continuing with successful paragraph results only.`;
     console.warn(partialMessage);
     await params.onTrace?.({ message: partialMessage });
   }
@@ -938,7 +941,7 @@ async function extractParagraphsConcurrently(params: {
 
   const completedMessage =
     `[Template Extract] LLM paragraph extraction completed for ${params.fileName} ` +
-    `(paragraphs: ${totalParagraphs}, concurrency: ${concurrency}, paragraphs_per_request: ${paragraphsPerRequest}, extracted_paragraphs: ${extractedParagraphs.length}, failed_batches: ${failedResults.length}).`;
+    `(paragraphs: ${totalParagraphs}, llm_concurrency: ${concurrency}, paragraph_batches: ${paragraphBatches.length}, extracted_paragraphs: ${extractedParagraphs.length}, failed_batches: ${failedResults.length}, failed_paragraphs: ${failedParagraphs}).`;
   console.log(completedMessage);
   await params.onTrace?.({ message: completedMessage });
 
@@ -946,7 +949,7 @@ async function extractParagraphsConcurrently(params: {
     extractedParagraphs,
     totalParagraphs,
     succeededParagraphs: extractedParagraphs.length,
-    failedParagraphs: failedResults.length,
+    failedParagraphs,
   };
 }
 
@@ -997,17 +1000,13 @@ export async function extractTemplateSlotsFromDocx(
         paragraph_count: extractableParagraphs.length,
         min_paragraph_character_count:
           getTemplateExtractionMinParagraphCharacterCount(),
-        concurrency: Math.max(
+        llm_concurrency: Math.max(
           1,
           Math.min(
             getTemplateExtractionLlmConcurrency(),
-            Math.ceil(
-              extractableParagraphs.length /
-                getTemplateExtractionParagraphsPerRequest(),
-            ),
+            extractableParagraphs.length,
           ),
         ),
-        paragraphs_per_request: getTemplateExtractionParagraphsPerRequest(),
         extra_prompt: params.prompt,
       }),
   });
