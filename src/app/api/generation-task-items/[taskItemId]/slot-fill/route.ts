@@ -1,5 +1,9 @@
 import { after, NextResponse } from 'next/server';
-import { fillSlotsFromVisionPages } from '@/src/lib/llm/fill-template-from-pdf';
+import {
+  fillSlotsFromVisionPages,
+  type GenerationSlotSchemaItem,
+  type ReferencePdfVisionPageInput,
+} from '@/src/lib/llm/fill-template-from-pdf';
 import {
   appendProcessingTrace,
   buildFallbackReviewPayload,
@@ -21,6 +25,108 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
+
+function getMimeTypeFromStoragePath(storagePath: string) {
+  const normalized = storagePath.toLowerCase();
+
+  if (normalized.endsWith('.png')) {
+    return 'image/png';
+  }
+
+  if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+
+  if (normalized.endsWith('.webp')) {
+    return 'image/webp';
+  }
+
+  return 'application/octet-stream';
+}
+
+function hasUsableReferenceBbox(slot: GenerationSlotSchemaItem) {
+  const bbox = slot.reference_pdf_evidence?.example_bbox;
+
+  return (
+    Boolean(bbox) &&
+    typeof bbox?.x === 'number' &&
+    typeof bbox?.y === 'number' &&
+    typeof bbox?.width === 'number' &&
+    typeof bbox?.height === 'number' &&
+    bbox.width > 0 &&
+    bbox.height > 0
+  );
+}
+
+async function loadReferenceExamplePagesWithBbox(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  slots: GenerationSlotSchemaItem[];
+}) {
+  const pageAssetsByKey = new Map<
+    string,
+    {
+      pageNumber: number;
+      storagePath: string;
+      examplePdfFileName?: string;
+    }
+  >();
+  let skippedSlotsWithoutBbox = 0;
+  let skippedSlotsWithoutPageImage = 0;
+
+  for (const slot of params.slots) {
+    const reference = slot.reference_pdf_evidence;
+
+    if (!reference || !hasUsableReferenceBbox(slot)) {
+      skippedSlotsWithoutBbox += 1;
+      continue;
+    }
+
+    const pageNumber = reference.example_page_number;
+    const storagePath = reference.example_page_storage_path?.trim();
+
+    if (!pageNumber || !storagePath) {
+      skippedSlotsWithoutPageImage += 1;
+      continue;
+    }
+
+    pageAssetsByKey.set(`${pageNumber}:${storagePath}`, {
+      pageNumber,
+      storagePath,
+      examplePdfFileName: reference.example_pdf_file_name,
+    });
+  }
+
+  const pages = await Promise.all(
+    [...pageAssetsByKey.values()]
+      .sort((left, right) => left.pageNumber - right.pageNumber)
+      .map(async (asset) => {
+        const { data: fileBlob, error } = await params.admin.storage
+          .from('generation-pdfs')
+          .download(asset.storagePath);
+
+        if (error || !fileBlob) {
+          throw error ?? new Error(`无法下载示例 PDF 页图: ${asset.storagePath}`);
+        }
+
+        const buffer = Buffer.from(await fileBlob.arrayBuffer());
+        const mimeType =
+          fileBlob.type || getMimeTypeFromStoragePath(asset.storagePath);
+
+        return {
+          page_number: asset.pageNumber,
+          original_page_number: asset.pageNumber,
+          image_data_url: `data:${mimeType};base64,${buffer.toString('base64')}`,
+          example_pdf_file_name: asset.examplePdfFileName,
+        } satisfies ReferencePdfVisionPageInput;
+      }),
+  );
+
+  return {
+    pages,
+    skippedSlotsWithoutBbox,
+    skippedSlotsWithoutPageImage,
+  };
+}
 
 async function runGenerationTaskItemSlotFill(params: {
   item: GenerationTaskItemRecord;
@@ -63,6 +169,11 @@ async function runGenerationTaskItemSlotFill(params: {
       throw new Error('当前任务没有可读取的新 PDF 页面图片。');
     }
 
+    const referenceExamplePages = await loadReferenceExamplePagesWithBbox({
+      admin,
+      slots: slotSchema,
+    });
+
     await admin
       .from('generation_task_items')
       .update({
@@ -91,12 +202,19 @@ async function runGenerationTaskItemSlotFill(params: {
       '槽位回填阶段：跳过新 PDF OCR，直接使用槽位来源、示例 PDF 定位信息和新 PDF 页面图片调用 VISION_LLM。',
     );
 
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][ReferenceExample] Using ${referenceExamplePages.pages.length} example PDF page image(s) with bbox for slot fill; skipped ${referenceExamplePages.skippedSlotsWithoutBbox} slot(s) without bbox and ${referenceExamplePages.skippedSlotsWithoutPageImage} slot(s) without stored example page image.`,
+    );
+
     console.log('[Generation Task Item] Direct visual slot fill starting', {
       taskItemId: params.item.id,
       taskId: params.item.task_id,
       sourcePdfName: params.item.source_pdf_name,
       slotCount: slotSchema.length,
       visionPageCount: visionPages.length,
+      referenceExamplePageCount: referenceExamplePages.pages.length,
     });
 
     let lastLoggedCompletedSlots = -1;
@@ -104,6 +222,7 @@ async function runGenerationTaskItemSlotFill(params: {
       pdfFileName: params.item.source_pdf_name,
       slots: slotSchema,
       visionPages,
+      referenceExamplePages: referenceExamplePages.pages,
       processStartedAtMs,
       processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
       onTrace: async ({ message }) => {

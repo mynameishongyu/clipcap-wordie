@@ -51,6 +51,10 @@ export interface PdfVisionPageInput {
   original_page_number?: number;
 }
 
+export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
+  example_pdf_file_name?: string;
+}
+
 interface ModelMatch {
   value?: string;
   snippet?: string;
@@ -573,6 +577,10 @@ function buildSlotReferencePromptData(slot: GenerationSlotSchemaItem) {
     example_slot_value: reference.example_slot_value ?? '',
     example_confidence: reference.example_confidence ?? null,
     example_match_type: reference.example_match_type ?? '',
+    example_page_image_note:
+      reference.example_bbox && reference.example_page_number
+        ? `If a reference example PDF image with page_number ${reference.example_page_number} is provided, the bbox is normalized against that image.`
+        : '',
   };
 }
 
@@ -1872,18 +1880,22 @@ function buildDirectVisionSlotFillPromptPayload(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
   pageNumbers: number[];
+  referencePageNumbers: number[];
 }) {
   return {
     task:
       'Inspect the provided new PDF page images directly and fill only the requested template slots. Do not run or return full OCR text.',
     document_name: input.documentName,
     page_numbers: input.pageNumbers,
+    reference_example_pdf_page_numbers_with_bbox: input.referencePageNumbers,
     slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
     strict_requirements: [
       'Return JSON only.',
       'Return the exact same slot_key copied from slot_definitions.',
       'slot_source describes where the template slot value came from.',
       'reference_example_pdf_evidence contains the reviewed example PDF page number, bbox, visible example value, and source text. Use it as a visual/location clue and value-type clue.',
+      'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
+      'For reference_example_pdf_evidence.example_bbox_normalized, page numbers refer to the provided Reference example PDF page images with the same page_number; do not renumber these reference pages.',
       'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
       'Do not copy example_slot_value unless the same value is visible in the new PDF images.',
       'For each slot, return a value only if it is visible or strongly inferable from the provided new PDF page images.',
@@ -1913,6 +1925,7 @@ async function extractSlotsFromVisionPageBatch(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
   visionPages: PdfVisionPageInput[];
+  referenceExamplePages: ReferencePdfVisionPageInput[];
   batchIndex: number;
   totalBatches: number;
   totalVisionPages: number;
@@ -1943,10 +1956,14 @@ async function extractSlotsFromVisionPageBatch(input: {
       );
       const requestLabel = `visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches}`;
       const llmConcurrency = getDirectVisionPagesLlmConcurrency();
+      const referencePageNumbers = input.referenceExamplePages.map(
+        (page) => page.page_number,
+      );
       const promptPayload = buildDirectVisionSlotFillPromptPayload({
         documentName: input.documentName,
         slots: input.slots,
         pageNumbers,
+        referencePageNumbers,
       });
       const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
 
@@ -1968,6 +1985,7 @@ async function extractSlotsFromVisionPageBatch(input: {
           llm_concurrency_env_name: 'PDF_FILL_VISION_PAGES_LLM_CONCURRENCY',
           llm_concurrency: llmConcurrency,
           page_numbers: pageNumbers,
+          reference_example_page_numbers: referencePageNumbers,
           total_vision_pages: input.totalVisionPages,
           messages: [
             {
@@ -2023,6 +2041,29 @@ async function extractSlotsFromVisionPageBatch(input: {
           text: JSON.stringify(promptPayload),
         },
       ];
+
+      input.referenceExamplePages.forEach((page) => {
+        content.push({
+          type: 'text',
+          text:
+            `Reference example PDF page ${page.page_number}` +
+            `${
+              typeof page.original_page_number === 'number'
+                ? ` (original example PDF page ${page.original_page_number})`
+                : ''
+            }${
+              page.example_pdf_file_name
+                ? ` from ${page.example_pdf_file_name}`
+                : ''
+            }. Use only the bboxes listed in slot_definitions for this page as layout/source clues; do not extract final values from this example image.`,
+        });
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: page.image_data_url,
+          },
+        });
+      });
 
       input.visionPages.forEach((page) => {
         content.push({
@@ -2197,6 +2238,7 @@ export async function fillSlotsFromVisionPages(params: {
   pdfFileName: string;
   slots: GenerationSlotSchemaItem[];
   visionPages: PdfVisionPageInput[];
+  referenceExamplePages?: ReferencePdfVisionPageInput[];
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
   onProgress?: (progress: {
@@ -2221,9 +2263,10 @@ export async function fillSlotsFromVisionPages(params: {
   const startedAt = Date.now();
   const batches = buildDirectVisionPageBatches(validVisionPages);
   const llmConcurrency = getDirectVisionPagesLlmConcurrency();
+  const referenceExamplePageCount = params.referenceExamplePages?.length ?? 0;
   const startedMessage =
     `[PDF Fill][DirectVision] Direct visual slot fill started for ${params.pdfFileName} ` +
-    `(vision pages: ${validVisionPages.length}, batches: ${batches.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
+    `(vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, batches: ${batches.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
   console.info(startedMessage);
   await params.onTrace?.({ message: startedMessage });
 
@@ -2234,10 +2277,11 @@ export async function fillSlotsFromVisionPages(params: {
     batches.map(async (batch, batchIndex) => {
       const batchResult = await extractSlotsFromVisionPageBatch({
         documentName: params.pdfFileName,
-        slots: params.slots,
-        visionPages: batch,
-        batchIndex,
-        totalBatches: batches.length,
+      slots: params.slots,
+      visionPages: batch,
+      referenceExamplePages: params.referenceExamplePages ?? [],
+      batchIndex,
+      totalBatches: batches.length,
         totalVisionPages: validVisionPages.length,
         onTrace: params.onTrace,
         processStartedAtMs: params.processStartedAtMs,
