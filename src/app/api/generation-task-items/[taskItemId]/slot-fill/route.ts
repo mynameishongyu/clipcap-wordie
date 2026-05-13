@@ -1,5 +1,5 @@
 import { after, NextResponse } from 'next/server';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { createCanvas, loadImage, type SKRSContext2D } from '@napi-rs/canvas';
 import { randomUUID } from 'crypto';
 import {
   fillSlotsFromVisionPages,
@@ -75,6 +75,76 @@ type ReferenceSlotBox = {
   exampleSlotValue: string;
 };
 
+const SLOT_KEY_LABEL_GLYPHS: Record<string, readonly string[]> = {
+  '0': ['111', '101', '101', '101', '111'],
+  '1': ['010', '110', '010', '010', '111'],
+  '2': ['111', '001', '111', '100', '111'],
+  '3': ['111', '001', '111', '001', '111'],
+  '4': ['101', '101', '111', '001', '001'],
+  '5': ['111', '100', '111', '001', '111'],
+  '6': ['111', '100', '111', '101', '111'],
+  '7': ['111', '001', '010', '010', '010'],
+  '8': ['111', '101', '111', '101', '111'],
+  '9': ['111', '101', '111', '001', '111'],
+  '-': ['000', '000', '111', '000', '000'],
+};
+
+const SLOT_KEY_LABEL_FALLBACK_GLYPH = ['111', '001', '011', '000', '010'];
+
+function getSlotKeyLabelTextSize(label: string, cellSize: number) {
+  const characterGap = Math.max(2, Math.round(cellSize * 0.55));
+  const glyphHeight = SLOT_KEY_LABEL_FALLBACK_GLYPH.length * cellSize;
+  const textWidth = Array.from(label).reduce((totalWidth, character, index) => {
+    const glyph =
+      SLOT_KEY_LABEL_GLYPHS[character] ?? SLOT_KEY_LABEL_FALLBACK_GLYPH;
+    const glyphWidth = (glyph[0]?.length ?? 3) * cellSize;
+
+    return totalWidth + glyphWidth + (index === label.length - 1 ? 0 : characterGap);
+  }, 0);
+
+  return {
+    characterGap,
+    width: textWidth,
+    height: glyphHeight,
+  };
+}
+
+function drawSlotKeyLabelText(params: {
+  context: SKRSContext2D;
+  label: string;
+  left: number;
+  top: number;
+  cellSize: number;
+  characterGap: number;
+}) {
+  let cursorLeft = params.left;
+
+  for (const character of Array.from(params.label)) {
+    const glyph =
+      SLOT_KEY_LABEL_GLYPHS[character] ?? SLOT_KEY_LABEL_FALLBACK_GLYPH;
+
+    glyph.forEach((row, rowIndex) => {
+      Array.from(row).forEach((value, columnIndex) => {
+        if (value !== '1') {
+          return;
+        }
+
+        const strokeSize = Math.max(1, Math.round(params.cellSize * 0.58));
+        const inset = Math.floor((params.cellSize - strokeSize) / 2);
+
+        params.context.fillRect(
+          cursorLeft + columnIndex * params.cellSize + inset,
+          params.top + rowIndex * params.cellSize + inset,
+          strokeSize,
+          strokeSize,
+        );
+      });
+    });
+
+    cursorLeft += (glyph[0]?.length ?? 3) * params.cellSize + params.characterGap;
+  }
+}
+
 async function buildAnnotatedReferencePageDataUrl(params: {
   imageBuffer: Buffer;
   slotBoxes: ReferenceSlotBox[];
@@ -85,16 +155,14 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   const canvas = createCanvas(width, height);
   const context = canvas.getContext('2d');
   const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
-  const labelFontSize = Math.max(
-    42,
-    Math.round(Math.min(width, height) * 0.018),
+  const labelCellSize = Math.max(
+    5,
+    Math.round(Math.min(width, height) * 0.0024),
   );
-  const labelPaddingX = Math.max(12, Math.round(labelFontSize * 0.45));
-  const labelPaddingY = Math.max(6, Math.round(labelFontSize * 0.22));
+  const labelPaddingX = Math.max(5, Math.round(labelCellSize * 0.7));
+  const labelPaddingY = Math.max(3, Math.round(labelCellSize * 0.45));
 
   context.drawImage(image, 0, 0, width, height);
-  context.font = `700 ${labelFontSize}px sans-serif`;
-  context.textBaseline = 'middle';
 
   params.slotBoxes.forEach((slotBox) => {
     const left = Math.max(0, Math.min(width, slotBox.bbox.x * width));
@@ -115,12 +183,9 @@ async function buildAnnotatedReferencePageDataUrl(params: {
     context.strokeRect(left, top, boxWidth, boxHeight);
 
     const label = slotBox.slotKey;
-    const labelMetrics = context.measureText(label);
-    const labelWidth = Math.max(
-      labelFontSize * 3.2,
-      labelMetrics.width + labelPaddingX * 2,
-    );
-    const labelHeight = labelFontSize + labelPaddingY * 2;
+    const labelTextSize = getSlotKeyLabelTextSize(label, labelCellSize);
+    const labelWidth = labelTextSize.width + labelPaddingX * 2;
+    const labelHeight = labelTextSize.height + labelPaddingY * 2;
     const labelLeft = Math.max(
       0,
       Math.min(width - labelWidth, left - lineWidth),
@@ -133,11 +198,14 @@ async function buildAnnotatedReferencePageDataUrl(params: {
     context.fillStyle = 'rgba(255, 153, 0, 0.92)';
     context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
     context.fillStyle = '#111111';
-    context.fillText(
+    drawSlotKeyLabelText({
+      context,
       label,
-      labelLeft + labelPaddingX,
-      labelTop + labelHeight / 2,
-    );
+      left: labelLeft + labelPaddingX,
+      top: labelTop + labelPaddingY,
+      cellSize: labelCellSize,
+      characterGap: labelTextSize.characterGap,
+    });
   });
 
   const annotatedBuffer = canvas.toBuffer('image/png');
