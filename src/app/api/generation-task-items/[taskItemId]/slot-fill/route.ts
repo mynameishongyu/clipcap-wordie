@@ -85,9 +85,12 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   const canvas = createCanvas(width, height);
   const context = canvas.getContext('2d');
   const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
-  const labelFontSize = Math.max(16, Math.round(Math.min(width, height) * 0.012));
-  const labelPaddingX = Math.max(4, Math.round(labelFontSize * 0.35));
-  const labelPaddingY = Math.max(2, Math.round(labelFontSize * 0.2));
+  const labelFontSize = Math.max(
+    42,
+    Math.round(Math.min(width, height) * 0.018),
+  );
+  const labelPaddingX = Math.max(12, Math.round(labelFontSize * 0.45));
+  const labelPaddingY = Math.max(6, Math.round(labelFontSize * 0.22));
 
   context.drawImage(image, 0, 0, width, height);
   context.font = `700 ${labelFontSize}px sans-serif`;
@@ -113,7 +116,10 @@ async function buildAnnotatedReferencePageDataUrl(params: {
 
     const label = slotBox.slotKey;
     const labelMetrics = context.measureText(label);
-    const labelWidth = labelMetrics.width + labelPaddingX * 2;
+    const labelWidth = Math.max(
+      labelFontSize * 3.2,
+      labelMetrics.width + labelPaddingX * 2,
+    );
     const labelHeight = labelFontSize + labelPaddingY * 2;
     const labelLeft = Math.max(
       0,
@@ -124,9 +130,9 @@ async function buildAnnotatedReferencePageDataUrl(params: {
       Math.min(height - labelHeight, top - labelHeight - lineWidth),
     );
 
-    context.fillStyle = 'rgba(255, 153, 0, 0.9)';
+    context.fillStyle = 'rgba(255, 153, 0, 0.92)';
     context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
-    context.fillStyle = '#ffffff';
+    context.fillStyle = '#111111';
     context.fillText(
       label,
       labelLeft + labelPaddingX,
