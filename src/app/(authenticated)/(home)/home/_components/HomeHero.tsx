@@ -266,8 +266,10 @@ async function preparePdfVisionPageAssets(file: File) {
     {
       pages: visionPages.map((page) => ({
         pageNumber: page.pageNumber,
-        dataUrlLength: page.imageDataUrl.length,
-        dataUrlPrefix: page.imageDataUrl.slice(0, 30),
+        blobSize: page.imageBlob?.size ?? null,
+        blobType: page.imageBlob?.type ?? null,
+        dataUrlLength: page.imageDataUrl?.length ?? null,
+        dataUrlPrefix: page.imageDataUrl?.slice(0, 30) ?? null,
         crop: page.crop,
       })),
     },

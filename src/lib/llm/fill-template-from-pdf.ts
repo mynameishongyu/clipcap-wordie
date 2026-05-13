@@ -1406,6 +1406,65 @@ function resolveMatchPageNumber(firstMatch?: ModelMatch) {
   return null;
 }
 
+function resolveProvidedUploadedPageNumber(
+  pageNumber: number | null,
+  uploadedPageNumberSet: Set<number>,
+) {
+  if (!Number.isInteger(pageNumber) || !pageNumber || pageNumber <= 0) {
+    return null;
+  }
+
+  if (uploadedPageNumberSet.has(pageNumber)) {
+    return pageNumber;
+  }
+
+  return null;
+}
+
+function sanitizeEvidencePageNumbers(
+  pageNumbers: number[],
+  validUploadedPageNumbers: number[],
+  fallbackUploadedPageNumbers: number[] = [],
+) {
+  const uploadedPageNumberSet = new Set(validUploadedPageNumbers);
+  const normalizedPageNumbers = Array.from(
+    new Set(
+      pageNumbers
+        .map((pageNumber) =>
+          resolveProvidedUploadedPageNumber(pageNumber, uploadedPageNumberSet),
+        )
+        .filter((pageNumber): pageNumber is number => pageNumber !== null),
+    ),
+  ).sort((left, right) => left - right);
+
+  if (normalizedPageNumbers.length > 0) {
+    return normalizedPageNumbers;
+  }
+
+  return Array.from(
+    new Set(
+      fallbackUploadedPageNumbers.filter((pageNumber) =>
+        uploadedPageNumberSet.has(pageNumber),
+      ),
+    ),
+  ).sort((left, right) => left - right);
+}
+
+function sanitizeExtractedItemEvidencePages(
+  items: Array<z.infer<typeof generationExtractedItemSchema>>,
+  validUploadedPageNumbers: number[],
+  fallbackUploadedPageNumbers: number[],
+) {
+  return items.map((item) => ({
+    ...item,
+    evidence_page_numbers: sanitizeEvidencePageNumbers(
+      item.evidence_page_numbers ?? [],
+      validUploadedPageNumbers,
+      fallbackUploadedPageNumbers,
+    ),
+  }));
+}
+
 function buildSlotBatches<T>(items: T[], batchSize: number) {
   const batches: T[][] = [];
 
@@ -1897,6 +1956,8 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
       'For reference_example_pdf_evidence.example_bbox_normalized, page numbers refer to the provided Reference example PDF page images with the same page_number; do not renumber these reference pages.',
       'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
+      'For matches[0].page_number, use only the uploaded-page sequence shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". This is the only valid page numbering system.',
+      'Do not use original PDF page numbers, page numbers printed inside the PDF image, screenshot page numbers, document page numbers, or reference example page numbers.',
       'Do not copy example_slot_value unless the same value is visible in the new PDF images.',
       'For each slot, return a value only if it is visible or strongly inferable from the provided new PDF page images.',
       'For dates, accept equivalent visible formats such as 2026/3/30, 2026-03-30, 2026.3.30, and return final_value in Chinese format such as 2026年3月30日.',
@@ -1946,6 +2007,14 @@ async function extractSlotsFromVisionPageBatch(input: {
 
     try {
       const pageNumbers = input.visionPages.map((page) => page.page_number);
+      const allUploadedPageNumbers = Array.from(
+        new Set(
+          input.visionPages
+            .map((page) => page.page_number)
+            .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0),
+        ),
+      ).sort((left, right) => left - right);
+      const uploadedPageNumberSet = new Set(allUploadedPageNumbers);
       const pageSizeSummary = input.visionPages.map((page) => ({
         pageNumber: page.page_number,
         bytes: estimateDataUrlBytes(page.image_data_url),
@@ -2068,11 +2137,7 @@ async function extractSlotsFromVisionPageBatch(input: {
       input.visionPages.forEach((page) => {
         content.push({
           type: 'text',
-          text: `New PDF page ${page.page_number}${
-            typeof page.original_page_number === 'number'
-              ? ` (original uploaded PDF page ${page.original_page_number})`
-              : ''
-          }`,
+          text: `New PDF uploaded page ${page.page_number}`,
         });
         content.push({
           type: 'image_url',
@@ -2141,7 +2206,11 @@ async function extractSlotsFromVisionPageBatch(input: {
         extracted_items: normalized.extracted_items ?? [],
       });
       const extractedItemsFromSchema = parsedExtractedItems.success
-        ? parsedExtractedItems.data.extracted_items
+        ? sanitizeExtractedItemEvidencePages(
+            parsedExtractedItems.data.extracted_items,
+            allUploadedPageNumbers,
+            pageNumbers,
+          )
         : [];
       const extractedItemsFromResults = input.slots.flatMap((slot) => {
         const firstResult = findResultForSlot(slot, normalized.results, {
@@ -2165,6 +2234,10 @@ async function extractSlotsFromVisionPageBatch(input: {
           firstMatch,
         );
         const matchPageNumber = resolveMatchPageNumber(firstMatch);
+        const validMatchPageNumber = resolveProvidedUploadedPageNumber(
+          matchPageNumber,
+          uploadedPageNumberSet,
+        );
 
         return [
           {
@@ -2173,7 +2246,9 @@ async function extractSlotsFromVisionPageBatch(input: {
             meaning_to_applicant: slot.meaning_to_applicant,
             original_value: extractedValue,
             evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
-            evidence_page_numbers: matchPageNumber ? [matchPageNumber] : pageNumbers,
+            evidence_page_numbers: validMatchPageNumber
+              ? [validMatchPageNumber]
+              : pageNumbers,
             notes: '',
             confidence:
               typeof firstMatch?.confidence === 'number'

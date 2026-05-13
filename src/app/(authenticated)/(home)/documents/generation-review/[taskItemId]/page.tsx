@@ -198,6 +198,46 @@ function formatPageNumbers(pageNumbers: number[]) {
   return `PDF 第 ${pageNumbers.join('、')} 页`;
 }
 
+function resolveUploadedPageNumber(
+  pageNumber: number,
+  pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
+) {
+  if (!Number.isInteger(pageNumber) || pageNumber <= 0) {
+    return null;
+  }
+
+  if (pageNumberMapping.length === 0) {
+    return pageNumber;
+  }
+
+  const uploadedPageNumbers = pageNumberMapping
+    .map((entry) => entry.uploaded_page_number)
+    .filter((value) => Number.isInteger(value) && value > 0)
+    .sort((left, right) => left - right);
+  const uploadedPageNumberSet = new Set(uploadedPageNumbers);
+
+  if (uploadedPageNumberSet.has(pageNumber)) {
+    return pageNumber;
+  }
+
+  return null;
+}
+
+function resolveUploadedPageNumbers(
+  pageNumbers: number[],
+  pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
+) {
+  return Array.from(
+    new Set(
+      pageNumbers
+        .map((pageNumber) =>
+          resolveUploadedPageNumber(pageNumber, pageNumberMapping),
+        )
+        .filter((pageNumber): pageNumber is number => pageNumber !== null),
+    ),
+  ).sort((left, right) => left - right);
+}
+
 function normalizeUploadedPageNumberMapping(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
@@ -223,26 +263,24 @@ function formatEvidenceSource(
   uploadedPageNumbers: number[],
   pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
 ) {
-  if (uploadedPageNumbers.length === 0) {
+  const normalizedUploadedPageNumbers = resolveUploadedPageNumbers(
+    uploadedPageNumbers,
+    pageNumberMapping,
+  );
+
+  if (normalizedUploadedPageNumbers.length === 0) {
     return '未定位页码';
   }
 
   if (pageNumberMapping.length === 0) {
-    return formatPageNumbers(uploadedPageNumbers);
+    return formatPageNumbers(normalizedUploadedPageNumbers);
   }
 
-  const mappingMap = new Map(
-    pageNumberMapping.map((entry) => [entry.uploaded_page_number, entry.original_page_number]),
-  );
-  const originalPageNumbers = uploadedPageNumbers
-    .map((uploadedPageNumber) => mappingMap.get(uploadedPageNumber))
-    .filter((pageNumber): pageNumber is number => typeof pageNumber === 'number');
-
-  if (originalPageNumbers.length === 0) {
-    return formatPageNumbers(uploadedPageNumbers);
+  if (normalizedUploadedPageNumbers.length === 0) {
+    return '未定位页码';
   }
 
-  return `上传页序第 ${uploadedPageNumbers.join('、')} 页，对应原 PDF 第 ${originalPageNumbers.join('、')} 页`;
+  return `上传页序第 ${normalizedUploadedPageNumbers.join('、')} 页`;
 }
 
 function hasManualFillPending(value: string | null | undefined) {
@@ -1186,6 +1224,10 @@ export default function GenerationReviewPage() {
         .sort((left, right) => left.pageNumber - right.pageNumber),
     [taskItemQuery.data?.item.pdf_preview_pages],
   );
+  const validPdfPreviewPageNumbers = useMemo(
+    () => new Set(pdfPreviewPages.map((page) => page.pageNumber)),
+    [pdfPreviewPages],
+  );
   const uploadedPageNumberMapping = normalizeUploadedPageNumberMapping(
     taskItemQuery.data?.item.llm_input &&
       typeof taskItemQuery.data.item.llm_input === 'object'
@@ -1241,7 +1283,10 @@ export default function GenerationReviewPage() {
   );
 
   const activePdfPageNumber =
-    activeFilledItem?.evidence_page_numbers?.find((pageNumber) => pageNumber > 0) ?? null;
+    resolveUploadedPageNumbers(
+      activeFilledItem?.evidence_page_numbers ?? [],
+      uploadedPageNumberMapping,
+    ).find((pageNumber) => validPdfPreviewPageNumbers.has(pageNumber)) ?? null;
   const updatePdfZoom = (updater: (currentZoom: number) => number) => {
     setPdfZoom((currentZoom) => clampPdfZoom(updater(currentZoom)));
   };
@@ -1565,10 +1610,10 @@ export default function GenerationReviewPage() {
                             }}
                             variant="filled"
                           >
-                            上传第 {page.pageNumber} 页 / 原 PDF 第 {page.originalPageNumber} 页
+                            上传第 {page.pageNumber} 页
                           </Badge>
                           <PdfPreviewPageCanvas
-                            alt={`${item.source_pdf_name} 第 ${page.originalPageNumber} 页`}
+                            alt={`${item.source_pdf_name} 上传第 ${page.pageNumber} 页`}
                             displayWidth={zoomedPageWidth}
                             imageUrl={page.imageUrl}
                             pageNumber={page.pageNumber}

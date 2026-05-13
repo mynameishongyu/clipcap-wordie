@@ -19,7 +19,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
-import { parsePdf, renderPdfPagesForVision } from '@/src/lib/pdf/client-pdf';
+import {
+  parsePdf,
+  renderPdfPagesForVision,
+  type PdfVisionPageInput,
+} from '@/src/lib/pdf/client-pdf';
 import {
   useGenerationTask,
   useProcessGenerationTaskItem,
@@ -48,7 +52,7 @@ declare global {
       originalPageNumber: number;
       uploadedPageNumber: number;
       previewUrl: string;
-      imageDataUrl: string;
+      imageDataUrl?: string;
     }>;
     clipcapOcrTextPages?: Array<{
       fileName: string;
@@ -145,6 +149,18 @@ function dataUrlToObjectUrl(dataUrl: string) {
   }
 
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
+function pdfVisionPageToObjectUrl(visionPage: PdfVisionPageInput) {
+  if (visionPage.imageBlob) {
+    return URL.createObjectURL(visionPage.imageBlob);
+  }
+
+  if (visionPage.imageDataUrl) {
+    return dataUrlToObjectUrl(visionPage.imageDataUrl);
+  }
+
+  throw new Error('PDF 页面图片数据无效，无法生成预览链接。');
 }
 
 function getStatusColor(status: string) {
@@ -845,14 +861,16 @@ export function BatchGenerateModal({
             const uploadedPageNumber = uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
             const originalPageNumber =
               uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
-            const previewUrl = dataUrlToObjectUrl(visionPage.imageDataUrl);
+            const previewUrl = pdfVisionPageToObjectUrl(visionPage);
 
             nextImages.push({
               fileName: file.name,
               originalPageNumber,
               uploadedPageNumber,
               previewUrl,
-              imageDataUrl: visionPage.imageDataUrl,
+              ...(visionPage.imageDataUrl
+                ? { imageDataUrl: visionPage.imageDataUrl }
+                : {}),
             });
           });
 

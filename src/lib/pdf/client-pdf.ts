@@ -15,7 +15,8 @@ export interface ParsedPdfDocument {
 
 export interface PdfVisionPageInput {
   pageNumber: number;
-  imageDataUrl: string;
+  imageBlob?: Blob;
+  imageDataUrl?: string;
   crop?: PdfVisionPageCrop;
 }
 
@@ -284,14 +285,25 @@ function createPdfVisionCanvas(canvas: HTMLCanvasElement) {
   };
 }
 
-function canvasToImageDataUrl(
+function canvasToImageBlob(
   canvas: HTMLCanvasElement,
   imageFormat: PdfRenderImageFormat,
   imageQuality: number,
 ) {
-  return imageFormat === 'image/png'
-    ? canvas.toDataURL(imageFormat)
-    : canvas.toDataURL(imageFormat, imageQuality);
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error('Failed to export PDF page canvas as an image blob.'));
+          return;
+        }
+
+        resolve(blob);
+      },
+      imageFormat,
+      imageFormat === 'image/png' ? undefined : imageQuality,
+    );
+  });
 }
 
 export async function renderPdfPagesForVision(
@@ -322,14 +334,15 @@ export async function renderPdfPagesForVision(
     }).promise;
 
     const visionCanvas = createPdfVisionCanvas(canvas);
+    const imageBlob = await canvasToImageBlob(
+      visionCanvas.canvas,
+      imageFormat,
+      imageQuality,
+    );
 
     results.push({
       pageNumber,
-      imageDataUrl: canvasToImageDataUrl(
-        visionCanvas.canvas,
-        imageFormat,
-        imageQuality,
-      ),
+      imageBlob,
       ...(visionCanvas.crop ? { crop: visionCanvas.crop } : {}),
     });
   }

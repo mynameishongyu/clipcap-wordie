@@ -65,6 +65,22 @@ function getImageExtensionFromDataUrl(dataUrl: string) {
   return 'img';
 }
 
+function getImageExtensionFromContentType(contentType: string) {
+  if (contentType.includes('png')) {
+    return 'png';
+  }
+
+  if (contentType.includes('jpeg') || contentType.includes('jpg')) {
+    return 'jpg';
+  }
+
+  if (contentType.includes('webp')) {
+    return 'webp';
+  }
+
+  return 'img';
+}
+
 async function dataUrlToBlob(dataUrl: string) {
   const response = await fetch(dataUrl);
 
@@ -73,6 +89,33 @@ async function dataUrlToBlob(dataUrl: string) {
   }
 
   return response.blob();
+}
+
+async function getPdfVisionPageBlob(visionPage: PdfVisionPageInput) {
+  if (visionPage.imageBlob) {
+    return visionPage.imageBlob;
+  }
+
+  if (visionPage.imageDataUrl) {
+    return dataUrlToBlob(visionPage.imageDataUrl);
+  }
+
+  throw new Error('PDF page image data is empty, cannot upload to storage.');
+}
+
+function getPdfVisionPageImageExtension(
+  visionPage: PdfVisionPageInput,
+  blob: Blob,
+) {
+  if (blob.type) {
+    return getImageExtensionFromContentType(blob.type);
+  }
+
+  if (visionPage.imageDataUrl) {
+    return getImageExtensionFromDataUrl(visionPage.imageDataUrl);
+  }
+
+  return 'img';
 }
 
 function getPdfVisionUploadConcurrency() {
@@ -233,12 +276,12 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
         item.ocrVisionPages,
         uploadConcurrency,
         async (visionPage, index) => {
-          const imageBlob = await dataUrlToBlob(visionPage.imageDataUrl);
+          const imageBlob = await getPdfVisionPageBlob(visionPage);
           const uploadedPageNumber =
             item.uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
           const originalPageNumber =
             item.uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
-          const extension = getImageExtensionFromDataUrl(visionPage.imageDataUrl);
+          const extension = getPdfVisionPageImageExtension(visionPage, imageBlob);
           const ocrImageStoragePath =
             `${user.id}/staged-pdf-pages/${crypto.randomUUID()}-` +
             `${sanitizeStorageFileName(item.file.name).replace(/\.pdf$/i, '')}` +

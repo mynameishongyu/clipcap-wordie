@@ -67,6 +67,22 @@ function getImageContentTypeFromDataUrl(dataUrl: string) {
   return 'image/png';
 }
 
+function getImageExtensionFromContentType(contentType: string) {
+  if (contentType.includes('png')) {
+    return 'png';
+  }
+
+  if (contentType.includes('jpeg') || contentType.includes('jpg')) {
+    return 'jpg';
+  }
+
+  if (contentType.includes('webp')) {
+    return 'webp';
+  }
+
+  return 'img';
+}
+
 async function dataUrlToBlob(dataUrl: string) {
   const response = await fetch(dataUrl);
 
@@ -75,6 +91,48 @@ async function dataUrlToBlob(dataUrl: string) {
   }
 
   return response.blob();
+}
+
+async function getPdfVisionPageBlob(visionPage: PdfVisionPageInput) {
+  if (visionPage.imageBlob) {
+    return visionPage.imageBlob;
+  }
+
+  if (visionPage.imageDataUrl) {
+    return dataUrlToBlob(visionPage.imageDataUrl);
+  }
+
+  throw new Error('PDF page image data is empty, cannot upload to Supabase Storage.');
+}
+
+function getPdfVisionPageContentType(
+  visionPage: PdfVisionPageInput,
+  blob: Blob,
+) {
+  if (blob.type) {
+    return blob.type;
+  }
+
+  if (visionPage.imageDataUrl) {
+    return getImageContentTypeFromDataUrl(visionPage.imageDataUrl);
+  }
+
+  return 'image/png';
+}
+
+function getPdfVisionPageImageExtension(
+  visionPage: PdfVisionPageInput,
+  blob: Blob,
+) {
+  if (blob.type) {
+    return getImageExtensionFromContentType(blob.type);
+  }
+
+  if (visionPage.imageDataUrl) {
+    return getImageExtensionFromDataUrl(visionPage.imageDataUrl);
+  }
+
+  return 'img';
 }
 
 function getPdfVisionUploadConcurrency() {
@@ -148,13 +206,12 @@ export async function uploadPdfVisionPagesToSupabase(input: {
     input.visionPages,
     uploadConcurrency,
     async (visionPage, index) => {
-      const blob = await dataUrlToBlob(visionPage.imageDataUrl);
-      const extension = getImageExtensionFromDataUrl(visionPage.imageDataUrl);
+      const blob = await getPdfVisionPageBlob(visionPage);
+      const extension = getPdfVisionPageImageExtension(visionPage, blob);
       const storagePath =
         `${user.id}/template-extraction-ocr/${crypto.randomUUID()}-` +
         `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
-      const contentType =
-        blob.type || getImageContentTypeFromDataUrl(visionPage.imageDataUrl);
+      const contentType = getPdfVisionPageContentType(visionPage, blob);
       const localPreviewUrl =
         typeof URL !== 'undefined' ? URL.createObjectURL(blob) : undefined;
 
