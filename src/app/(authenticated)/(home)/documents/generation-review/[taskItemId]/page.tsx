@@ -499,6 +499,7 @@ function collectParagraphDecorations(
         itemId: decoration.itemId,
         start: Math.max(0, decoration.start - segmentStart),
         end: Math.min(segment.text.length, decoration.end - segmentStart),
+        replacementText: decoration.replacementText,
         segmentId: segment.id,
         continuesFromPrevious: decoration.start < segmentStart,
         continuesToNext: decoration.end > segmentEnd,
