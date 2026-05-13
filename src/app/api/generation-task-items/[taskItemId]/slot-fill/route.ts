@@ -92,7 +92,7 @@ const SLOT_KEY_LABEL_GLYPHS: Record<string, readonly string[]> = {
 const SLOT_KEY_LABEL_FALLBACK_GLYPH = ['111', '001', '011', '000', '010'];
 
 function getSlotKeyLabelTextSize(label: string, cellSize: number) {
-  const characterGap = Math.max(2, Math.round(cellSize * 0.55));
+  const characterGap = 0;
   const glyphHeight = SLOT_KEY_LABEL_FALLBACK_GLYPH.length * cellSize;
   const textWidth = Array.from(label).reduce((totalWidth, character, index) => {
     const glyph =
@@ -156,11 +156,11 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   const context = canvas.getContext('2d');
   const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
   const labelCellSize = Math.max(
-    5,
-    Math.round(Math.min(width, height) * 0.0024),
+    4,
+    Math.round(Math.min(width, height) * 0.0018),
   );
-  const labelPaddingX = Math.max(5, Math.round(labelCellSize * 0.7));
-  const labelPaddingY = Math.max(3, Math.round(labelCellSize * 0.45));
+  const labelPaddingX = Math.max(4, Math.round(labelCellSize * 0.55));
+  const labelPaddingY = Math.max(2, Math.round(labelCellSize * 0.35));
 
   context.drawImage(image, 0, 0, width, height);
 
