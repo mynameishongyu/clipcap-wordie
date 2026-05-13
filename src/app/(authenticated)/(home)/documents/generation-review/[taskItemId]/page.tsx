@@ -992,30 +992,88 @@ function buildFilledPreviewSlots(
   originalSlots: TemplateOriginalSlot[],
   filledItems: EditableReviewedItem[],
 ) {
+  const filledItemsByOriginalSlotKey = new Map<string, EditableReviewedItem>();
+
+  filledItems.forEach((item) => {
+    const linkedOriginalSlotKey = resolveLinkedOriginalSlotKey(
+      item,
+      originalSlots,
+      filledItems,
+    );
+
+    if (!linkedOriginalSlotKey || filledItemsByOriginalSlotKey.has(linkedOriginalSlotKey)) {
+      return;
+    }
+
+    filledItemsByOriginalSlotKey.set(linkedOriginalSlotKey, item);
+  });
+
   return originalSlots.map((slot) => {
-    const linkedFilledSlotKey = resolveLinkedFilledSlotKey(
+    const fallbackLinkedFilledSlotKey = resolveLinkedFilledSlotKey(
       slot,
       originalSlots,
       filledItems,
     );
-    const linkedFilledItem = filledItems.find(
-      (item) => item.slot_key === linkedFilledSlotKey,
-    );
+    const linkedFilledItem =
+      filledItemsByOriginalSlotKey.get(slot.slot_key) ??
+      filledItems.find((item) => item.slot_key === fallbackLinkedFilledSlotKey);
     const replacementValue = linkedFilledItem?.original_value?.trim();
 
     if (!replacementValue) {
       return {
         ...slot,
-        linked_filled_slot_key: linkedFilledSlotKey ?? undefined,
+        linked_filled_slot_key: linkedFilledItem?.slot_key ?? fallbackLinkedFilledSlotKey ?? undefined,
       };
     }
 
     return {
       ...slot,
-      linked_filled_slot_key: linkedFilledSlotKey ?? undefined,
+      linked_filled_slot_key: linkedFilledItem?.slot_key ?? fallbackLinkedFilledSlotKey ?? undefined,
       replacement_value: replacementValue,
     };
   });
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildFilledTemplatePreviewHtml(
+  html: string | null | undefined,
+  slots: TemplateOriginalSlot[],
+  activeSlotKey: string | null,
+) {
+  if (!html) {
+    return '';
+  }
+
+  return slots.reduce((currentHtml, slot) => {
+    const replacementValue = slot.replacement_value?.trim();
+    const originalValue =
+      slot.original_value.trim() || slot.original_doc_position.trim();
+
+    if (!replacementValue || !originalValue || replacementValue === originalValue) {
+      return currentHtml;
+    }
+
+    const escapedOriginalValue = escapeHtml(originalValue);
+    const escapedReplacementValue = escapeHtml(replacementValue);
+    const escapedSlotKey = escapeHtml(slot.slot_key);
+    const isActive = slot.slot_key === activeSlotKey;
+    const replacementMarkup = `<mark data-slot-id="${escapedSlotKey}" style="background:${isActive ? '#ffd16666' : '#38d39f22'};border:1px solid ${isActive ? '#f59f00' : '#7adfb8'};border-radius:6px;padding:0 3px;box-shadow:${isActive ? '0 0 0 2px rgba(245, 159, 0, 0.35), 0 0 22px rgba(245, 159, 0, 0.24)' : 'none'};scroll-margin-block:140px;">${escapedReplacementValue}</mark>`;
+    const originalValuePattern = new RegExp(escapeRegExp(escapedOriginalValue));
+
+    return currentHtml.replace(originalValuePattern, replacementMarkup);
+  }, html);
 }
 
 export default function GenerationReviewPage() {
@@ -1082,6 +1140,8 @@ export default function GenerationReviewPage() {
     taskItemQuery.data?.item.template_preview_slots ?? null;
   const templatePreviewUploadText =
     taskItemQuery.data?.item.template_preview_upload_text ?? null;
+  const templatePreviewHtmlInput =
+    taskItemQuery.data?.item.template_preview_html ?? null;
   const templatePreviewDocument = useMemo(
     () => normalizeParsedDocument(templatePreviewDocumentInput),
     [templatePreviewDocumentInput],
@@ -1156,6 +1216,15 @@ export default function GenerationReviewPage() {
           )
         : null,
     [activeOriginalSlotKey, filledPreviewSlots, templatePreviewDocument],
+  );
+  const filledTemplatePreviewHtml = useMemo(
+    () =>
+      buildFilledTemplatePreviewHtml(
+        templatePreviewHtmlInput,
+        filledPreviewSlots,
+        activeOriginalSlotKey,
+      ),
+    [activeOriginalSlotKey, filledPreviewSlots, templatePreviewHtmlInput],
   );
   const jsonPreview = useMemo(
     () =>
@@ -1395,7 +1464,7 @@ export default function GenerationReviewPage() {
                       {structuredTemplatePreview ? (
                         structuredTemplatePreview
                       ) : (
-                        <div dangerouslySetInnerHTML={{ __html: item.template_preview_html ?? '' }} />
+                        <div dangerouslySetInnerHTML={{ __html: filledTemplatePreviewHtml }} />
                       )}
                     </div>
                   </Paper>
