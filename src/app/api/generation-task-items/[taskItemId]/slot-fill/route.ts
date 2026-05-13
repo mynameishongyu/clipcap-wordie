@@ -384,6 +384,69 @@ async function loadReferenceExamplePagesWithBbox(params: {
   };
 }
 
+async function appendVisionPageImageDebugTraces(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskItemId: string;
+  visionPages: ReturnType<typeof normalizeVisionPages>;
+  ocrImageAssets: ReturnType<typeof normalizeOcrImageAssets>;
+}) {
+  const assetsByUploadedPageNumber = new Map(
+    params.ocrImageAssets.map((asset) => [asset.uploaded_page_number, asset]),
+  );
+
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[PDF Fill][VisionPageImageOrder] ${JSON.stringify(
+      params.visionPages.map((page, index) => {
+        const asset = assetsByUploadedPageNumber.get(page.page_number);
+
+        return {
+          sequence_index: index + 1,
+          uploaded_page_number: page.page_number,
+          original_page_number:
+            page.original_page_number ??
+            asset?.original_page_number ??
+            page.page_number,
+          storage_path: asset?.storage_path ?? null,
+          has_data_url: Boolean(page.image_data_url),
+        };
+      }),
+    )}`,
+  );
+
+  for (const page of params.visionPages) {
+    const asset = assetsByUploadedPageNumber.get(page.page_number);
+    let signedUrl: string | null = null;
+    let signedUrlErrorMessage: string | null = null;
+
+    if (asset?.storage_path) {
+      const { data, error } = await params.admin.storage
+        .from('generation-pdfs')
+        .createSignedUrl(asset.storage_path, 60 * 60 * 24);
+
+      if (error || !data?.signedUrl) {
+        signedUrlErrorMessage =
+          error?.message ?? `Missing signed URL for ${asset.storage_path}`;
+      } else {
+        signedUrl = data.signedUrl;
+      }
+    }
+
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[PDF Fill][VisionPageImage] uploaded_page=${page.page_number}, original_page=${
+        page.original_page_number ??
+        asset?.original_page_number ??
+        page.page_number
+      }, storage_path=${asset?.storage_path ?? 'none'}, signed_url=${
+        signedUrl ?? 'none'
+      }, signed_url_error=${signedUrlErrorMessage ?? 'none'}`,
+    );
+  }
+}
+
 async function runGenerationTaskItemSlotFill(params: {
   item: GenerationTaskItemRecord;
   actorEmail: string | null;
@@ -461,6 +524,13 @@ async function runGenerationTaskItemSlotFill(params: {
       params.item.id,
       '槽位回填阶段：跳过新 PDF OCR，直接使用槽位来源、示例 PDF 定位信息和新 PDF 页面图片调用 VISION_LLM。',
     );
+
+    await appendVisionPageImageDebugTraces({
+      admin,
+      taskItemId: params.item.id,
+      visionPages,
+      ocrImageAssets,
+    });
 
     await appendProcessingTrace(
       admin,
