@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import {
+  getPdfVisionUploadConcurrency,
   parsePdf,
   renderPdfPagesForVision,
   type PdfVisionPageInput,
@@ -1019,13 +1020,23 @@ export function BatchGenerateModal({
               original_page_number: originalPageNumber,
             }),
           );
+          const pdfPageRenderConcurrency = getPdfVisionUploadConcurrency();
           logSubmissionStage({
             title: '正在生成 PDF 页面图片',
-            description: `${file.name}：正在生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页）。`,
+            description: `${file.name}：正在并行生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页，并发数 ${pdfPageRenderConcurrency}）。`,
           });
           const ocrVisionPages = await renderPdfPagesForVision(
             file,
             selectedOriginalPageNumbers,
+            {
+              concurrency: pdfPageRenderConcurrency,
+              onPageRendered: ({ index, total }) => {
+                logSubmissionStage({
+                  title: '正在生成 PDF 页面图片',
+                  description: `${file.name}：已生成 ${index}/${total} 张 PDF 页面图片，并发数 ${pdfPageRenderConcurrency}。`,
+                });
+              },
+            },
           );
           logSubmissionStage({
             title: 'PDF 页面图片生成完成',

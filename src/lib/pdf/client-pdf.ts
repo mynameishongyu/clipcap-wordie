@@ -33,6 +33,8 @@ export interface PdfVisionPageCrop {
 const DEFAULT_PDF_RENDER_SCALE = 6.0;
 const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
+const DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY = 3;
+const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
 const PDF_AUTO_CROP_WHITE_MARGIN = true;
 const PDF_CROP_WHITE_THRESHOLD = 245;
 const PDF_CROP_CONTENT_DIFFERENCE_THRESHOLD = 18;
@@ -97,6 +99,46 @@ export function getPdfRenderConfig() {
     imageFormat: getPdfRenderImageFormat(),
     imageQuality: getPdfRenderJpegQuality(),
   };
+}
+
+export function getPdfVisionUploadConcurrency() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_VISION_UPLOAD_CONCURRENCY,
+  );
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY;
+  }
+
+  return Math.min(
+    MAX_PDF_VISION_UPLOAD_CONCURRENCY,
+    Math.max(1, Math.floor(parsedValue)),
+  );
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        const currentItem = items[currentIndex];
+
+        if (!currentItem) {
+          continue;
+        }
+
+        await worker(currentItem, currentIndex);
+      }
+    }),
+  );
 }
 
 async function loadPdfJs() {
@@ -309,12 +351,27 @@ function canvasToImageBlob(
 export async function renderPdfPagesForVision(
   file: File,
   pageNumbers: number[],
+  options?: {
+    concurrency?: number;
+    onPageRendered?: (input: {
+      pageNumber: number;
+      index: number;
+      total: number;
+    }) => void;
+  },
 ): Promise<PdfVisionPageInput[]> {
   const pdf = await loadPdfDocument(file);
-  const results: PdfVisionPageInput[] = [];
+  const results: Array<PdfVisionPageInput | undefined> = Array.from({
+    length: pageNumbers.length,
+  });
   const { scale, imageFormat, imageQuality } = getPdfRenderConfig();
+  const renderConcurrency = Math.min(
+    getPdfVisionUploadConcurrency(),
+    Math.max(1, Math.floor(options?.concurrency ?? 1)),
+  );
+  let completedPageCount = 0;
 
-  for (const pageNumber of pageNumbers) {
+  await runWithConcurrency(pageNumbers, renderConcurrency, async (pageNumber, index) => {
     const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
@@ -340,12 +397,18 @@ export async function renderPdfPagesForVision(
       imageQuality,
     );
 
-    results.push({
+    results[index] = {
       pageNumber,
       imageBlob,
       ...(visionCanvas.crop ? { crop: visionCanvas.crop } : {}),
+    };
+    completedPageCount += 1;
+    options?.onPageRendered?.({
+      pageNumber,
+      index: completedPageCount,
+      total: pageNumbers.length,
     });
-  }
+  });
 
-  return results;
+  return results.filter((result): result is PdfVisionPageInput => Boolean(result));
 }
