@@ -1,6 +1,8 @@
 import { after, NextResponse } from 'next/server';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { randomUUID } from 'crypto';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import {
   fillSlotsFromVisionPages,
   type GenerationSlotSchemaItem,
@@ -28,6 +30,39 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
+const SLOT_REFERENCE_LABEL_FONT_FAMILY = 'ClipCapSlotReferenceLabel';
+const SLOT_REFERENCE_LABEL_FONT_PATH = join(
+  process.cwd(),
+  'src',
+  'assets',
+  'fonts',
+  'NotoSans-Regular.ttf',
+);
+
+let hasAttemptedSlotReferenceFontRegistration = false;
+let hasRegisteredSlotReferenceFont = false;
+
+function getSlotReferenceLabelFontFamily() {
+  if (!hasAttemptedSlotReferenceFontRegistration) {
+    hasAttemptedSlotReferenceFontRegistration = true;
+
+    if (existsSync(SLOT_REFERENCE_LABEL_FONT_PATH)) {
+      try {
+        GlobalFonts.registerFromPath(
+          SLOT_REFERENCE_LABEL_FONT_PATH,
+          SLOT_REFERENCE_LABEL_FONT_FAMILY,
+        );
+        hasRegisteredSlotReferenceFont = true;
+      } catch {
+        hasRegisteredSlotReferenceFont = false;
+      }
+    }
+  }
+
+  return hasRegisteredSlotReferenceFont
+    ? `"${SLOT_REFERENCE_LABEL_FONT_FAMILY}"`
+    : 'Arial, sans-serif';
+}
 
 function getMimeTypeFromStoragePath(storagePath: string) {
   const normalized = storagePath.toLowerCase();
@@ -93,7 +128,7 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   const labelPaddingY = Math.max(2, Math.round(labelFontSize * 0.18));
 
   context.drawImage(image, 0, 0, width, height);
-  context.font = `${labelFontSize}px Arial, sans-serif`;
+  context.font = `${labelFontSize}px ${getSlotReferenceLabelFontFamily()}`;
   context.textBaseline = 'top';
 
   params.slotBoxes.forEach((slotBox) => {
