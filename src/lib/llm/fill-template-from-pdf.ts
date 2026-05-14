@@ -2324,7 +2324,20 @@ async function extractSlotsFromVisionPageBatch(input: {
       }
 
       await input.onTrace?.({
-        message: `[PDF Fill][DirectVisionRaw][${requestLabel}] ${rawContent}`,
+        message: `[PDF Fill][DirectVisionRaw][${requestLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: visionTraceConfig.provider,
+            request_label: requestLabel,
+            llm_concurrency_env_name: 'PDF_FILL_VISION_PAGES_LLM_CONCURRENCY',
+            llm_concurrency: llmConcurrency,
+            page_numbers: pageNumbers,
+            total_vision_pages: input.totalVisionPages,
+            raw_response: rawContent,
+          },
+        )}`,
       });
 
       const normalized = parseModelJson<{
