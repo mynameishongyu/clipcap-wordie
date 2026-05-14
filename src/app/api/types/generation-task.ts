@@ -37,6 +37,12 @@ export const generationReviewedItemSchema = z.object({
   evidence_page_numbers: z.array(z.number().int()).optional().default([]),
   notes: z.string().nullable().optional(),
   confidence: z.number().nullable().optional(),
+  matched_reference_label: z.string().nullable().optional(),
+  new_pdf_bbox: z
+    .tuple([z.number(), z.number(), z.number(), z.number()])
+    .nullable()
+    .optional(),
+  layout_match_score: z.number().nullable().optional(),
 });
 
 export const createGenerationTaskResponseSchema = z.object({

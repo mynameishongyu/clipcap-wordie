@@ -117,6 +117,12 @@ const generationExtractedItemSchema = z.object({
   evidence_page_numbers: z.array(z.number().int()).optional().default([]),
   notes: z.string().nullable().optional(),
   confidence: z.number().min(0).max(1).nullable().optional(),
+  matched_reference_label: z.string().nullable().optional(),
+  new_pdf_bbox: z
+    .tuple([z.number(), z.number(), z.number(), z.number()])
+    .nullable()
+    .optional(),
+  layout_match_score: z.number().min(0).max(1).nullable().optional(),
 });
 
 const generationPdfFillResultSchema = z.object({
@@ -1332,6 +1338,9 @@ function mergeSlotResults(
         ).sort((left, right) => left - right),
         notes: preferredMatch?.notes ?? '',
         confidence: preferredMatch?.confidence ?? null,
+        matched_reference_label: preferredMatch?.matched_reference_label ?? null,
+        new_pdf_bbox: preferredMatch?.new_pdf_bbox ?? null,
+        layout_match_score: preferredMatch?.layout_match_score ?? null,
       };
     }),
   };
@@ -2368,6 +2377,17 @@ async function extractSlotsFromVisionPageBatch(input: {
             confidence:
               typeof firstMatch?.confidence === 'number'
                 ? firstMatch.confidence
+                : null,
+            matched_reference_label:
+              typeof firstMatch?.matched_reference_label === 'string'
+                ? firstMatch.matched_reference_label
+                : null,
+            new_pdf_bbox: Array.isArray(firstMatch?.new_pdf_bbox)
+              ? firstMatch.new_pdf_bbox
+              : null,
+            layout_match_score:
+              typeof firstMatch?.layout_match_score === 'number'
+                ? firstMatch.layout_match_score
                 : null,
           },
         ];
