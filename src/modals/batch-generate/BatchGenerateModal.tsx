@@ -1036,7 +1036,8 @@ export function BatchGenerateModal({
 
         if (directVisionPromptMatch) {
           const label = directVisionPromptMatch[1] ?? 'Full';
-          const parsedPrompt = parseTraceJson<{
+          const parsedPrompt = parseTraceJson<
+            Record<string, unknown> & {
             route?: string;
             model?: string;
             request_label?: string;
@@ -1044,7 +1045,8 @@ export function BatchGenerateModal({
               role: string;
               content: unknown;
             }>;
-          }>(directVisionPromptMatch[2] ?? '{}', `direct vision prompt ${label}`);
+            }
+          >(directVisionPromptMatch[2] ?? '{}', `direct vision prompt ${label}`);
 
           if (!parsedPrompt) {
             return;
@@ -1074,6 +1076,35 @@ export function BatchGenerateModal({
           console.log(
             `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill prompt (${label})`,
             parsedPrompt,
+          );
+          const userPromptContent = parsedPrompt.messages?.find(
+            (message) => message.role === 'user',
+          )?.content;
+          const slotDefinitionCount =
+            userPromptContent &&
+            typeof userPromptContent === 'object' &&
+            !Array.isArray(userPromptContent) &&
+            Array.isArray(
+              (userPromptContent as { slot_definitions?: unknown })
+                .slot_definitions,
+            )
+              ? (userPromptContent as { slot_definitions: unknown[] })
+                  .slot_definitions.length
+              : null;
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill user prompt content (${label})`,
+            {
+              route: parsedPrompt.route,
+              model: parsedPrompt.model,
+              requestLabel: parsedPrompt.request_label,
+              slotDefinitionCount,
+              imagePayload: parsedPrompt.image_payload,
+              imagePlaceholders: parsedPrompt.image_placeholders,
+              referenceImagePlaceholders:
+                parsedPrompt.reference_image_placeholders,
+              prompt: userPromptContent,
+            },
           );
           return;
         }

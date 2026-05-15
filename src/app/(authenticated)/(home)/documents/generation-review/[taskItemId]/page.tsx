@@ -1821,11 +1821,6 @@ export default function GenerationReviewPage() {
                             <Text c="dimmed" lineClamp={2} size="xs">
                               槽位来源：{slotItem.meaning_to_applicant || '未填写'}
                             </Text>
-                            {slotItem.notes ? (
-                              <Text c="dimmed" lineClamp={2} size="xs">
-                                选择原因：{slotItem.notes}
-                              </Text>
-                            ) : null}
                             <TextInput
                               label="模板值"
                               radius="lg"
