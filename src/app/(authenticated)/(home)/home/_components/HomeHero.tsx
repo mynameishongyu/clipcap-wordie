@@ -334,9 +334,8 @@ export function HomeHero() {
   const lastExtractionTraceRef = useRef('');
 
   const router = useRouter();
-  const { isAuthenticated, registrationStatus, signOut, user, profile } =
+  const { isAuthenticated, registrationStatus, signOut } =
     useRegistrationGateStore();
-  const lastLoggedAuthenticatedUserIdRef = useRef<string | null>(null);
 
   const canUseProtectedActions = isAuthenticated;
   const isProcessingTemplate =
@@ -347,27 +346,6 @@ export function HomeHero() {
   const canEditPrompt = canUseProtectedActions && !isProcessingTemplate;
   const hasUploadedDocx = Boolean(selectedDocxFile);
   const canStartSlotDetection = hasUploadedDocx;
-
-  useEffect(() => {
-    if (!isAuthenticated || !user) {
-      lastLoggedAuthenticatedUserIdRef.current = null;
-      return;
-    }
-
-    if (lastLoggedAuthenticatedUserIdRef.current === user.id) {
-      return;
-    }
-
-    lastLoggedAuthenticatedUserIdRef.current = user.id;
-    console.info('[Auth][Current User]', {
-      id: user.id,
-      email: user.email ?? null,
-      role: user.role ?? null,
-      registrationStatus,
-      profileEmail: profile?.email ?? null,
-      displayName: profile?.displayName ?? null,
-    });
-  }, [isAuthenticated, profile, registrationStatus, user]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {

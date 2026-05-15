@@ -24,6 +24,33 @@ type ConsoleMethod = (...args: unknown[]) => void;
 const MAX_SERIALIZE_DEPTH = 5;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
 const DEFAULT_MAX_BUFFERED_ENTRIES = 80;
+const MAX_SERIALIZED_STRING_LENGTH = 2000;
+
+function redactStringForBrowserLog(value: string) {
+  if (/^data:image\//i.test(value)) {
+    return `[Image data URL omitted, length=${value.length}]`;
+  }
+
+  if (value.length > MAX_SERIALIZED_STRING_LENGTH) {
+    return `${value.slice(0, MAX_SERIALIZED_STRING_LENGTH)}...[truncated ${value.length - MAX_SERIALIZED_STRING_LENGTH} chars]`;
+  }
+
+  return value;
+}
+
+function isSensitiveLogKey(key: string) {
+  const normalizedKey = key.toLowerCase();
+  return (
+    normalizedKey.includes('apikey') ||
+    normalizedKey.includes('api_key') ||
+    normalizedKey.includes('authorization') ||
+    normalizedKey.includes('bearer') ||
+    normalizedKey.includes('cookie') ||
+    normalizedKey.includes('password') ||
+    normalizedKey.includes('secret') ||
+    normalizedKey.includes('token')
+  );
+}
 
 function serializeForBrowserLog(
   value: unknown,
@@ -39,6 +66,10 @@ function serializeForBrowserLog(
     typeof value === 'number' ||
     typeof value === 'boolean'
   ) {
+    if (typeof value === 'string') {
+      return redactStringForBrowserLog(value);
+    }
+
     return value;
   }
 
@@ -100,6 +131,11 @@ function serializeForBrowserLog(
 
   Object.keys(record).forEach((key) => {
     try {
+      if (isSensitiveLogKey(key)) {
+        output[key] = '[Redacted]';
+        return;
+      }
+
       output[key] = serializeForBrowserLog(record[key], depth + 1, seen);
     } catch (error) {
       output[key] =
@@ -117,7 +153,7 @@ function stringifyMessage(args: unknown[]) {
   return args
     .map((arg) => {
       if (typeof arg === 'string') {
-        return arg;
+        return redactStringForBrowserLog(arg);
       }
 
       if (arg instanceof Error) {
@@ -262,7 +298,7 @@ class BrowserRunLogger {
   }
 
   private scheduleFlush() {
-    if (this.flushTimer !== null || !this.taskId) {
+    if (this.flushTimer !== null) {
       return;
     }
 
@@ -278,7 +314,7 @@ class BrowserRunLogger {
       this.flushTimer = null;
     }
 
-    if (!this.taskId || this.buffer.length === 0) {
+    if (this.buffer.length === 0) {
       return;
     }
 
@@ -288,7 +324,7 @@ class BrowserRunLogger {
 
     try {
       const response = await fetch(
-        `/api/generation-tasks/${this.taskId}/browser-logs`,
+        '/api/browser-logs',
         {
           method: 'POST',
           headers: {
@@ -298,6 +334,7 @@ class BrowserRunLogger {
             sessionId: this.sessionId,
             sequence: currentSequence,
             final: Boolean(options?.final),
+            taskId: this.taskId,
             meta: this.meta,
             entries,
           }),

@@ -19,10 +19,6 @@ import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
-import {
-  createBrowserRunLogger,
-  type BrowserRunLoggerInstance,
-} from '@/src/lib/browser/browser-run-logger';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import {
   getPdfVisionUploadConcurrency,
@@ -36,7 +32,6 @@ import {
   useStartGenerationTaskItemSlotFill,
 } from '@/src/querys/use-generation-task-runtime';
 import { useCreateGenerationTask } from '@/src/querys/use-generation-tasks';
-import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
 interface BatchGenerateModalInnerProps {
   templateId: string;
@@ -354,8 +349,6 @@ export function BatchGenerateModal({
     new Map(),
   );
   const itemTraceRef = useRef<Map<string, string>>(new Map());
-  const browserRunLoggerRef = useRef<BrowserRunLoggerInstance | null>(null);
-  const hasFinalizedBrowserLogRef = useRef(false);
   const [confirmedPageNumbersByItemId, setConfirmedPageNumbersByItemId] =
     useState<Record<string, number[]>>({});
   const refreshTaskLists = async () => {
@@ -513,101 +506,6 @@ export function BatchGenerateModal({
   const submissionElapsedSeconds = submissionStartedAt
     ? Math.max(0, Math.floor((tick - submissionStartedAt) / 1000))
     : 0;
-
-  useEffect(() => {
-    const logger = createBrowserRunLogger({
-      scope: 'batch-generate',
-      taskId,
-      meta: {
-        templateId: innerProps.templateId,
-        templateName: innerProps.templateName,
-      },
-    });
-
-    browserRunLoggerRef.current = logger;
-    logger.start();
-
-    const handleBeforeUnload = () => {
-      void logger.finalize();
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      void logger.finalize().finally(() => {
-        logger.stop();
-      });
-      browserRunLoggerRef.current = null;
-    };
-  }, [innerProps.templateId, innerProps.templateName]);
-
-  useEffect(() => {
-    let isDisposed = false;
-
-    const logCurrentUserEmail = async () => {
-      try {
-        const supabase = getSupabaseBrowserClient();
-        const {
-          data: { user },
-          error,
-        } = await supabase.auth.getUser();
-
-        if (isDisposed) {
-          return;
-        }
-
-        console.info('[Batch Generate][Current User]', {
-          email: user?.email ?? null,
-          userId: user?.id ?? null,
-          hasAuthError: Boolean(error),
-          authErrorMessage: error?.message ?? null,
-        });
-      } catch (error) {
-        if (isDisposed) {
-          return;
-        }
-
-        console.warn('[Batch Generate][Current User] Failed to read user email', {
-          error,
-        });
-      }
-    };
-
-    void logCurrentUserEmail();
-
-    return () => {
-      isDisposed = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    browserRunLoggerRef.current?.setTaskId(taskId);
-  }, [taskId]);
-
-  useEffect(() => {
-    if (
-      !taskQuery.data ||
-      hasFinalizedBrowserLogRef.current ||
-      taskQuery.data.items.length === 0
-    ) {
-      return;
-    }
-
-    const isTaskFinished = taskQuery.data.items.every((item) =>
-      ['review_pending', 'reviewed', 'succeeded', 'failed'].includes(
-        item.status,
-      ),
-    );
-
-    if (!isTaskFinished) {
-      return;
-    }
-
-    hasFinalizedBrowserLogRef.current = true;
-    console.info('[Browser Log Storage] Batch generation task finished; flushing final browser log.');
-    void browserRunLoggerRef.current?.finalize();
-  }, [taskQuery.data]);
 
   const taskItems = taskQuery.data?.items ?? [];
   const hasRunningItems = taskItems.some((item) =>
