@@ -7,13 +7,14 @@ import {
   Divider,
   Group,
   Loader,
+  Modal,
   Paper,
   Progress,
   Stack,
   Text,
   Title,
 } from '@mantine/core';
-import { modals, type ContextModalProps } from '@mantine/modals';
+import type { ContextModalProps } from '@mantine/modals';
 import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -35,6 +36,7 @@ import {
   useStartGenerationTaskItemSlotFill,
 } from '@/src/querys/use-generation-task-runtime';
 import { useCreateGenerationTask } from '@/src/querys/use-generation-tasks';
+import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
 interface BatchGenerateModalInnerProps {
   templateId: string;
@@ -48,6 +50,16 @@ interface UploadRow {
   isParsing: boolean;
   parseError: string | null;
   forceVisionPageFill: boolean;
+}
+
+interface DuplicatePdfFileNameAlert {
+  fileName: string;
+  selectedRowId: string;
+  duplicateRows: Array<{
+    rowId: string;
+    rowNumber: number;
+    fileName: string | null;
+  }>;
 }
 
 declare global {
@@ -325,6 +337,8 @@ export function BatchGenerateModal({
   const [submissionStartedAt, setSubmissionStartedAt] = useState<number | null>(
     null,
   );
+  const [duplicatePdfFileNameAlert, setDuplicatePdfFileNameAlert] =
+    useState<DuplicatePdfFileNameAlert | null>(null);
   const [itemStartedAtById, setItemStartedAtById] = useState<
     Record<string, number>
   >({});
@@ -527,6 +541,45 @@ export function BatchGenerateModal({
       browserRunLoggerRef.current = null;
     };
   }, [innerProps.templateId, innerProps.templateName]);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    const logCurrentUserEmail = async () => {
+      try {
+        const supabase = getSupabaseBrowserClient();
+        const {
+          data: { user },
+          error,
+        } = await supabase.auth.getUser();
+
+        if (isDisposed) {
+          return;
+        }
+
+        console.info('[Batch Generate][Current User]', {
+          email: user?.email ?? null,
+          userId: user?.id ?? null,
+          hasAuthError: Boolean(error),
+          authErrorMessage: error?.message ?? null,
+        });
+      } catch (error) {
+        if (isDisposed) {
+          return;
+        }
+
+        console.warn('[Batch Generate][Current User] Failed to read user email', {
+          error,
+        });
+      }
+    };
+
+    void logCurrentUserEmail();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     browserRunLoggerRef.current?.setTaskId(taskId);
@@ -1360,35 +1413,26 @@ export function BatchGenerateModal({
       );
 
       if (duplicateRows.length > 0) {
+        const duplicateRowDetails = duplicateRows.map((row) => ({
+          rowId: row.id,
+          rowNumber:
+            rows.findIndex((currentRow) => currentRow.id === row.id) + 1,
+          fileName: row.file?.name ?? null,
+        }));
+
         console.warn('[Batch Generate][Duplicate PDF File Name]', {
           selectedFileName: file.name,
           selectedRowId: rowId,
-          duplicateRows: duplicateRows.map((row, index) => ({
-            rowId: row.id,
-            rowNumber:
-              rows.findIndex((currentRow) => currentRow.id === row.id) + 1,
-            fileName: row.file?.name ?? null,
+          duplicateRows: duplicateRowDetails.map((row, index) => ({
+            ...row,
             duplicateIndex: index + 1,
           })),
         });
 
-        let duplicateFileNameModalId = '';
-        duplicateFileNameModalId = modals.open({
-          centered: true,
-          title: 'PDF 文件名重复',
-          children: (
-            <Stack gap="sm">
-              <Text size="sm">
-                当前选择的文件名“{file.name}”已经上传过，请选择其他 PDF，或先删除/替换已有记录。
-              </Text>
-              <Button
-                radius="xl"
-                onClick={() => modals.close(duplicateFileNameModalId)}
-              >
-                知道了
-              </Button>
-            </Stack>
-          ),
+        setDuplicatePdfFileNameAlert({
+          fileName: file.name,
+          selectedRowId: rowId,
+          duplicateRows: duplicateRowDetails,
         });
         return;
       }
@@ -1619,6 +1663,38 @@ export function BatchGenerateModal({
         padding: 24,
       }}
     >
+      <Modal
+        centered
+        opened={Boolean(duplicatePdfFileNameAlert)}
+        title="PDF 文件名重复"
+        zIndex={1000}
+        onClose={() => setDuplicatePdfFileNameAlert(null)}
+      >
+        {duplicatePdfFileNameAlert ? (
+          <Stack gap="sm">
+            <Text size="sm">
+              当前选择的文件名“{duplicatePdfFileNameAlert.fileName}”已经上传过，请选择其他
+              PDF，或先删除/替换已有记录。
+            </Text>
+            {duplicatePdfFileNameAlert.duplicateRows.length > 0 ? (
+              <Text c="dimmed" size="xs">
+                重复位置：
+                {duplicatePdfFileNameAlert.duplicateRows
+                  .map((row) => `第 ${row.rowNumber} 条`)
+                  .join('、')}
+              </Text>
+            ) : null}
+            <Button
+              fullWidth
+              radius="xl"
+              onClick={() => setDuplicatePdfFileNameAlert(null)}
+            >
+              知道了
+            </Button>
+          </Stack>
+        ) : null}
+      </Modal>
+
       {isSubmittingTask ? (
         <div
           style={{
