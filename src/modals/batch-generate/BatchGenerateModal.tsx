@@ -848,13 +848,13 @@ export function BatchGenerateModal({
         const traceTimestampMs = getTraceTimestampMs(line);
         const traceLine = line.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+/, '');
         const slotFillInputMatch = traceLine.match(
-          /^(?:\[PDF Fill\])?\[TextInputData\]\[(.+)\] (.+)$/,
+          /^(?:\[PDF Fill\])?\[TextInputData\]\[([^\]]+)\] (.+)$/,
         );
         const slotFillPromptMatch = traceLine.match(
-          /^(?:\[PDF Fill\])?\[TextPrompt\]\[(.+)\] (.+)$/,
+          /^(?:\[PDF Fill\])?\[TextPrompt\]\[([^\]]+)\] (.+)$/,
         );
         const slotFillPromptPreviewMatch = traceLine.match(
-          /^(?:\[PDF Fill\])?\[TextPromptPreview\]\[(.+)\] (.+)$/,
+          /^(?:\[PDF Fill\])?\[TextPromptPreview\]\[([^\]]+)\] (.+)$/,
         );
         const slotFillReferenceImagesMatch = traceLine.match(
           /^\[PDF Fill\]\[ReferenceExampleImages\] (.+)$/,
@@ -863,22 +863,22 @@ export function BatchGenerateModal({
           /^\[PDF Fill\]\[SlotFillPreflight\] (.+)$/,
         );
         const errorDetailsMatch = traceLine.match(
-          /^\[PDF Fill\]\[(PagePreparation|Text)\]\[ErrorDetails\]\[(.+)\] (.+)$/,
+          /^\[PDF Fill\]\[(PagePreparation|Text)\]\[ErrorDetails\]\[([^\]]+)\] (.+)$/,
         );
         const routeErrorDetailsMatch = traceLine.match(
-          /^\[RouteErrorDetails\]\[(.+)\] (.+)$/,
+          /^\[RouteErrorDetails\]\[([^\]]+)\] (.+)$/,
         );
         const pageFilterPromptMatch = traceLine.match(
-          /^\[PDF Fill\]\[PageFilterPrompt\]\[(.+)\] (.+)$/,
+          /^\[PDF Fill\]\[PageFilterPrompt\]\[([^\]]+)\] (.+)$/,
         );
         const pageFilterRawMatch = traceLine.match(
-          /^\[PDF Fill\]\[PageFilterRaw\]\[(.+)\] (.+)$/,
+          /^\[PDF Fill\]\[PageFilterRaw\]\[([^\]]+)\] (.+)$/,
         );
         const directVisionPromptMatch = traceLine.match(
-          /^\[PDF Fill\]\[DirectVisionPrompt\]\[(.+)\] (.+)$/,
+          /^\[PDF Fill\]\[DirectVisionPrompt\]\[([^\]]+)\] (.+)$/,
         );
         const directVisionRawMatch = traceLine.match(
-          /^\[PDF Fill\]\[DirectVisionRaw\]\[(.+)\] (.+)$/,
+          /^\[PDF Fill\]\[DirectVisionRaw\]\[([^\]]+)\] (.+)$/,
         );
         const confirmedPagesMatch = traceLine.match(
           /^\[PDF Fill\]\[ConfirmedPages\] (.+)$/,
@@ -887,7 +887,7 @@ export function BatchGenerateModal({
           /^\[PDF Fill\]\[VisionPagesUsed\] (.+)$/,
         );
         const rawErrorMatch = traceLine.match(
-          /^\[PDF Fill\]\[RawError\]\[(.+)\] (.*)$/,
+          /^\[PDF Fill\]\[RawError\]\[([^\]]+)\] (.*)$/,
         );
 
         if (
