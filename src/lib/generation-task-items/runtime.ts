@@ -212,7 +212,12 @@ export async function loadVisionPagesFromStoredAssets(params: {
         .download(asset.storage_path);
 
       if (error || !fileBlob) {
-        throw error ?? new Error(`无法下载 PDF 页图: ${asset.storage_path}`);
+        const errorMessage = error?.message ?? 'Missing storage object';
+
+        throw new Error(
+          `[PDF Fill][StorageDownloadFailed] Unable to download uploaded PDF page image: storage_path=${asset.storage_path}, uploaded_page=${asset.uploaded_page_number}, original_page=${asset.original_page_number}, error=${errorMessage}`,
+          error ? { cause: error } : undefined,
+        );
       }
 
       const buffer = Buffer.from(await fileBlob.arrayBuffer());

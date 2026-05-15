@@ -2148,6 +2148,31 @@ async function extractSlotsFromVisionPageBatch(input: {
       const referencePageNumbers = input.referenceExamplePages.map(
         (page) => page.page_number,
       );
+      const referenceImageSummaries = input.referenceExamplePages.map(
+        (page) => {
+          const imageBytes = estimateDataUrlBytes(
+            page.annotated_image_data_url ?? page.image_data_url,
+          );
+
+          return {
+            label: `Annotated reference example PDF page ${page.page_number}`,
+            page_number: page.page_number,
+            original_page_number: page.original_page_number ?? page.page_number,
+            file_name: page.example_pdf_file_name ?? null,
+            uses_annotated_image: Boolean(page.annotated_image_data_url),
+            has_image_data_url: Boolean(
+              page.annotated_image_data_url ?? page.image_data_url,
+            ),
+            image_bytes: imageBytes,
+            image_size: formatBytes(imageBytes),
+          };
+        },
+      );
+      const referenceImageTotalBytes = referenceImageSummaries.reduce(
+        (sum, page) => sum + page.image_bytes,
+        0,
+      );
+      const requestImageTotalBytes = totalImageBytes + referenceImageTotalBytes;
       const promptPayload = buildDirectVisionSlotFillPromptPayload({
         documentName: input.documentName,
         slots: input.slots,
@@ -2175,6 +2200,18 @@ async function extractSlotsFromVisionPageBatch(input: {
             page_numbers: pageNumbers,
             reference_example_page_numbers: referencePageNumbers,
             total_vision_pages: input.totalVisionPages,
+            image_payload: {
+              request_image_total_bytes: requestImageTotalBytes,
+              request_image_total_size: formatBytes(requestImageTotalBytes),
+              uploaded_pdf_page_count: pageSizeSummary.length,
+              uploaded_pdf_image_total_bytes: totalImageBytes,
+              uploaded_pdf_image_total_size: formatBytes(totalImageBytes),
+              reference_example_page_count: referenceImageSummaries.length,
+              reference_example_image_total_bytes: referenceImageTotalBytes,
+              reference_example_image_total_size: formatBytes(
+                referenceImageTotalBytes,
+              ),
+            },
             messages: [
               {
                 role: 'system',
@@ -2186,6 +2223,14 @@ async function extractSlotsFromVisionPageBatch(input: {
                 content: promptPayload,
               },
             ],
+            image_placeholders: pageSizeSummary.map((page) => ({
+              label: `New PDF uploaded page ${page.pageNumber}`,
+              page_number: page.pageNumber,
+              has_image_data_url: true,
+              image_bytes: page.bytes,
+              image_size: formatBytes(page.bytes),
+            })),
+            reference_image_placeholders: referenceImageSummaries,
           },
         )}`,
       });

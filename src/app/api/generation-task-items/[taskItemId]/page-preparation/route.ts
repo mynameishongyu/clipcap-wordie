@@ -68,6 +68,38 @@ function getPageFilterBatchSize() {
   return Math.min(PAGE_FILTER_BATCH_SIZE_MAX, parsedValue);
 }
 
+function estimateDataUrlBytes(dataUrl: string) {
+  const commaIndex = dataUrl.indexOf(',');
+
+  if (commaIndex < 0) {
+    return 0;
+  }
+
+  const base64Payload = dataUrl.slice(commaIndex + 1);
+  const paddingLength = base64Payload.endsWith('==')
+    ? 2
+    : base64Payload.endsWith('=')
+      ? 1
+      : 0;
+
+  return Math.max(
+    0,
+    Math.floor((base64Payload.length * 3) / 4) - paddingLength,
+  );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
   const withoutCodeFence = trimmed
@@ -313,6 +345,40 @@ async function classifyVisionPagesForSlotFill(params: {
       await params.onTrace?.({
         message: `[PDF Fill][PageFilter] Starting visual page filter batch ${batchIndex + 1}/${batches.length} for ${params.documentName}, pages=${batch.map((page) => page.page_number).join(',')}.`,
       });
+      const dropExampleImageSummaries = params.dropExamples.map(
+        (example, index) => {
+          const imageBytes = estimateDataUrlBytes(example.image_data_url);
+
+          return {
+            index: index + 1,
+            file_name: example.file_name,
+            has_image_data_url: Boolean(example.image_data_url),
+            image_bytes: imageBytes,
+            image_size: formatBytes(imageBytes),
+          };
+        },
+      );
+      const candidateImageSummaries = batch.map((page) => {
+        const imageBytes = estimateDataUrlBytes(page.image_data_url);
+
+        return {
+          label: `Uploaded PDF page ${page.page_number}`,
+          page_number: page.page_number,
+          has_image_data_url: Boolean(page.image_data_url),
+          image_bytes: imageBytes,
+          image_size: formatBytes(imageBytes),
+        };
+      });
+      const dropExampleImageTotalBytes = dropExampleImageSummaries.reduce(
+        (sum, example) => sum + example.image_bytes,
+        0,
+      );
+      const candidateImageTotalBytes = candidateImageSummaries.reduce(
+        (sum, page) => sum + page.image_bytes,
+        0,
+      );
+      const requestImageTotalBytes =
+        dropExampleImageTotalBytes + candidateImageTotalBytes;
       await params.onTrace?.({
         message: `[PDF Fill][PageFilterPrompt][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify({
           route: '/api/generation-task-items/[taskItemId]/page-preparation',
@@ -323,11 +389,19 @@ async function classifyVisionPagesForSlotFill(params: {
           reasoning_effort: traceConfig.reasoningEffort,
           extra_body: traceConfig.extraBody,
           request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
-          drop_examples: params.dropExamples.map((example, index) => ({
-            index: index + 1,
-            file_name: example.file_name,
-            has_image_data_url: Boolean(example.image_data_url),
-          })),
+          image_payload: {
+            request_image_total_bytes: requestImageTotalBytes,
+            request_image_total_size: formatBytes(requestImageTotalBytes),
+            candidate_page_count: candidateImageSummaries.length,
+            candidate_image_total_bytes: candidateImageTotalBytes,
+            candidate_image_total_size: formatBytes(candidateImageTotalBytes),
+            drop_example_count: dropExampleImageSummaries.length,
+            drop_example_image_total_bytes: dropExampleImageTotalBytes,
+            drop_example_image_total_size: formatBytes(
+              dropExampleImageTotalBytes,
+            ),
+          },
+          drop_examples: dropExampleImageSummaries,
           messages: [
             {
               role: 'system',
@@ -339,11 +413,7 @@ async function classifyVisionPagesForSlotFill(params: {
               content: pageFilterPromptPayload,
             },
           ],
-          image_placeholders: batch.map((page) => ({
-            label: `Uploaded PDF page ${page.page_number}`,
-            page_number: page.page_number,
-            has_image_data_url: Boolean(page.image_data_url),
-          })),
+          image_placeholders: candidateImageSummaries,
         })}`,
       });
 
