@@ -303,19 +303,21 @@ function getPageFilterPageLabel(page: PageFilterPage) {
 
 function PageFilterPageTile({
   page,
-  selected,
-  onToggle,
+  retained,
+  actionLabel,
+  onAction,
 }: {
   page: PageFilterPage;
-  selected: boolean;
-  onToggle: () => void;
+  retained: boolean;
+  actionLabel: string;
+  onAction: () => void;
 }) {
   const pageLabel = getPageFilterPageLabel(page);
-  const statusLabel = selected ? '保留' : '已过滤';
-  const borderColor = selected
+  const statusLabel = retained ? '保留' : '已过滤';
+  const borderColor = retained
     ? 'rgba(16, 185, 129, 0.62)'
     : 'rgba(248, 113, 113, 0.62)';
-  const background = selected
+  const background = retained
     ? 'rgba(16, 185, 129, 0.12)'
     : 'rgba(248, 113, 113, 0.08)';
 
@@ -324,11 +326,11 @@ function PageFilterPageTile({
       role="button"
       tabIndex={0}
       title={page.filterReason ?? `${pageLabel}：${statusLabel}`}
-      onClick={onToggle}
+      onClick={onAction}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          onToggle();
+          onAction();
         }
       }}
       style={{
@@ -348,16 +350,31 @@ function PageFilterPageTile({
           {pageLabel}
         </Text>
         <Badge
-          color={selected ? 'teal' : 'red'}
+          color={retained ? 'teal' : 'red'}
           radius="sm"
           size="xs"
           variant="light"
         >
-          {selected ? '已选' : '过滤'}
+          {statusLabel}
         </Badge>
       </Group>
       <Group justify="space-between" align="center" gap={6} wrap="nowrap">
-        <Text c={selected ? 'teal.2' : 'red.2'} fw={600} size="xs">
+        <Button
+          color={retained ? 'red' : 'teal'}
+          radius="sm"
+          size="compact-xs"
+          variant="subtle"
+          onClick={(event) => {
+            event.stopPropagation();
+            onAction();
+          }}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          {actionLabel}
+        </Button>
+        <Text c={retained ? 'teal.2' : 'red.2'} fw={600} size="xs">
           {statusLabel}
         </Text>
         {page.imageUrl ? (
@@ -440,8 +457,6 @@ export function BatchGenerateModal({
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const [confirmedPageNumbersByItemId, setConfirmedPageNumbersByItemId] =
     useState<Record<string, number[]>>({});
-  const [expandedFilteredPagesByItemId, setExpandedFilteredPagesByItemId] =
-    useState<Record<string, boolean>>({});
   const refreshTaskLists = async () => {
     await Promise.all([
       taskId
@@ -455,7 +470,7 @@ export function BatchGenerateModal({
       queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
     ]);
   };
-  const toggleConfirmedPageNumber = (
+  const removePageFromSlotFill = (
     itemId: string,
     fallbackPageNumbers: number[],
     uploadedPageNumber: number,
@@ -463,12 +478,7 @@ export function BatchGenerateModal({
     setConfirmedPageNumbersByItemId((current) => {
       const currentPages = current[itemId] ?? fallbackPageNumbers;
       const nextPageSet = new Set(currentPages);
-
-      if (nextPageSet.has(uploadedPageNumber)) {
-        nextPageSet.delete(uploadedPageNumber);
-      } else {
-        nextPageSet.add(uploadedPageNumber);
-      }
+      nextPageSet.delete(uploadedPageNumber);
 
       return {
         ...current,
@@ -476,11 +486,21 @@ export function BatchGenerateModal({
       };
     });
   };
-  const toggleFilteredPagesExpanded = (itemId: string) => {
-    setExpandedFilteredPagesByItemId((current) => ({
-      ...current,
-      [itemId]: !current[itemId],
-    }));
+  const restorePageForSlotFill = (
+    itemId: string,
+    fallbackPageNumbers: number[],
+    uploadedPageNumber: number,
+  ) => {
+    setConfirmedPageNumbersByItemId((current) => {
+      const currentPages = current[itemId] ?? fallbackPageNumbers;
+      const nextPageSet = new Set(currentPages);
+      nextPageSet.add(uploadedPageNumber);
+
+      return {
+        ...current,
+        [itemId]: Array.from(nextPageSet).sort((left, right) => left - right),
+      };
+    });
   };
   const launchSlotFillForItem = useCallback(
     (
@@ -1350,9 +1370,9 @@ export function BatchGenerateModal({
 
         if (
           line.includes(
-            'PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填',
+            'PDF 页面图片已准备完成，前端轮询检测到后将显示页面确认区域',
           ) ||
-          line.includes('PDF 页面图片已准备完成，等待视觉槽位回填')
+          line.includes('已完成视觉页面过滤，等待用户确认用于回填的页面')
         ) {
           console.log(
             `[Batch Generate][${item.source_pdf_name}] PDF page ready trace observed for task item ${item.id}; waiting for user page confirmation.`,
@@ -1949,11 +1969,6 @@ export function BatchGenerateModal({
                   (page) =>
                     !confirmedPageNumberSet.has(page.uploadedPageNumber),
                 );
-                const filteredPagesExpanded = Boolean(
-                  expandedFilteredPagesByItemId[item.id],
-                );
-                const collapsedFilteredPreviewPages =
-                  filteredPageFilterPages.slice(0, 6);
                 return (
                   <Paper key={item.id} p="md" radius="xl" withBorder>
                     <Stack gap="sm">
@@ -2100,9 +2115,10 @@ export function BatchGenerateModal({
                                           <PageFilterPageTile
                                             key={`${item.id}-retained-${page.uploadedPageNumber}`}
                                             page={page}
-                                            selected
-                                            onToggle={() =>
-                                              toggleConfirmedPageNumber(
+                                            retained
+                                            actionLabel="过滤"
+                                            onAction={() =>
+                                              removePageFromSlotFill(
                                                 item.id,
                                                 confirmedPageNumbers,
                                                 page.uploadedPageNumber,
@@ -2119,41 +2135,25 @@ export function BatchGenerateModal({
                                   </Stack>
 
                                   <Stack gap="xs">
-                                    <Group justify="space-between" align="center">
-                                      <Group gap="xs">
-                                        <Text fw={700} size="sm">
-                                          已过滤页面
-                                        </Text>
-                                        <Badge
-                                          color="red"
-                                          radius="sm"
-                                          size="sm"
-                                          variant="light"
-                                        >
-                                          {filteredPageFilterPages.length}
-                                        </Badge>
-                                      </Group>
-                                      {filteredPageFilterPages.length > 0 ? (
-                                        <Button
-                                          radius="sm"
-                                          size="compact-xs"
-                                          variant="subtle"
-                                          onClick={() =>
-                                            toggleFilteredPagesExpanded(item.id)
-                                          }
-                                        >
-                                          {filteredPagesExpanded
-                                            ? '收起'
-                                            : '展开'}
-                                        </Button>
-                                      ) : null}
+                                    <Group gap="xs">
+                                      <Text fw={700} size="sm">
+                                        已过滤页面
+                                      </Text>
+                                      <Badge
+                                        color="red"
+                                        radius="sm"
+                                        size="sm"
+                                        variant="light"
+                                      >
+                                        {filteredPageFilterPages.length}
+                                      </Badge>
                                     </Group>
 
                                     {filteredPageFilterPages.length === 0 ? (
                                       <Text c="dimmed" size="xs">
                                         没有被过滤的页面。
                                       </Text>
-                                    ) : filteredPagesExpanded ? (
+                                    ) : (
                                       <SimpleGrid
                                         cols={{ base: 2, xs: 3, sm: 4, md: 6 }}
                                         spacing="xs"
@@ -2162,9 +2162,10 @@ export function BatchGenerateModal({
                                           <PageFilterPageTile
                                             key={`${item.id}-filtered-${page.uploadedPageNumber}`}
                                             page={page}
-                                            selected={false}
-                                            onToggle={() =>
-                                              toggleConfirmedPageNumber(
+                                            retained={false}
+                                            actionLabel="恢复保留"
+                                            onAction={() =>
+                                              restorePageForSlotFill(
                                                 item.id,
                                                 confirmedPageNumbers,
                                                 page.uploadedPageNumber,
@@ -2173,34 +2174,6 @@ export function BatchGenerateModal({
                                           />
                                         ))}
                                       </SimpleGrid>
-                                    ) : (
-                                      <Group gap="xs">
-                                        {collapsedFilteredPreviewPages.map(
-                                          (page) => (
-                                            <Badge
-                                              key={`${item.id}-filtered-preview-${page.uploadedPageNumber}`}
-                                              color="red"
-                                              radius="sm"
-                                              variant="outline"
-                                            >
-                                              {getPageFilterPageLabel(page)}
-                                            </Badge>
-                                          ),
-                                        )}
-                                        {filteredPageFilterPages.length >
-                                        collapsedFilteredPreviewPages.length ? (
-                                          <Text c="dimmed" size="xs">
-                                            另有{' '}
-                                            {filteredPageFilterPages.length -
-                                              collapsedFilteredPreviewPages.length}{' '}
-                                            页，展开可恢复。
-                                          </Text>
-                                        ) : (
-                                          <Text c="dimmed" size="xs">
-                                            展开可恢复误删页面。
-                                          </Text>
-                                        )}
-                                      </Group>
                                     )}
                                   </Stack>
                                 </>

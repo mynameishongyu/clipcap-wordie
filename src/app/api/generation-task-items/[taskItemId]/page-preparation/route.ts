@@ -487,7 +487,7 @@ async function runGenerationTaskItemPagePreparation(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      '当前流程只准备 PDF 页面图片；页面图片准备完成后将直接调用 VISION_LLM 进行视觉槽位回填。',
+      '当前流程正在准备 PDF 页面图片并进行视觉页面过滤；过滤完成后会等待用户确认用于回填的页面。',
     );
 
     await logEvent({
@@ -668,12 +668,12 @@ async function runGenerationTaskItemPagePreparation(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `新 PDF 页面图片准备完成：共 ${precomputedVisionPages.length || pageImageAssets.length} 页，等待视觉槽位回填。`,
+      `新 PDF 页面图片准备完成：共 ${precomputedVisionPages.length || pageImageAssets.length} 页，已完成视觉页面过滤，等待用户确认用于回填的页面。`,
     );
     await appendProcessingTrace(
       admin,
       params.item.id,
-      'PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填。',
+      'PDF 页面图片已准备完成，前端轮询检测到后将显示页面确认区域。',
     );
     await appendProcessingTrace(
       admin,
