@@ -140,8 +140,8 @@ export async function POST(request: Request) {
       .join('\n');
     const { error: uploadError } = await admin.storage
       .from('generation-pdfs')
-      .upload(storagePath, new Blob([jsonl], { type: 'application/json' }), {
-        contentType: 'application/json; charset=utf-8',
+      .upload(storagePath, new Blob([jsonl], { type: 'text/plain' }), {
+        contentType: 'text/plain; charset=utf-8',
         upsert: false,
       });
 
