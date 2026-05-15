@@ -29,7 +29,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PAGE_FILTER_BATCH_SIZE_DEFAULT = 4;
-const PAGE_FILTER_BATCH_SIZE_MAX = 8;
+const PAGE_FILTER_BATCH_SIZE_MAX = 12;
 const PAGE_FILTER_REQUEST_TIMEOUT_MS = 180000;
 const PAGE_FILTER_DROP_EXAMPLES_DIR_DEFAULT = 'pdf_page_filter_drop_examples';
 const PAGE_FILTER_DROP_EXAMPLES_MAX = 4;

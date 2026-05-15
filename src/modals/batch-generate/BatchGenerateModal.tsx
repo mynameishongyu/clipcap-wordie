@@ -304,16 +304,15 @@ function getPageFilterPageLabel(page: PageFilterPage) {
 function PageFilterPageTile({
   page,
   retained,
-  actionLabel,
   onAction,
 }: {
   page: PageFilterPage;
   retained: boolean;
-  actionLabel: string;
   onAction: () => void;
 }) {
   const pageLabel = getPageFilterPageLabel(page);
   const statusLabel = retained ? '保留' : '已过滤';
+  const nextActionLabel = retained ? '过滤' : '保留';
   const borderColor = retained
     ? 'rgba(16, 185, 129, 0.62)'
     : 'rgba(248, 113, 113, 0.62)';
@@ -334,7 +333,7 @@ function PageFilterPageTile({
         }
       }}
       style={{
-        minHeight: 72,
+        minHeight: 64,
         border: `1px solid ${borderColor}`,
         borderRadius: 8,
         background,
@@ -345,37 +344,22 @@ function PageFilterPageTile({
         padding: '9px 10px',
       }}
     >
-      <Group justify="space-between" align="flex-start" gap={6} wrap="nowrap">
+      <Group justify="space-between" align="center" gap={8} wrap="nowrap">
         <Text fw={700} size="xs">
           {pageLabel}
         </Text>
         <Badge
-          color={retained ? 'teal' : 'red'}
+          color={retained ? 'red' : 'teal'}
           radius="sm"
           size="xs"
           variant="light"
         >
-          {statusLabel}
+          {nextActionLabel}
         </Badge>
       </Group>
       <Group justify="space-between" align="center" gap={6} wrap="nowrap">
-        <Button
-          color={retained ? 'red' : 'teal'}
-          radius="sm"
-          size="compact-xs"
-          variant="subtle"
-          onClick={(event) => {
-            event.stopPropagation();
-            onAction();
-          }}
-          onKeyDown={(event) => {
-            event.stopPropagation();
-          }}
-        >
-          {actionLabel}
-        </Button>
-        <Text c={retained ? 'teal.2' : 'red.2'} fw={600} size="xs">
-          {statusLabel}
+        <Text c="dimmed" size="xs">
+          点击{nextActionLabel}
         </Text>
         {page.imageUrl ? (
           <Button
@@ -2116,7 +2100,6 @@ export function BatchGenerateModal({
                                             key={`${item.id}-retained-${page.uploadedPageNumber}`}
                                             page={page}
                                             retained
-                                            actionLabel="过滤"
                                             onAction={() =>
                                               removePageFromSlotFill(
                                                 item.id,
@@ -2163,7 +2146,6 @@ export function BatchGenerateModal({
                                             key={`${item.id}-filtered-${page.uploadedPageNumber}`}
                                             page={page}
                                             retained={false}
-                                            actionLabel="恢复保留"
                                             onAction={() =>
                                               restorePageForSlotFill(
                                                 item.id,
