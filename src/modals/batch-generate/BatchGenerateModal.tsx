@@ -10,6 +10,7 @@ import {
   Modal,
   Paper,
   Progress,
+  SimpleGrid,
   Stack,
   Text,
   Title,
@@ -56,6 +57,10 @@ interface DuplicatePdfFileNameAlert {
     fileName: string | null;
   }>;
 }
+
+type PageFilterPage = NonNullable<
+  GenerationTaskItemSummary['pdf_page_filter_pages']
+>[number];
 
 declare global {
   interface Window {
@@ -292,6 +297,90 @@ function getStatusLabel(status: string) {
   }
 }
 
+function getPageFilterPageLabel(page: PageFilterPage) {
+  return `第 ${page.originalPageNumber} 页`;
+}
+
+function PageFilterPageTile({
+  page,
+  selected,
+  onToggle,
+}: {
+  page: PageFilterPage;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const pageLabel = getPageFilterPageLabel(page);
+  const statusLabel = selected ? '保留' : '已过滤';
+  const borderColor = selected
+    ? 'rgba(16, 185, 129, 0.62)'
+    : 'rgba(248, 113, 113, 0.62)';
+  const background = selected
+    ? 'rgba(16, 185, 129, 0.12)'
+    : 'rgba(248, 113, 113, 0.08)';
+
+  return (
+    <Box
+      role="button"
+      tabIndex={0}
+      title={page.filterReason ?? `${pageLabel}：${statusLabel}`}
+      onClick={onToggle}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onToggle();
+        }
+      }}
+      style={{
+        minHeight: 72,
+        border: `1px solid ${borderColor}`,
+        borderRadius: 8,
+        background,
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'space-between',
+        padding: '9px 10px',
+      }}
+    >
+      <Group justify="space-between" align="flex-start" gap={6} wrap="nowrap">
+        <Text fw={700} size="xs">
+          {pageLabel}
+        </Text>
+        <Badge
+          color={selected ? 'teal' : 'red'}
+          radius="sm"
+          size="xs"
+          variant="light"
+        >
+          {selected ? '已选' : '过滤'}
+        </Badge>
+      </Group>
+      <Group justify="space-between" align="center" gap={6} wrap="nowrap">
+        <Text c={selected ? 'teal.2' : 'red.2'} fw={600} size="xs">
+          {statusLabel}
+        </Text>
+        {page.imageUrl ? (
+          <Button
+            radius="sm"
+            size="compact-xs"
+            variant="subtle"
+            onClick={(event) => {
+              event.stopPropagation();
+              window.open(page.imageUrl ?? '', '_blank', 'noopener,noreferrer');
+            }}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            查看
+          </Button>
+        ) : null}
+      </Group>
+    </Box>
+  );
+}
+
 function formatElapsedSeconds(
   item: GenerationTaskItemSummary,
   now: number,
@@ -351,6 +440,8 @@ export function BatchGenerateModal({
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const [confirmedPageNumbersByItemId, setConfirmedPageNumbersByItemId] =
     useState<Record<string, number[]>>({});
+  const [expandedFilteredPagesByItemId, setExpandedFilteredPagesByItemId] =
+    useState<Record<string, boolean>>({});
   const refreshTaskLists = async () => {
     await Promise.all([
       taskId
@@ -363,6 +454,33 @@ export function BatchGenerateModal({
       }),
       queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
     ]);
+  };
+  const toggleConfirmedPageNumber = (
+    itemId: string,
+    fallbackPageNumbers: number[],
+    uploadedPageNumber: number,
+  ) => {
+    setConfirmedPageNumbersByItemId((current) => {
+      const currentPages = current[itemId] ?? fallbackPageNumbers;
+      const nextPageSet = new Set(currentPages);
+
+      if (nextPageSet.has(uploadedPageNumber)) {
+        nextPageSet.delete(uploadedPageNumber);
+      } else {
+        nextPageSet.add(uploadedPageNumber);
+      }
+
+      return {
+        ...current,
+        [itemId]: Array.from(nextPageSet).sort((left, right) => left - right),
+      };
+    });
+  };
+  const toggleFilteredPagesExpanded = (itemId: string) => {
+    setExpandedFilteredPagesByItemId((current) => ({
+      ...current,
+      [itemId]: !current[itemId],
+    }));
   };
   const launchSlotFillForItem = useCallback(
     (
@@ -1824,6 +1942,18 @@ export function BatchGenerateModal({
                     .filter((page) => page.selectedForSlotFill !== false)
                     .map((page) => page.uploadedPageNumber);
                 const confirmedPageNumberSet = new Set(confirmedPageNumbers);
+                const retainedPageFilterPages = pageFilterPages.filter((page) =>
+                  confirmedPageNumberSet.has(page.uploadedPageNumber),
+                );
+                const filteredPageFilterPages = pageFilterPages.filter(
+                  (page) =>
+                    !confirmedPageNumberSet.has(page.uploadedPageNumber),
+                );
+                const filteredPagesExpanded = Boolean(
+                  expandedFilteredPagesByItemId[item.id],
+                );
+                const collapsedFilteredPreviewPages =
+                  filteredPageFilterPages.slice(0, 6);
                 return (
                   <Paper key={item.id} p="md" radius="xl" withBorder>
                     <Stack gap="sm">
@@ -1868,22 +1998,22 @@ export function BatchGenerateModal({
                       {item.status === 'pdf_pages_ready' ? (
                         <>
                           <Divider />
-                          <Paper
-                            p="sm"
-                            radius="lg"
+                          <Box
                             style={{
                               background: 'rgba(255,255,255,0.03)',
-                              border: '1px solid rgba(255,255,255,0.06)',
+                              border: '1px solid rgba(255,255,255,0.08)',
+                              borderRadius: 8,
+                              padding: 14,
                             }}
                           >
-                            <Stack gap="sm">
-                              <Group justify="space-between" align="center">
+                            <Stack gap="md">
+                              <Group justify="space-between" align="flex-start">
                                 <div>
                                   <Text fw={700} size="sm">
                                     确认用于回填的页面
                                   </Text>
                                   <Text c="dimmed" size="xs">
-                                    已由视觉模型预过滤。被误删的页面可以点回来，再开始回填。
+                                    系统已过滤掉疑似无关页面。请确认保留页，误删的页面可以恢复。
                                   </Text>
                                 </div>
                                 <Button
@@ -1904,109 +2034,183 @@ export function BatchGenerateModal({
                                     );
                                   }}
                                 >
-                                  开始回填
+                                  确认并开始回填
                                 </Button>
                               </Group>
+
+                              <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="xs">
+                                {[
+                                  {
+                                    label: '已保留',
+                                    value: `${retainedPageFilterPages.length} 页`,
+                                  },
+                                  {
+                                    label: '已过滤',
+                                    value: `${filteredPageFilterPages.length} 页`,
+                                  },
+                                  {
+                                    label: '共',
+                                    value: `${pageFilterPages.length} 页`,
+                                  },
+                                  {
+                                    label: '待回填',
+                                    value: `${getPendingSlotCount(item)} 个槽位`,
+                                  },
+                                ].map((metric) => (
+                                  <Box
+                                    key={metric.label}
+                                    style={{
+                                      border: '1px solid rgba(255,255,255,0.07)',
+                                      borderRadius: 8,
+                                      padding: '8px 10px',
+                                    }}
+                                  >
+                                    <Text c="dimmed" size="xs">
+                                      {metric.label}
+                                    </Text>
+                                    <Text fw={700} size="sm">
+                                      {metric.value}
+                                    </Text>
+                                  </Box>
+                                ))}
+                              </SimpleGrid>
+
                               {pageFilterPages.length > 0 ? (
-                                <Group gap="xs">
-                                  {pageFilterPages.map((page) => {
-                                    const selected = confirmedPageNumberSet.has(
-                                      page.uploadedPageNumber,
-                                    );
-                                    const decision = page.filterDecision ?? 'review';
-
-                                    return (
-                                      <Group
-                                        key={`${item.id}-${page.uploadedPageNumber}`}
-                                        gap={4}
+                                <>
+                                  <Stack gap="xs">
+                                    <Group
+                                      justify="space-between"
+                                      align="center"
+                                      gap="sm"
+                                    >
+                                      <Text fw={700} size="sm">
+                                        保留页面
+                                      </Text>
+                                      <Text c="dimmed" size="xs">
+                                        当前将使用{' '}
+                                        {retainedPageFilterPages.length} 页进行视觉回填
+                                      </Text>
+                                    </Group>
+                                    {retainedPageFilterPages.length > 0 ? (
+                                      <SimpleGrid
+                                        cols={{ base: 2, xs: 3, sm: 4, md: 6 }}
+                                        spacing="xs"
                                       >
-                                        <Button
-                                          color={
+                                        {retainedPageFilterPages.map((page) => (
+                                          <PageFilterPageTile
+                                            key={`${item.id}-retained-${page.uploadedPageNumber}`}
+                                            page={page}
                                             selected
-                                              ? 'teal'
-                                              : decision === 'drop'
-                                                ? 'red'
-                                                : 'gray'
-                                          }
-                                          radius="xl"
-                                          size="compact-xs"
-                                          variant={selected ? 'filled' : 'outline'}
-                                          title={
-                                            page.filterReason ??
-                                            '没有过滤说明'
-                                          }
-                                          onClick={() => {
-                                            setConfirmedPageNumbersByItemId(
-                                              (current) => {
-                                                const currentPages =
-                                                  current[item.id] ??
-                                                  confirmedPageNumbers;
-                                                const nextPageSet = new Set(
-                                                  currentPages,
-                                                );
+                                            onToggle={() =>
+                                              toggleConfirmedPageNumber(
+                                                item.id,
+                                                confirmedPageNumbers,
+                                                page.uploadedPageNumber,
+                                              )
+                                            }
+                                          />
+                                        ))}
+                                      </SimpleGrid>
+                                    ) : (
+                                      <Text c="red" size="xs">
+                                        当前没有保留页面，请从已过滤页面中恢复至少一页。
+                                      </Text>
+                                    )}
+                                  </Stack>
 
-                                                if (
-                                                  nextPageSet.has(
-                                                    page.uploadedPageNumber,
-                                                  )
-                                                ) {
-                                                  nextPageSet.delete(
-                                                    page.uploadedPageNumber,
-                                                  );
-                                                } else {
-                                                  nextPageSet.add(
-                                                    page.uploadedPageNumber,
-                                                  );
-                                                }
-
-                                                return {
-                                                  ...current,
-                                                  [item.id]: Array.from(
-                                                    nextPageSet,
-                                                  ).sort(
-                                                    (left, right) =>
-                                                      left - right,
-                                                  ),
-                                                };
-                                              },
-                                            );
-                                          }}
+                                  <Stack gap="xs">
+                                    <Group justify="space-between" align="center">
+                                      <Group gap="xs">
+                                        <Text fw={700} size="sm">
+                                          已过滤页面
+                                        </Text>
+                                        <Badge
+                                          color="red"
+                                          radius="sm"
+                                          size="sm"
+                                          variant="light"
                                         >
-                                          上传{page.uploadedPageNumber}/原
-                                          {page.originalPageNumber}
-                                        </Button>
-                                        {page.imageUrl ? (
-                                          <Button
-                                            radius="xl"
-                                            size="compact-xs"
-                                            variant="subtle"
-                                            onClick={() => {
-                                              window.open(
-                                                page.imageUrl ?? '',
-                                                '_blank',
-                                                'noopener,noreferrer',
-                                              );
-                                            }}
-                                          >
-                                            预览
-                                          </Button>
-                                        ) : null}
+                                          {filteredPageFilterPages.length}
+                                        </Badge>
                                       </Group>
-                                    );
-                                  })}
-                                </Group>
+                                      {filteredPageFilterPages.length > 0 ? (
+                                        <Button
+                                          radius="sm"
+                                          size="compact-xs"
+                                          variant="subtle"
+                                          onClick={() =>
+                                            toggleFilteredPagesExpanded(item.id)
+                                          }
+                                        >
+                                          {filteredPagesExpanded
+                                            ? '收起'
+                                            : '展开'}
+                                        </Button>
+                                      ) : null}
+                                    </Group>
+
+                                    {filteredPageFilterPages.length === 0 ? (
+                                      <Text c="dimmed" size="xs">
+                                        没有被过滤的页面。
+                                      </Text>
+                                    ) : filteredPagesExpanded ? (
+                                      <SimpleGrid
+                                        cols={{ base: 2, xs: 3, sm: 4, md: 6 }}
+                                        spacing="xs"
+                                      >
+                                        {filteredPageFilterPages.map((page) => (
+                                          <PageFilterPageTile
+                                            key={`${item.id}-filtered-${page.uploadedPageNumber}`}
+                                            page={page}
+                                            selected={false}
+                                            onToggle={() =>
+                                              toggleConfirmedPageNumber(
+                                                item.id,
+                                                confirmedPageNumbers,
+                                                page.uploadedPageNumber,
+                                              )
+                                            }
+                                          />
+                                        ))}
+                                      </SimpleGrid>
+                                    ) : (
+                                      <Group gap="xs">
+                                        {collapsedFilteredPreviewPages.map(
+                                          (page) => (
+                                            <Badge
+                                              key={`${item.id}-filtered-preview-${page.uploadedPageNumber}`}
+                                              color="red"
+                                              radius="sm"
+                                              variant="outline"
+                                            >
+                                              {getPageFilterPageLabel(page)}
+                                            </Badge>
+                                          ),
+                                        )}
+                                        {filteredPageFilterPages.length >
+                                        collapsedFilteredPreviewPages.length ? (
+                                          <Text c="dimmed" size="xs">
+                                            另有{' '}
+                                            {filteredPageFilterPages.length -
+                                              collapsedFilteredPreviewPages.length}{' '}
+                                            页，展开可恢复。
+                                          </Text>
+                                        ) : (
+                                          <Text c="dimmed" size="xs">
+                                            展开可恢复误删页面。
+                                          </Text>
+                                        )}
+                                      </Group>
+                                    )}
+                                  </Stack>
+                                </>
                               ) : (
                                 <Text c="dimmed" size="xs">
                                   暂无页面过滤结果。可以刷新状态后重试。
                                 </Text>
                               )}
-                              <Text c="dimmed" size="xs">
-                                当前选择 {confirmedPageNumbers.length}/
-                                {pageFilterPages.length} 页用于 VISION_LLM
-                                回填。
-                              </Text>
                             </Stack>
-                          </Paper>
+                          </Box>
                         </>
                       ) : null}
 
