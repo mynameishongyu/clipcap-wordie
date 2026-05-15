@@ -13,7 +13,7 @@ import {
   Text,
   Title,
 } from '@mantine/core';
-import type { ContextModalProps } from '@mantine/modals';
+import { modals, type ContextModalProps } from '@mantine/modals';
 import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -138,6 +138,10 @@ function createUploadRow(): UploadRow {
     parseError: null,
     forceVisionPageFill: false,
   };
+}
+
+function normalizeUploadFileName(fileName: string) {
+  return fileName.trim().toLocaleLowerCase();
 }
 
 const DEFAULT_PDF_FILL_MAX_TASK_COUNT = 3;
@@ -665,7 +669,7 @@ export function BatchGenerateModal({
         .catch((error) => {
           notifications.show({
             color: 'red',
-            title: '批量生成失败',
+            title: '页面准备失败',
             message:
               error instanceof Error
                 ? `${item.source_pdf_name}：${error.message}`
@@ -1346,6 +1350,50 @@ export function BatchGenerateModal({
   };
 
   const handleSelectPdfFile = async (rowId: string, file: File | null) => {
+    if (file) {
+      const normalizedSelectedFileName = normalizeUploadFileName(file.name);
+      const duplicateRows = rows.filter(
+        (row) =>
+          row.id !== rowId &&
+          row.file &&
+          normalizeUploadFileName(row.file.name) === normalizedSelectedFileName,
+      );
+
+      if (duplicateRows.length > 0) {
+        console.warn('[Batch Generate][Duplicate PDF File Name]', {
+          selectedFileName: file.name,
+          selectedRowId: rowId,
+          duplicateRows: duplicateRows.map((row, index) => ({
+            rowId: row.id,
+            rowNumber:
+              rows.findIndex((currentRow) => currentRow.id === row.id) + 1,
+            fileName: row.file?.name ?? null,
+            duplicateIndex: index + 1,
+          })),
+        });
+
+        let duplicateFileNameModalId = '';
+        duplicateFileNameModalId = modals.open({
+          centered: true,
+          title: 'PDF 文件名重复',
+          children: (
+            <Stack gap="sm">
+              <Text size="sm">
+                当前选择的文件名“{file.name}”已经上传过，请选择其他 PDF，或先删除/替换已有记录。
+              </Text>
+              <Button
+                radius="xl"
+                onClick={() => modals.close(duplicateFileNameModalId)}
+              >
+                知道了
+              </Button>
+            </Stack>
+          ),
+        });
+        return;
+      }
+    }
+
     updateRow(rowId, {
       file,
       parsedPdf: null,
@@ -1531,8 +1579,8 @@ export function BatchGenerateModal({
       ]);
       notifications.show({
         color: 'teal',
-        title: '批量生成已开始',
-        message: `已创建 1 个任务，包含 ${result.items.length} 个 PDF 子任务。`,
+        title: '页面准备已开始',
+        message: `已创建 1 个任务，包含 ${result.items.length} 个 PDF 子任务。页面准备完成后会继续进入回填确认流程。`,
       });
     } catch (error) {
       notifications.show({
@@ -1541,7 +1589,7 @@ export function BatchGenerateModal({
         message:
           error instanceof Error
             ? error.message
-            : '批量生成任务创建失败，请稍后重试。',
+            : '页面准备任务创建失败，请稍后重试。',
       });
     } finally {
       setIsPreparingFiles(false);
@@ -1551,14 +1599,14 @@ export function BatchGenerateModal({
 
   const modalDescription = useMemo(() => {
     if (!taskId) {
-      return '每条记录上传一个 PDF。创建任务前会先在本地解析 PDF，并使用全部页面作为槽位回填来源。';
+      return '每条记录上传一个 PDF。点击后会先解析、上传并准备页面。';
     }
 
     if (taskQuery.isLoading) {
       return '任务已创建，正在同步最新状态。';
     }
 
-    return '任务已经开始执行。识别完成后，每个文件都会出现“去核查”入口；核查完毕后会显示下载结果按钮。';
+    return '任务已经开始执行。页面准备完成后会进入回填确认；核查完毕后会显示下载结果按钮。';
   }, [taskId, taskQuery.isLoading]);
 
   return (
@@ -1600,7 +1648,7 @@ export function BatchGenerateModal({
               <Loader color="teal" />
               <Title order={4}>正在上传文件</Title>
               <Text c="dimmed" size="sm" ta="center">
-                系统正在上传并解析 PDF，随后会创建批量任务。
+                系统正在上传并解析 PDF，随后会创建页面准备任务。
                 这个过程可能需要一点时间，请稍候。已处理{' '}
                 {submissionElapsedSeconds} 秒。
               </Text>
@@ -1611,7 +1659,7 @@ export function BatchGenerateModal({
 
       <Stack gap="lg">
         <Stack gap="xs">
-          <Title order={3}>批量生成任务</Title>
+          <Title order={3}>页面准备任务</Title>
           <Text c="dimmed" size="sm">
             当前模板：{innerProps.templateName}。{modalDescription}
           </Text>
@@ -1700,7 +1748,7 @@ export function BatchGenerateModal({
                                   {selectionState.selectedPageNumbers.length}{' '}
                                   页，对应原 PDF 第{' '}
                                   {selectionState.selectedPageRangeLabel}{' '}
-                                  页，全部参与槽位回填。
+                                  页，先参与页面准备，再进入槽位回填。
                                 </Text>
                               </Group>
                             );
@@ -1751,7 +1799,7 @@ export function BatchGenerateModal({
                   radius="xl"
                   onClick={handleCreateTask}
                 >
-                  {isPreparingFiles ? '正在解析 PDF' : '批量生成'}
+                  {isPreparingFiles ? '正在准备页面' : '开始页面准备'}
                 </Button>
               </Group>
             </Group>
