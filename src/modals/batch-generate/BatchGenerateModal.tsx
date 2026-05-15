@@ -22,7 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import {
-  getPdfVisionUploadConcurrency,
+  getPdfVisionRenderConcurrency,
   parsePdf,
   renderPdfPagesForVision,
   type PdfVisionPageInput,
@@ -405,6 +405,30 @@ function formatElapsedSeconds(
   return item.elapsed_seconds;
 }
 
+function formatDurationMs(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return '0.00 秒';
+  }
+
+  if (durationMs < 1000) {
+    return `${durationMs} 毫秒`;
+  }
+
+  return `${(durationMs / 1000).toFixed(2)} 秒`;
+}
+
+function getTraceTimestampMs(line: string) {
+  const timestampMatch = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]/);
+
+  if (!timestampMatch?.[1]) {
+    return null;
+  }
+
+  const parsedTimestamp = Date.parse(timestampMatch[1]);
+
+  return Number.isFinite(parsedTimestamp) ? parsedTimestamp : null;
+}
+
 function getPendingSlotCount(item: GenerationTaskItemSummary) {
   return Math.max(0, item.slot_total_count - item.slot_completed_count);
 }
@@ -439,6 +463,8 @@ export function BatchGenerateModal({
     new Map(),
   );
   const itemTraceRef = useRef<Map<string, string>>(new Map());
+  const pageFilterStartedAtRef = useRef<Map<string, number>>(new Map());
+  const pageFilterDurationLoggedItemIdsRef = useRef<Set<string>>(new Set());
   const [confirmedPageNumbersByItemId, setConfirmedPageNumbersByItemId] =
     useState<Record<string, number[]>>({});
   const refreshTaskLists = async () => {
@@ -819,6 +845,7 @@ export function BatchGenerateModal({
         .filter((line) => line.trim().length > 0);
 
       newLines.forEach((line) => {
+        const traceTimestampMs = getTraceTimestampMs(line);
         const traceLine = line.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+/, '');
         const slotFillInputMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextInputData\]\[(.+)\] (.+)$/,
@@ -859,6 +886,72 @@ export function BatchGenerateModal({
         const rawErrorMatch = traceLine.match(
           /^\[PDF Fill\]\[RawError\]\[(.+)\] (.*)$/,
         );
+
+        if (
+          traceLine.includes(
+            '[PDF Fill][PageFilter] Starting visual page filter batch 1/',
+          ) &&
+          traceTimestampMs !== null
+        ) {
+          pageFilterStartedAtRef.current.set(item.id, traceTimestampMs);
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] 页面过滤开始`,
+            {
+              taskItemId: item.id,
+              startedAt: new Date(traceTimestampMs).toISOString(),
+            },
+          );
+        }
+
+        if (
+          traceLine.includes(
+            '[PDF Fill][PageFilter] PDF page images prepared and visually filtered',
+          )
+        ) {
+          const startedAt = pageFilterStartedAtRef.current.get(item.id);
+          const finishedAt = traceTimestampMs ?? Date.now();
+
+          if (
+            startedAt &&
+            !pageFilterDurationLoggedItemIdsRef.current.has(item.id)
+          ) {
+            pageFilterDurationLoggedItemIdsRef.current.add(item.id);
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}] 页面过滤总耗时：${formatDurationMs(
+                finishedAt - startedAt,
+              )}`,
+              {
+                taskItemId: item.id,
+                startedAt: new Date(startedAt).toISOString(),
+                finishedAt: new Date(finishedAt).toISOString(),
+                durationMs: finishedAt - startedAt,
+              },
+            );
+          }
+        }
+
+        if (traceLine.includes('[PDF Fill][RawError][PageFilter]')) {
+          const startedAt = pageFilterStartedAtRef.current.get(item.id);
+          const finishedAt = traceTimestampMs ?? Date.now();
+
+          if (
+            startedAt &&
+            !pageFilterDurationLoggedItemIdsRef.current.has(item.id)
+          ) {
+            pageFilterDurationLoggedItemIdsRef.current.add(item.id);
+            console.warn(
+              `[Batch Generate][${item.source_pdf_name}] 页面过滤失败前耗时：${formatDurationMs(
+                finishedAt - startedAt,
+              )}`,
+              {
+                taskItemId: item.id,
+                startedAt: new Date(startedAt).toISOString(),
+                finishedAt: new Date(finishedAt).toISOString(),
+                durationMs: finishedAt - startedAt,
+              },
+            );
+          }
+        }
 
         if (pageFilterPromptMatch) {
           const label = pageFilterPromptMatch[1] ?? 'batch';
@@ -1403,6 +1496,8 @@ export function BatchGenerateModal({
     Array.from(itemTraceRef.current.keys()).forEach((itemId) => {
       if (!nextKnownIds.has(itemId)) {
         itemTraceRef.current.delete(itemId);
+        pageFilterStartedAtRef.current.delete(itemId);
+        pageFilterDurationLoggedItemIdsRef.current.delete(itemId);
       }
     });
   }, [taskQuery.data]);
@@ -1508,7 +1603,8 @@ export function BatchGenerateModal({
     }
 
     setIsPreparingFiles(true);
-    setSubmissionStartedAt(Date.now());
+    const submissionStartedAtMs = Date.now();
+    setSubmissionStartedAt(submissionStartedAtMs);
     logSubmissionStage({
       title: '正在准备文件',
       description:
@@ -1516,6 +1612,7 @@ export function BatchGenerateModal({
     });
 
     try {
+      const renderAllStartedAt = Date.now();
       const preparedFiles = await Promise.all(
         rowsWithFiles.map(async (row, rowIndex) => {
           const file = row.file;
@@ -1536,11 +1633,12 @@ export function BatchGenerateModal({
               original_page_number: originalPageNumber,
             }),
           );
-          const pdfPageRenderConcurrency = getPdfVisionUploadConcurrency();
+          const pdfPageRenderConcurrency = getPdfVisionRenderConcurrency();
           logSubmissionStage({
             title: '正在生成 PDF 页面图片',
             description: `${file.name}：正在并行生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页，并发数 ${pdfPageRenderConcurrency}）。`,
           });
+          const renderStartedAt = Date.now();
           const pdfVisionPages = await renderPdfPagesForVision(
             file,
             selectedOriginalPageNumbers,
@@ -1552,6 +1650,19 @@ export function BatchGenerateModal({
                   description: `${file.name}：已生成 ${index}/${total} 张 PDF 页面图片，并发数 ${pdfPageRenderConcurrency}。`,
                 });
               },
+            },
+          );
+          const renderDurationMs = Date.now() - renderStartedAt;
+          console.info(
+            `[Batch Generate][${file.name}] PDF 转 PNG 总耗时：${formatDurationMs(
+              renderDurationMs,
+            )}`,
+            {
+              fileName: file.name,
+              pageCount: pdfVisionPages.length,
+              selectedOriginalPageNumbers,
+              renderConcurrency: pdfPageRenderConcurrency,
+              durationMs: renderDurationMs,
             },
           );
           logSubmissionStage({
@@ -1626,13 +1737,36 @@ export function BatchGenerateModal({
           };
         }),
       );
+      const renderAllDurationMs = Date.now() - renderAllStartedAt;
+      console.info(
+        `[Batch Generate] PDF 转 PNG 全部文件总耗时：${formatDurationMs(
+          renderAllDurationMs,
+        )}`,
+        {
+          fileCount: preparedFiles.length,
+          fileNames: preparedFiles.map((item) => item.file.name),
+          durationMs: renderAllDurationMs,
+        },
+      );
 
+      const uploadAllStartedAt = Date.now();
       const result = await createGenerationTaskMutation.mutateAsync({
         templateId: innerProps.templateId,
         templateName: innerProps.templateName,
         files: preparedFiles,
         onStageChange: logSubmissionStage,
       });
+      const uploadAndCreateDurationMs = Date.now() - uploadAllStartedAt;
+      console.info(
+        `[Batch Generate] 上传 PDF 页面图片并创建任务总耗时：${formatDurationMs(
+          uploadAndCreateDurationMs,
+        )}`,
+        {
+          fileCount: preparedFiles.length,
+          itemCount: result.items.length,
+          durationMs: uploadAndCreateDurationMs,
+        },
+      );
 
       setTaskId(result.task.id);
       void Promise.all([

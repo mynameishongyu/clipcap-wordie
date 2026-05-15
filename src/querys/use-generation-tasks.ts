@@ -133,6 +133,18 @@ function getPdfVisionUploadConcurrency() {
   );
 }
 
+function formatDurationMs(durationMs: number) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return '0.00 秒';
+  }
+
+  if (durationMs < 1000) {
+    return `${durationMs} 毫秒`;
+  }
+
+  return `${(durationMs / 1000).toFixed(2)} 秒`;
+}
+
 async function runWithConcurrency<T>(
   items: T[],
   concurrency: number,
@@ -234,7 +246,8 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
     throw new Error('请先登录后再上传 PDF。');
   }
 
-  return Promise.all(
+  const uploadAllStartedAt = Date.now();
+  const results = await Promise.all(
     input.files.map(async (item) => {
       input.onStageChange?.({
         title: '正在准备 PDF 页面图片',
@@ -262,6 +275,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
           `${item.file.name}：准备并行上传 ${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
       });
 
+      const uploadStartedAt = Date.now();
       await runWithConcurrency(
         item.pageVisionPages,
         uploadConcurrency,
@@ -312,6 +326,20 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
           };
         },
       );
+      const uploadDurationMs = Date.now() - uploadStartedAt;
+      console.info(
+        `[Batch Generate][${item.file.name}] 上传 PDF 页面图片到 Supabase 总耗时：${formatDurationMs(
+          uploadDurationMs,
+        )}`,
+        {
+          fileName: item.file.name,
+          pageImageCount: totalPageImageCount,
+          uploadedPageImageCount,
+          uploadConcurrency,
+          durationMs: uploadDurationMs,
+          storagePath: pdfPageFolderPath,
+        },
+      );
 
       return {
         file_name: item.file.name,
@@ -330,6 +358,20 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
       };
     }),
   );
+  const uploadAllDurationMs = Date.now() - uploadAllStartedAt;
+
+  console.info(
+    `[Batch Generate] 上传 PDF 页面图片到 Supabase 全部文件总耗时：${formatDurationMs(
+      uploadAllDurationMs,
+    )}`,
+    {
+      fileCount: input.files.length,
+      fileNames: input.files.map((item) => item.file.name),
+      durationMs: uploadAllDurationMs,
+    },
+  );
+
+  return results;
 }
 
 export function useCreateGenerationTask() {

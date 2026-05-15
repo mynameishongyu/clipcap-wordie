@@ -33,6 +33,8 @@ export interface PdfVisionPageCrop {
 const DEFAULT_PDF_RENDER_SCALE = 6.0;
 const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
+const DEFAULT_PDF_VISION_RENDER_CONCURRENCY = 3;
+const MAX_PDF_VISION_RENDER_CONCURRENCY = 8;
 const DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY = 3;
 const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
 const PDF_AUTO_CROP_WHITE_MARGIN = true;
@@ -99,6 +101,21 @@ export function getPdfRenderConfig() {
     imageFormat: getPdfRenderImageFormat(),
     imageQuality: getPdfRenderJpegQuality(),
   };
+}
+
+export function getPdfVisionRenderConcurrency() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_VISION_RENDER_CONCURRENCY,
+  );
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return DEFAULT_PDF_VISION_RENDER_CONCURRENCY;
+  }
+
+  return Math.min(
+    MAX_PDF_VISION_RENDER_CONCURRENCY,
+    Math.max(1, Math.floor(parsedValue)),
+  );
 }
 
 export function getPdfVisionUploadConcurrency() {
@@ -365,9 +382,10 @@ export async function renderPdfPagesForVision(
     length: pageNumbers.length,
   });
   const { scale, imageFormat, imageQuality } = getPdfRenderConfig();
+  const configuredRenderConcurrency = getPdfVisionRenderConcurrency();
   const renderConcurrency = Math.min(
-    getPdfVisionUploadConcurrency(),
-    Math.max(1, Math.floor(options?.concurrency ?? 1)),
+    configuredRenderConcurrency,
+    Math.max(1, Math.floor(options?.concurrency ?? configuredRenderConcurrency)),
   );
   let completedPageCount = 0;
 
