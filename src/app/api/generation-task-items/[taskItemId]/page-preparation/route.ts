@@ -342,9 +342,6 @@ async function classifyVisionPagesForSlotFill(params: {
         });
       });
 
-      await params.onTrace?.({
-        message: `[PDF Fill][PageFilter] Starting visual page filter batch ${batchIndex + 1}/${batches.length} for ${params.documentName}, pages=${batch.map((page) => page.page_number).join(',')}.`,
-      });
       const dropExampleImageSummaries = params.dropExamples.map(
         (example, index) => {
           const imageBytes = estimateDataUrlBytes(example.image_data_url);
@@ -379,6 +376,14 @@ async function classifyVisionPagesForSlotFill(params: {
       );
       const requestImageTotalBytes =
         dropExampleImageTotalBytes + candidateImageTotalBytes;
+      await params.onTrace?.({
+        message:
+          `[PDF Fill][PageFilter] Starting visual page filter batch ${batchIndex + 1}/${batches.length} ` +
+          `for ${params.documentName}, pages=${batch.map((page) => page.page_number).join(',')}, ` +
+          `vision image total size=${formatBytes(requestImageTotalBytes)}, ` +
+          `candidate page images=${formatBytes(candidateImageTotalBytes)}, ` +
+          `drop example images=${formatBytes(dropExampleImageTotalBytes)}.`,
+      });
       await params.onTrace?.({
         message: `[PDF Fill][PageFilterPrompt][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify({
           route: '/api/generation-task-items/[taskItemId]/page-preparation',

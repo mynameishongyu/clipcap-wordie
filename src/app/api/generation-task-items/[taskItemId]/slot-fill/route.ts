@@ -265,7 +265,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
     });
   }
 
-  const pages = await Promise.all(
+  const pageResults = await Promise.all(
     [...pageAssetsByKey.values()]
       .sort((left, right) => left.pageNumber - right.pageNumber)
       .map(async (asset) => {
@@ -274,9 +274,28 @@ async function loadReferenceExamplePagesWithBbox(params: {
           .download(asset.storagePath);
 
         if (error || !fileBlob) {
-          throw (
-            error ?? new Error(`无法下载示例 PDF 页图: ${asset.storagePath}`)
+          const errorMessage = error?.message ?? 'Missing storage object';
+
+          console.warn(
+            '[PDF Fill][ReferenceExample] Skipping missing reference page image',
+            {
+              pageNumber: asset.pageNumber,
+              storagePath: asset.storagePath,
+              slotCount: asset.slotBoxes.length,
+              error: errorMessage,
+            },
           );
+
+          return {
+            page: null,
+            skippedSlotCount: asset.slotBoxes.length,
+            downloadFailure: {
+              page_number: asset.pageNumber,
+              storage_path: asset.storagePath,
+              slot_count: asset.slotBoxes.length,
+              error_message: errorMessage,
+            },
+          };
         }
 
         const buffer = Buffer.from(await fileBlob.arrayBuffer());
@@ -335,36 +354,51 @@ async function loadReferenceExamplePagesWithBbox(params: {
         }
 
         return {
-          page_number: asset.pageNumber,
-          original_page_number: asset.pageNumber,
-          image_data_url: imageDataUrl,
-          ...(annotatedImageDataUrl
-            ? { annotated_image_data_url: annotatedImageDataUrl }
-            : {}),
-          ...(annotatedPreviewUrl
-            ? { annotated_preview_url: annotatedPreviewUrl }
-            : {}),
-          ...(annotatedStoragePath
-            ? { annotated_storage_path: annotatedStoragePath }
-            : {}),
-          annotated_slots: asset.slotBoxes.map((slotBox) => ({
-            slot_key: slotBox.slotKey,
-            slot_name: slotBox.slotName,
-            slot_source: slotBox.slotSource,
-            example_annotation_label: slotBox.slotKey,
-            example_box_2d: normalizedBboxToGeminiBox2d(slotBox.bbox),
-            example_evidence_text: slotBox.exampleEvidenceText,
-            example_slot_value: slotBox.exampleSlotValue,
-          })),
-          example_pdf_file_name: asset.examplePdfFileName,
-        } satisfies ReferencePdfVisionPageInput;
+          page: {
+            page_number: asset.pageNumber,
+            original_page_number: asset.pageNumber,
+            image_data_url: imageDataUrl,
+            ...(annotatedImageDataUrl
+              ? { annotated_image_data_url: annotatedImageDataUrl }
+              : {}),
+            ...(annotatedPreviewUrl
+              ? { annotated_preview_url: annotatedPreviewUrl }
+              : {}),
+            ...(annotatedStoragePath
+              ? { annotated_storage_path: annotatedStoragePath }
+              : {}),
+            annotated_slots: asset.slotBoxes.map((slotBox) => ({
+              slot_key: slotBox.slotKey,
+              slot_name: slotBox.slotName,
+              slot_source: slotBox.slotSource,
+              example_annotation_label: slotBox.slotKey,
+              example_box_2d: normalizedBboxToGeminiBox2d(slotBox.bbox),
+              example_evidence_text: slotBox.exampleEvidenceText,
+              example_slot_value: slotBox.exampleSlotValue,
+            })),
+            example_pdf_file_name: asset.examplePdfFileName,
+          } satisfies ReferencePdfVisionPageInput,
+          skippedSlotCount: 0,
+          downloadFailure: null,
+        };
       }),
+  );
+  const skippedReferencePageDownloads = pageResults.flatMap((result) =>
+    result.downloadFailure ? [result.downloadFailure] : [],
+  );
+  const pages = pageResults.flatMap((result) =>
+    result.page ? [result.page] : [],
+  );
+  skippedSlotsWithoutPageImage += pageResults.reduce(
+    (sum, result) => sum + result.skippedSlotCount,
+    0,
   );
 
   return {
     pages,
     skippedSlotsWithoutBbox,
     skippedSlotsWithoutPageImage,
+    skippedReferencePageDownloads,
   };
 }
 
@@ -464,6 +498,31 @@ async function runGenerationTaskItemSlotFill(params: {
       );
     }
 
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][SlotFillPreflight] ${JSON.stringify({
+        document_name: params.item.source_pdf_name,
+        slot_count: slotSchema.length,
+        precomputed_vision_page_count: precomputedVisionPages.length,
+        confirmed_slot_fill_page_numbers:
+          params.item.llm_input?.confirmed_slot_fill_page_numbers ?? null,
+        used_page_image_assets: pageImageAssets.map((asset) => ({
+          uploaded_page_number: asset.uploaded_page_number,
+          original_page_number: asset.original_page_number,
+          storage_path: asset.storage_path,
+          used_for_slot_fill: asset.used_for_slot_fill ?? true,
+        })),
+        ignored_page_image_assets: allPageImageAssets
+          .filter((asset) => asset.used_for_slot_fill === false)
+          .map((asset) => ({
+            uploaded_page_number: asset.uploaded_page_number,
+            original_page_number: asset.original_page_number,
+            storage_path: asset.storage_path,
+          })),
+      })}`,
+    );
+
     const visionPages =
       precomputedVisionPages.length > 0
         ? precomputedVisionPages
@@ -537,13 +596,15 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[PDF Fill][ReferenceExample] Using ${referenceExamplePages.pages.length} example PDF page image(s) with bbox for slot fill; skipped ${referenceExamplePages.skippedSlotsWithoutBbox} slot(s) without bbox and ${referenceExamplePages.skippedSlotsWithoutPageImage} slot(s) without stored example page image.`,
+      `[PDF Fill][ReferenceExample] Using ${referenceExamplePages.pages.length} example PDF page image(s) with bbox for slot fill; skipped ${referenceExamplePages.skippedSlotsWithoutBbox} slot(s) without bbox, ${referenceExamplePages.skippedSlotsWithoutPageImage} slot(s) without readable stored example page image, and ${referenceExamplePages.skippedReferencePageDownloads.length} missing reference page object(s).`,
     );
     await appendProcessingTrace(
       admin,
       params.item.id,
       `[PDF Fill][ReferenceExampleImages] ${JSON.stringify({
         document_name: params.item.source_pdf_name,
+        skipped_reference_page_downloads:
+          referenceExamplePages.skippedReferencePageDownloads,
         pages: referenceExamplePages.pages.map((page) => ({
           example_pdf_file_name: page.example_pdf_file_name ?? null,
           page_number: page.page_number,
@@ -698,6 +759,19 @@ async function runGenerationTaskItemSlotFill(params: {
           slotCount: slotSchema.length,
           visionPageCount: precomputedVisionPages.length,
           pageImageAssetCount: pageImageAssets.length,
+          usedPageImageAssets: pageImageAssets.map((asset) => ({
+            uploaded_page_number: asset.uploaded_page_number,
+            original_page_number: asset.original_page_number,
+            storage_path: asset.storage_path,
+            used_for_slot_fill: asset.used_for_slot_fill ?? true,
+          })),
+          ignoredPageImageAssets: allPageImageAssets
+            .filter((asset) => asset.used_for_slot_fill === false)
+            .map((asset) => ({
+              uploaded_page_number: asset.uploaded_page_number,
+              original_page_number: asset.original_page_number,
+              storage_path: asset.storage_path,
+            })),
         }),
       )}`,
     );
@@ -719,6 +793,19 @@ async function runGenerationTaskItemSlotFill(params: {
         slotCount: slotSchema.length,
         visionPageCount: precomputedVisionPages.length,
         pageImageAssetCount: pageImageAssets.length,
+        usedPageImageAssets: pageImageAssets.map((asset) => ({
+          uploaded_page_number: asset.uploaded_page_number,
+          original_page_number: asset.original_page_number,
+          storage_path: asset.storage_path,
+          used_for_slot_fill: asset.used_for_slot_fill ?? true,
+        })),
+        ignoredPageImageAssets: allPageImageAssets
+          .filter((asset) => asset.used_for_slot_fill === false)
+          .map((asset) => ({
+            uploaded_page_number: asset.uploaded_page_number,
+            original_page_number: asset.original_page_number,
+            storage_path: asset.storage_path,
+          })),
       }),
     });
   }

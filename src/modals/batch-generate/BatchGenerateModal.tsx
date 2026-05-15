@@ -859,6 +859,9 @@ export function BatchGenerateModal({
         const slotFillReferenceImagesMatch = traceLine.match(
           /^\[PDF Fill\]\[ReferenceExampleImages\] (.+)$/,
         );
+        const slotFillPreflightMatch = traceLine.match(
+          /^\[PDF Fill\]\[SlotFillPreflight\] (.+)$/,
+        );
         const errorDetailsMatch = traceLine.match(
           /^\[PDF Fill\]\[(PagePreparation|Text)\]\[ErrorDetails\]\[(.+)\] (.+)$/,
         );
@@ -1203,6 +1206,23 @@ export function BatchGenerateModal({
           console.error(
             `[Batch Generate][${item.source_pdf_name}] Raw ${scope} error`,
             rawMessage,
+          );
+          return;
+        }
+
+        if (slotFillPreflightMatch) {
+          const parsedPreflight = parseTraceJson<Record<string, unknown>>(
+            slotFillPreflightMatch[1] ?? '{}',
+            'slot fill preflight',
+          );
+
+          if (!parsedPreflight) {
+            return;
+          }
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill preflight: images and slots before VISION_LLM`,
+            parsedPreflight,
           );
           return;
         }
