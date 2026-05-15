@@ -9,10 +9,14 @@ import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 
 export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
-export type OcrImageAsset = {
+export type PdfPageImageAsset = {
   uploaded_page_number: number;
   original_page_number: number;
   storage_path: string;
+  filter_decision?: 'keep' | 'drop' | 'review' | string;
+  filter_reason?: string | null;
+  filter_confidence?: number | null;
+  used_for_slot_fill?: boolean;
   crop?: {
     left: number;
     top: number;
@@ -48,16 +52,28 @@ export type GenerationTaskItemRecord = {
     slot_schema?: GenerationSlotSchemaItem[];
     pages?: PdfPageInput[];
     vision_pages?: PdfVisionPageInput[];
-    ocr_image_assets?: OcrImageAsset[];
+    ocr_image_assets?: PdfPageImageAsset[];
     likely_scanned?: boolean;
     total_text_length?: number;
-    force_ocr?: boolean;
+    force_vision_page_fill?: boolean;
     selected_original_page_numbers?: number[];
+    confirmed_slot_fill_page_numbers?: number[];
     uploaded_page_number_mapping?: Array<{
       uploaded_page_number: number;
       original_page_number: number;
     }>;
     selected_page_range_label?: string;
+    page_filter?: {
+      completed_at?: string;
+      total_page_count?: number;
+      kept_page_count?: number;
+      dropped_page_count?: number;
+      review_page_count?: number;
+      drop_example_count?: number;
+      model?: string;
+      provider?: string;
+      error_message?: string;
+    };
   } | null;
 };
 
@@ -137,14 +153,14 @@ export function normalizeSelectedOriginalPageNumbers(value: unknown) {
   );
 }
 
-export function normalizeOcrImageAssets(value: unknown): OcrImageAsset[] {
+export function normalizePdfPageImageAssets(value: unknown): PdfPageImageAsset[] {
   if (!Array.isArray(value)) {
     return [];
   }
 
   return value
     .filter(
-      (entry): entry is OcrImageAsset =>
+      (entry): entry is PdfPageImageAsset =>
         !!entry &&
         typeof entry === 'object' &&
         typeof entry.uploaded_page_number === 'number' &&
@@ -157,6 +173,10 @@ export function normalizeOcrImageAssets(value: unknown): OcrImageAsset[] {
         entry.storage_path.trim().length > 0,
     )
     .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+}
+
+export function filterPdfPageImageAssetsForSlotFill(assets: PdfPageImageAsset[]) {
+  return assets.filter((asset) => asset.used_for_slot_fill !== false);
 }
 
 function getMimeTypeFromStoragePath(storagePath: string) {
@@ -179,20 +199,20 @@ function getMimeTypeFromStoragePath(storagePath: string) {
 
 export async function loadVisionPagesFromStoredAssets(params: {
   admin: AdminClient;
-  ocrImageAssets: OcrImageAsset[];
+  pageImageAssets: PdfPageImageAsset[];
 }) {
-  if (params.ocrImageAssets.length === 0) {
+  if (params.pageImageAssets.length === 0) {
     return [];
   }
 
   return Promise.all(
-    params.ocrImageAssets.map(async (asset) => {
+    params.pageImageAssets.map(async (asset) => {
       const { data: fileBlob, error } = await params.admin.storage
         .from('generation-pdfs')
         .download(asset.storage_path);
 
       if (error || !fileBlob) {
-        throw error ?? new Error(`无法下载 OCR 页图: ${asset.storage_path}`);
+        throw error ?? new Error(`无法下载 PDF 页图: ${asset.storage_path}`);
       }
 
       const buffer = Buffer.from(await fileBlob.arrayBuffer());
@@ -228,6 +248,7 @@ export async function recalculateTaskSummary(admin: AdminClient, taskId: string)
         'running',
         'uploaded',
         'pending',
+        'page_preparing',
         'ocr_running',
         'pdf_pages_ready',
         'slot_filling',

@@ -47,12 +47,13 @@ async function parseApiPayload<T>(
 ): Promise<{
   payload: T | null;
   message: string | null;
+  rawText: string;
 }> {
   const contentType = response.headers.get('content-type') ?? '';
   const rawText = await response.text();
 
   if (!rawText) {
-    return { payload: null, message: null };
+    return { payload: null, message: null, rawText };
   }
 
   if (contentType.includes('application/json')) {
@@ -67,19 +68,21 @@ async function parseApiPayload<T>(
           typeof payload.message === 'string'
             ? payload.message
             : null,
+        rawText,
       };
     } catch {
-      return { payload: null, message: rawText };
+      return { payload: null, message: rawText, rawText };
     }
   }
 
-  return { payload: null, message: rawText };
+  return { payload: null, message: rawText, rawText };
 }
 
 const runningItemStatuses = [
   'uploaded',
   'running',
   'pending',
+  'page_preparing',
   'ocr_running',
   'pdf_pages_ready',
   'slot_filling',
@@ -158,16 +161,19 @@ export function useProcessGenerationTaskItem() {
   return useMutation({
     mutationFn: async (taskItemId: string) => {
       try {
-        console.log('[Generation Task Item] OCR request', {
+        console.log('[Generation Task Item] Page preparation request', {
           taskItemId,
-          route: `/api/generation-task-items/${taskItemId}/ocr`,
+          route: `/api/generation-task-items/${taskItemId}/page-preparation`,
           method: 'POST',
         });
 
-        const response = await fetch(`/api/generation-task-items/${taskItemId}/ocr`, {
-          method: 'POST',
-        });
-        const { payload, message } = await parseApiPayload<{
+        const response = await fetch(
+          `/api/generation-task-items/${taskItemId}/page-preparation`,
+          {
+            method: 'POST',
+          },
+        );
+        const { payload, message, rawText } = await parseApiPayload<{
           message?: string;
           data?: {
             item: GenerationTaskItemSummary;
@@ -175,29 +181,33 @@ export function useProcessGenerationTaskItem() {
         }>(response);
 
         if (!response.ok || !payload?.data) {
-          const errorMessage = message ?? 'OCR 处理失败，请稍后重试。';
-          console.error('[Generation Task Item] OCR failed', {
+          const errorMessage = message ?? 'PDF 页面准备失败，请稍后重试。';
+          console.error('[Generation Task Item] Page preparation failed', {
             status: response.status,
             statusText: response.statusText,
             taskItemId,
             message: errorMessage,
+            rawResponseText: rawText,
+            payload,
           });
 
           await reportClientError({
-            eventType: 'generation_task_item_ocr_failed_frontend',
+            eventType: 'generation_task_item_page_preparation_failed_frontend',
             message: errorMessage,
-            route: '/api/generation-task-items/[taskItemId]/ocr',
+            route: '/api/generation-task-items/[taskItemId]/page-preparation',
             taskItemId,
             payload: {
               status: response.status,
               statusText: response.statusText,
+              rawResponseText: rawText,
+              payload,
             },
           });
 
           throw new Error(errorMessage);
         }
 
-        console.log('[Generation Task Item] OCR response', {
+        console.log('[Generation Task Item] Page preparation response', {
           status: response.status,
           statusText: response.statusText,
           taskItemId,
@@ -207,8 +217,9 @@ export function useProcessGenerationTaskItem() {
         return payload.data;
       } catch (error) {
         logClientRequestError({
-          label: '[Generation Task Item] OCR request failed at network layer',
-          route: `/api/generation-task-items/${taskItemId}/ocr`,
+          label:
+            '[Generation Task Item] Page preparation request failed at network layer',
+          route: `/api/generation-task-items/${taskItemId}/page-preparation`,
           method: 'POST',
           error,
           extra: { taskItemId },
@@ -221,18 +232,37 @@ export function useProcessGenerationTaskItem() {
 
 export function useStartGenerationTaskItemSlotFill() {
   return useMutation({
-    mutationFn: async (taskItemId: string) => {
+    mutationFn: async (
+      input:
+        | string
+        | {
+            taskItemId: string;
+            confirmedPageNumbers?: number[];
+          },
+    ) => {
+      const taskItemId = typeof input === 'string' ? input : input.taskItemId;
+      const confirmedPageNumbers =
+        typeof input === 'string' ? undefined : input.confirmedPageNumbers;
       try {
         console.log('[Generation Task Item] Slot fill request', {
           taskItemId,
+          confirmedPageNumbers,
           route: `/api/generation-task-items/${taskItemId}/slot-fill`,
           method: 'POST',
         });
 
         const response = await fetch(`/api/generation-task-items/${taskItemId}/slot-fill`, {
           method: 'POST',
+          ...(confirmedPageNumbers
+            ? {
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ confirmedPageNumbers }),
+              }
+            : {}),
         });
-        const { payload, message } = await parseApiPayload<{
+        const { payload, message, rawText } = await parseApiPayload<{
           message?: string;
           data?: {
             item: GenerationTaskItemSummary;
@@ -246,6 +276,8 @@ export function useStartGenerationTaskItemSlotFill() {
             statusText: response.statusText,
             taskItemId,
             message: errorMessage,
+            rawResponseText: rawText,
+            payload,
           });
 
           await reportClientError({
@@ -256,6 +288,8 @@ export function useStartGenerationTaskItemSlotFill() {
             payload: {
               status: response.status,
               statusText: response.statusText,
+              rawResponseText: rawText,
+              payload,
             },
           });
 

@@ -18,6 +18,10 @@ import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
+import {
+  createBrowserRunLogger,
+  type BrowserRunLoggerInstance,
+} from '@/src/lib/browser/browser-run-logger';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import {
   getPdfVisionUploadConcurrency,
@@ -43,23 +47,17 @@ interface UploadRow {
   parsedPdf: Awaited<ReturnType<typeof parsePdf>> | null;
   isParsing: boolean;
   parseError: string | null;
-  forceOcr: boolean;
+  forceVisionPageFill: boolean;
 }
 
 declare global {
   interface Window {
-    clipcapOcrImages?: Array<{
+    clipcapPdfPageImages?: Array<{
       fileName: string;
       originalPageNumber: number;
       uploadedPageNumber: number;
       previewUrl: string;
       imageDataUrl?: string;
-    }>;
-    clipcapOcrTextPages?: Array<{
-      fileName: string;
-      uploadedPageNumber: number;
-      originalPageNumber?: number;
-      text: string;
     }>;
     clipcapSlotFillInputs?: Array<{
       fileName: string;
@@ -88,6 +86,31 @@ declare global {
         }>;
       };
     }>;
+    clipcapPageFilterPrompts?: Array<{
+      fileName: string;
+      label: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapPageFilterResults?: Array<{
+      fileName: string;
+      label: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapSlotFillRawResponses?: Array<{
+      fileName: string;
+      label: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapConfirmedSlotFillPages?: Array<{
+      fileName: string;
+      taskItemId: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapVisionPagesUsed?: Array<{
+      fileName: string;
+      taskItemId: string;
+      data: Record<string, unknown>;
+    }>;
     clipcapSlotFillReferenceImages?: Array<{
       fileName: string;
       taskItemId: string;
@@ -113,8 +136,21 @@ function createUploadRow(): UploadRow {
     parsedPdf: null,
     isParsing: false,
     parseError: null,
-    forceOcr: false,
+    forceVisionPageFill: false,
   };
+}
+
+const DEFAULT_PDF_FILL_MAX_TASK_COUNT = 3;
+
+function getPdfFillMaxTaskCount() {
+  const rawValue = process.env.NEXT_PUBLIC_PDF_FILL_MAX_TASK_COUNT;
+  const parsedValue = rawValue ? Number(rawValue) : DEFAULT_PDF_FILL_MAX_TASK_COUNT;
+
+  if (!Number.isInteger(parsedValue) || parsedValue < 1) {
+    return DEFAULT_PDF_FILL_MAX_TASK_COUNT;
+  }
+
+  return Math.min(parsedValue, 50);
 }
 
 function buildFullPageNumbers(totalPages: number) {
@@ -152,6 +188,18 @@ function formatCompactPageRanges(pageNumbers: number[]) {
     rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`,
   );
   return ranges.join('、');
+}
+
+function parseTraceJson<T>(raw: string, label: string): T | null {
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    console.error(`[Batch Generate] Failed to parse ${label}.`, {
+      raw,
+      error,
+    });
+    return null;
+  }
 }
 
 function dataUrlToObjectUrl(dataUrl: string) {
@@ -193,6 +241,7 @@ function getStatusColor(status: string) {
       return 'blue';
     case 'running':
     case 'ocr_running':
+    case 'page_preparing':
     case 'slot_filling':
       return 'orange';
     case 'review_pending':
@@ -215,9 +264,10 @@ function getStatusLabel(status: string) {
     case 'running':
       return '处理中';
     case 'ocr_running':
+    case 'page_preparing':
       return '处理中';
     case 'pdf_pages_ready':
-      return '处理中';
+      return '待确认页面';
     case 'slot_filling':
       return '处理中';
     case 'review_pending':
@@ -241,6 +291,7 @@ function formatElapsedSeconds(
       'uploaded',
       'running',
       'pending',
+      'page_preparing',
       'ocr_running',
       'pdf_pages_ready',
       'slot_filling',
@@ -277,13 +328,18 @@ export function BatchGenerateModal({
   const processGenerationTaskItemMutation = useProcessGenerationTaskItem();
   const startGenerationTaskItemSlotFillMutation =
     useStartGenerationTaskItemSlotFill();
+  const maxPdfFillTaskCount = getPdfFillMaxTaskCount();
   const taskQuery = useGenerationTask(taskId);
-  const launchedOcrItemIdsRef = useRef<Set<string>>(new Set());
+  const launchedPagePreparationItemIdsRef = useRef<Set<string>>(new Set());
   const launchedSlotFillItemIdsRef = useRef<Set<string>>(new Set());
   const pendingSlotFillRefreshTimeoutsRef = useRef<Map<string, number[]>>(
     new Map(),
   );
   const itemTraceRef = useRef<Map<string, string>>(new Map());
+  const browserRunLoggerRef = useRef<BrowserRunLoggerInstance | null>(null);
+  const hasFinalizedBrowserLogRef = useRef(false);
+  const [confirmedPageNumbersByItemId, setConfirmedPageNumbersByItemId] =
+    useState<Record<string, number[]>>({});
   const refreshTaskLists = async () => {
     await Promise.all([
       taskId
@@ -298,7 +354,11 @@ export function BatchGenerateModal({
     ]);
   };
   const launchSlotFillForItem = useCallback(
-    (item: GenerationTaskItemSummary, trigger: 'polling' | 'trace') => {
+    (
+      item: GenerationTaskItemSummary,
+      trigger: 'manual' | 'polling' | 'trace',
+      confirmedPageNumbers?: number[],
+    ) => {
       if (launchedSlotFillItemIdsRef.current.has(item.id)) {
         console.log(
           `[Batch Generate][${item.source_pdf_name}] Slot fill launch skipped for task item ${item.id}; already launched previously (trigger: ${trigger}, current status: ${item.status}).`,
@@ -340,10 +400,22 @@ export function BatchGenerateModal({
       console.log(
         `[Batch Generate][${item.source_pdf_name}] Starting slot fill for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill (trigger: ${trigger}, current status: ${item.status}).`,
       );
+      console.log(
+        `[Batch Generate][${item.source_pdf_name}] User confirmed pages for slot fill`,
+        {
+          taskItemId: item.id,
+          trigger,
+          confirmedPageNumbers,
+          pageFilterPages: item.pdf_page_filter_pages ?? [],
+        },
+      );
       launchedSlotFillItemIdsRef.current.add(item.id);
 
       void startGenerationTaskItemSlotFillMutation
-        .mutateAsync(item.id)
+        .mutateAsync({
+          taskItemId: item.id,
+          confirmedPageNumbers,
+        })
         .then(() => {
           console.log(
             `[Batch Generate][${item.source_pdf_name}] Slot fill request accepted for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill (trigger: ${trigger}).`,
@@ -362,7 +434,7 @@ export function BatchGenerateModal({
               ? error.message
               : `${item.source_pdf_name} 槽位回填启动失败，请稍后重试。`;
 
-          if (!errorMessage.includes('尚未完成 OCR')) {
+          if (!errorMessage.includes('尚未完成页面准备')) {
             notifications.show({
               color: 'red',
               title: '槽位回填失败',
@@ -373,7 +445,7 @@ export function BatchGenerateModal({
             });
           } else {
             console.log(
-              `[Batch Generate][${item.source_pdf_name}] Slot fill launch will be retried after OCR status catches up for task item ${item.id}.`,
+              `[Batch Generate][${item.source_pdf_name}] Slot fill launch will be retried after page preparation status catches up for task item ${item.id}.`,
             );
           }
 
@@ -390,6 +462,8 @@ export function BatchGenerateModal({
   const hasRowParseError = rowsWithFiles.some((row) => Boolean(row.parseError));
   const hasUnparsedRows = rowsWithFiles.some((row) => !row.parsedPdf);
   const selectedFiles = rowsWithFiles.map((row) => row.file);
+  const canAddUploadRow =
+    !taskId && !isPreparingFiles && rows.length < maxPdfFillTaskCount;
   const rowSelectionStates = useMemo(
     () =>
       rows.map((row) => {
@@ -409,6 +483,7 @@ export function BatchGenerateModal({
 
   const canSubmit =
     selectedFiles.length > 0 &&
+    rowsWithFiles.length <= maxPdfFillTaskCount &&
     !createGenerationTaskMutation.isPending &&
     !isPreparingFiles &&
     !taskId &&
@@ -421,12 +496,69 @@ export function BatchGenerateModal({
     ? Math.max(0, Math.floor((tick - submissionStartedAt) / 1000))
     : 0;
 
+  useEffect(() => {
+    const logger = createBrowserRunLogger({
+      scope: 'batch-generate',
+      taskId,
+      meta: {
+        templateId: innerProps.templateId,
+        templateName: innerProps.templateName,
+      },
+    });
+
+    browserRunLoggerRef.current = logger;
+    logger.start();
+
+    const handleBeforeUnload = () => {
+      void logger.finalize();
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      void logger.finalize().finally(() => {
+        logger.stop();
+      });
+      browserRunLoggerRef.current = null;
+    };
+  }, [innerProps.templateId, innerProps.templateName]);
+
+  useEffect(() => {
+    browserRunLoggerRef.current?.setTaskId(taskId);
+  }, [taskId]);
+
+  useEffect(() => {
+    if (
+      !taskQuery.data ||
+      hasFinalizedBrowserLogRef.current ||
+      taskQuery.data.items.length === 0
+    ) {
+      return;
+    }
+
+    const isTaskFinished = taskQuery.data.items.every((item) =>
+      ['review_pending', 'reviewed', 'succeeded', 'failed'].includes(
+        item.status,
+      ),
+    );
+
+    if (!isTaskFinished) {
+      return;
+    }
+
+    hasFinalizedBrowserLogRef.current = true;
+    console.info('[Browser Log Storage] Batch generation task finished; flushing final browser log.');
+    void browserRunLoggerRef.current?.finalize();
+  }, [taskQuery.data]);
+
   const taskItems = taskQuery.data?.items ?? [];
   const hasRunningItems = taskItems.some((item) =>
     [
       'uploaded',
       'running',
       'pending',
+      'page_preparing',
       'ocr_running',
       'pdf_pages_ready',
       'slot_filling',
@@ -512,17 +644,17 @@ export function BatchGenerateModal({
         return;
       }
 
-      if (launchedOcrItemIdsRef.current.has(item.id)) {
+      if (launchedPagePreparationItemIdsRef.current.has(item.id)) {
         return;
       }
 
-      launchedOcrItemIdsRef.current.add(item.id);
+      launchedPagePreparationItemIdsRef.current.add(item.id);
       const clientStartedAt = Date.now();
       setItemStartedAtById((current) =>
         current[item.id] ? current : { ...current, [item.id]: clientStartedAt },
       );
       console.log(
-        `[Batch Generate][${item.source_pdf_name}] Preparing PDF page images for task item ${item.id} via /api/generation-task-items/${item.id}/ocr.`,
+        `[Batch Generate][${item.source_pdf_name}] Preparing PDF page images for task item ${item.id} via /api/generation-task-items/${item.id}/page-preparation.`,
       );
 
       void processGenerationTaskItemMutation
@@ -550,17 +682,38 @@ export function BatchGenerateModal({
       return;
     }
 
-    taskQuery.data.items.forEach((item) => {
-      if (item.status !== 'pdf_pages_ready') {
+    let isDisposed = false;
+
+    queueMicrotask(() => {
+      if (isDisposed) {
         return;
       }
 
-      console.log(
-        `[Batch Generate][${item.source_pdf_name}] PDF page images ready detected by polling for task item ${item.id}; current status is ${item.status}.`,
-      );
-      launchSlotFillForItem(item, 'polling');
+      setConfirmedPageNumbersByItemId((current) => {
+        let hasChanges = false;
+        const next = { ...current };
+
+        taskQuery.data.items.forEach((item) => {
+          if (item.status !== 'pdf_pages_ready' || next[item.id]) {
+            return;
+          }
+
+          const selectedPageNumbers = (item.pdf_page_filter_pages ?? [])
+            .filter((page) => page.selectedForSlotFill !== false)
+            .map((page) => page.uploadedPageNumber);
+
+          next[item.id] = selectedPageNumbers;
+          hasChanges = true;
+        });
+
+        return hasChanges ? next : current;
+      });
     });
-  }, [launchSlotFillForItem, taskId, taskQuery.data]);
+
+    return () => {
+      isDisposed = true;
+    };
+  }, [taskId, taskQuery.data]);
 
   useEffect(() => {
     if (!taskQuery.data) {
@@ -590,9 +743,6 @@ export function BatchGenerateModal({
 
       newLines.forEach((line) => {
         const traceLine = line.replace(/^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+/, '');
-        const ocrPageDataMatch = traceLine.match(
-          /^\[PDF Fill\]\[OCR\]\[PageData (\d+)\] (.+)$/,
-        );
         const slotFillInputMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextInputData\]\[(.+)\] (.+)$/,
         );
@@ -606,45 +756,283 @@ export function BatchGenerateModal({
           /^\[PDF Fill\]\[ReferenceExampleImages\] (.+)$/,
         );
         const errorDetailsMatch = traceLine.match(
-          /^\[PDF Fill\]\[(OCR|Text)\]\[ErrorDetails\]\[(.+)\] (.+)$/,
+          /^\[PDF Fill\]\[(PagePreparation|Text)\]\[ErrorDetails\]\[(.+)\] (.+)$/,
         );
         const routeErrorDetailsMatch = traceLine.match(
           /^\[RouteErrorDetails\]\[(.+)\] (.+)$/,
         );
+        const pageFilterPromptMatch = traceLine.match(
+          /^\[PDF Fill\]\[PageFilterPrompt\]\[(.+)\] (.+)$/,
+        );
+        const pageFilterRawMatch = traceLine.match(
+          /^\[PDF Fill\]\[PageFilterRaw\]\[(.+)\] (.+)$/,
+        );
+        const directVisionPromptMatch = traceLine.match(
+          /^\[PDF Fill\]\[DirectVisionPrompt\]\[(.+)\] (.+)$/,
+        );
+        const directVisionRawMatch = traceLine.match(
+          /^\[PDF Fill\]\[DirectVisionRaw\]\[(.+)\] (.+)$/,
+        );
+        const confirmedPagesMatch = traceLine.match(
+          /^\[PDF Fill\]\[ConfirmedPages\] (.+)$/,
+        );
+        const visionPagesUsedMatch = traceLine.match(
+          /^\[PDF Fill\]\[VisionPagesUsed\] (.+)$/,
+        );
+        const rawErrorMatch = traceLine.match(
+          /^\[PDF Fill\]\[RawError\]\[(.+)\] (.*)$/,
+        );
 
-        if (ocrPageDataMatch) {
-          const uploadedPageNumber = Number(ocrPageDataMatch[1]);
-          const payload = JSON.parse(ocrPageDataMatch[2] ?? '{}') as {
-            original_page_number?: number;
-            text?: string;
-          };
-          const decodedText = payload.text ?? '';
-          const currentEntries = window.clipcapOcrTextPages ?? [];
+        if (pageFilterPromptMatch) {
+          const label = pageFilterPromptMatch[1] ?? 'batch';
+          const parsedPrompt = parseTraceJson<Record<string, unknown>>(
+            pageFilterPromptMatch[2] ?? '{}',
+            `page filter prompt ${label}`,
+          );
+
+          if (!parsedPrompt) {
+            return;
+          }
+
+          const currentEntries = window.clipcapPageFilterPrompts ?? [];
           const nextEntries = currentEntries.filter(
             (entry) =>
               !(
-                entry.fileName === item.source_pdf_name &&
-                entry.uploadedPageNumber === uploadedPageNumber
+                entry.fileName === item.source_pdf_name && entry.label === label
               ),
           );
 
           nextEntries.push({
             fileName: item.source_pdf_name,
-            uploadedPageNumber,
-            originalPageNumber: payload.original_page_number,
-            text: decodedText,
+            label,
+            data: parsedPrompt,
           });
-
-          window.clipcapOcrTextPages = nextEntries.sort((left, right) => {
+          window.clipcapPageFilterPrompts = nextEntries.sort((left, right) => {
             if (left.fileName === right.fileName) {
-              return left.uploadedPageNumber - right.uploadedPageNumber;
+              return left.label.localeCompare(right.label);
             }
 
             return left.fileName.localeCompare(right.fileName);
           });
 
-          console.info(
-            `[Batch Generate][${item.source_pdf_name}] OCR full text stored in window.clipcapOcrTextPages for uploaded page ${uploadedPageNumber}.`,
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM prompt (${label})`,
+            parsedPrompt,
+          );
+          return;
+        }
+
+        if (pageFilterRawMatch) {
+          const label = pageFilterRawMatch[1] ?? 'batch';
+          const parsedResult = parseTraceJson<Record<string, unknown>>(
+            pageFilterRawMatch[2] ?? '{}',
+            `page filter raw result ${label}`,
+          );
+
+          if (!parsedResult) {
+            return;
+          }
+
+          const currentEntries = window.clipcapPageFilterResults ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedResult,
+          });
+          window.clipcapPageFilterResults = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.label.localeCompare(right.label);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM raw result (${label})`,
+            parsedResult,
+          );
+          return;
+        }
+
+        if (directVisionPromptMatch) {
+          const label = directVisionPromptMatch[1] ?? 'Full';
+          const parsedPrompt = parseTraceJson<{
+            route?: string;
+            model?: string;
+            request_label?: string;
+            messages?: Array<{
+              role: string;
+              content: unknown;
+            }>;
+          }>(directVisionPromptMatch[2] ?? '{}', `direct vision prompt ${label}`);
+
+          if (!parsedPrompt) {
+            return;
+          }
+
+          const currentEntries = window.clipcapSlotFillPrompts ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedPrompt,
+          });
+          window.clipcapSlotFillPrompts = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.label.localeCompare(right.label);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill prompt (${label})`,
+            parsedPrompt,
+          );
+          return;
+        }
+
+        if (directVisionRawMatch) {
+          const label = directVisionRawMatch[1] ?? 'Full';
+          const parsedRaw = parseTraceJson<Record<string, unknown>>(
+            directVisionRawMatch[2] ?? '{}',
+            `direct vision raw result ${label}`,
+          );
+
+          if (!parsedRaw) {
+            return;
+          }
+
+          const currentEntries = window.clipcapSlotFillRawResponses ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedRaw,
+          });
+          window.clipcapSlotFillRawResponses = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.label.localeCompare(right.label);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill raw result (${label})`,
+            parsedRaw,
+          );
+          return;
+        }
+
+        if (confirmedPagesMatch) {
+          const parsedConfirmedPages = parseTraceJson<Record<string, unknown>>(
+            confirmedPagesMatch[1] ?? '{}',
+            'confirmed slot-fill pages',
+          );
+
+          if (!parsedConfirmedPages) {
+            return;
+          }
+
+          const currentEntries = window.clipcapConfirmedSlotFillPages ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedConfirmedPages,
+          });
+          window.clipcapConfirmedSlotFillPages = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.taskItemId.localeCompare(right.taskItemId);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] User confirmed slot-fill pages`,
+            parsedConfirmedPages,
+          );
+          return;
+        }
+
+        if (visionPagesUsedMatch) {
+          const parsedPagesUsed = parseTraceJson<Record<string, unknown>>(
+            visionPagesUsedMatch[1] ?? '{}',
+            'vision pages used',
+          );
+
+          if (!parsedPagesUsed) {
+            return;
+          }
+
+          const currentEntries = window.clipcapVisionPagesUsed ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedPagesUsed,
+          });
+          window.clipcapVisionPagesUsed = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.taskItemId.localeCompare(right.taskItemId);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Pages actually sent to VISION_LLM`,
+            parsedPagesUsed,
+          );
+          return;
+        }
+
+        if (rawErrorMatch) {
+          const scope = rawErrorMatch[1] ?? 'Unknown';
+          const rawMessage = rawErrorMatch[2] ?? '';
+
+          console.error(
+            `[Batch Generate][${item.source_pdf_name}] Raw ${scope} error`,
+            rawMessage,
           );
           return;
         }
@@ -733,7 +1121,7 @@ export function BatchGenerateModal({
         }
 
         if (slotFillPromptPreviewMatch) {
-          const label = slotFillPromptPreviewMatch[1] ?? 'AfterOCR';
+          const label = slotFillPromptPreviewMatch[1] ?? 'DirectVision';
           const parsedPrompt = JSON.parse(
             slotFillPromptPreviewMatch[2] ?? '{}',
           ) as {
@@ -853,9 +1241,14 @@ export function BatchGenerateModal({
         if (errorDetailsMatch) {
           const scope = errorDetailsMatch[1] ?? 'Unknown';
           const label = errorDetailsMatch[2] ?? 'Unknown';
-          const parsedDetails = JSON.parse(
+          const parsedDetails = parseTraceJson<Record<string, unknown>>(
             errorDetailsMatch[3] ?? '{}',
-          ) as Record<string, unknown>;
+            `${scope} error details ${label}`,
+          );
+
+          if (!parsedDetails) {
+            return;
+          }
 
           console.error(
             `[Batch Generate][${item.source_pdf_name}] ${scope} error details (${label})`,
@@ -866,9 +1259,14 @@ export function BatchGenerateModal({
 
         if (routeErrorDetailsMatch) {
           const scope = routeErrorDetailsMatch[1] ?? 'Unknown';
-          const parsedDetails = JSON.parse(
+          const parsedDetails = parseTraceJson<Record<string, unknown>>(
             routeErrorDetailsMatch[2] ?? '{}',
-          ) as Record<string, unknown>;
+            `route error details ${scope}`,
+          );
+
+          if (!parsedDetails) {
+            return;
+          }
 
           console.error(
             `[Batch Generate][${item.source_pdf_name}] Route error details (${scope})`,
@@ -881,21 +1279,18 @@ export function BatchGenerateModal({
           line.includes(
             'PDF 页面图片已准备完成，前端轮询检测到后将自动启动槽位回填',
           ) ||
-          line.includes('OCR 已完成，前端轮询检测到后将自动启动槽位回填')
+          line.includes('PDF 页面图片已准备完成，等待视觉槽位回填')
         ) {
           console.log(
-            `[Batch Generate][${item.source_pdf_name}] PDF page ready trace observed for task item ${item.id}; current polled status is ${item.status}.`,
+            `[Batch Generate][${item.source_pdf_name}] PDF page ready trace observed for task item ${item.id}; waiting for user page confirmation.`,
           );
-          launchSlotFillForItem(item, 'trace');
           console.log(`[Batch Generate][${item.source_pdf_name}] ${line}`);
           return;
         }
 
         if (
-          line.includes('[PDF Fill] OCR failed') ||
-          line.includes('[PDF Fill][OCR] Failed batch') ||
-          line.includes('[PDF Fill][OCR] Continuing after failed batch') ||
-          line.includes('OCR 失败')
+          line.includes('[PDF Fill][PagePreparation] Failed') ||
+          line.includes('页面准备失败')
         ) {
           console.error(`[Batch Generate][${item.source_pdf_name}] ${line}`);
           return;
@@ -933,7 +1328,7 @@ export function BatchGenerateModal({
         itemTraceRef.current.delete(itemId);
       }
     });
-  }, [launchSlotFillForItem, taskQuery.data]);
+  }, [taskQuery.data]);
 
   const updateRow = (rowId: string, patch: Partial<UploadRow>) => {
     setRows((currentRows) =>
@@ -956,7 +1351,7 @@ export function BatchGenerateModal({
       parsedPdf: null,
       isParsing: Boolean(file),
       parseError: null,
-      forceOcr: false,
+      forceVisionPageFill: false,
     });
 
     if (!file) {
@@ -987,6 +1382,15 @@ export function BatchGenerateModal({
   };
 
   const handleCreateTask = async () => {
+    if (rowsWithFiles.length > maxPdfFillTaskCount) {
+      notifications.show({
+        color: 'yellow',
+        title: '任务数量超过限制',
+        message: `当前最多一次添加 ${maxPdfFillTaskCount} 个 PDF 回填任务。`,
+      });
+      return;
+    }
+
     if (!canSubmit) {
       return;
     }
@@ -1025,7 +1429,7 @@ export function BatchGenerateModal({
             title: '正在生成 PDF 页面图片',
             description: `${file.name}：正在并行生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页，并发数 ${pdfPageRenderConcurrency}）。`,
           });
-          const ocrVisionPages = await renderPdfPagesForVision(
+          const pdfVisionPages = await renderPdfPagesForVision(
             file,
             selectedOriginalPageNumbers,
             {
@@ -1040,15 +1444,15 @@ export function BatchGenerateModal({
           );
           logSubmissionStage({
             title: 'PDF 页面图片生成完成',
-            description: `${file.name}：已生成 ${ocrVisionPages.length} 张 PDF 页面图片，准备上传到存储。`,
+            description: `${file.name}：已生成 ${pdfVisionPages.length} 张 PDF 页面图片，准备上传到存储。`,
           });
 
-          const currentImages = window.clipcapOcrImages ?? [];
+          const currentImages = window.clipcapPdfPageImages ?? [];
           const nextImages = currentImages.filter(
             (entry) => entry.fileName !== file.name,
           );
 
-          ocrVisionPages.forEach((visionPage, index) => {
+          pdfVisionPages.forEach((visionPage, index) => {
             const uploadedPageNumber =
               uploadedPageNumberMapping[index]?.uploaded_page_number ??
               index + 1;
@@ -1068,7 +1472,7 @@ export function BatchGenerateModal({
             });
           });
 
-          window.clipcapOcrImages = nextImages.sort((left, right) => {
+          window.clipcapPdfPageImages = nextImages.sort((left, right) => {
             if (left.fileName === right.fileName) {
               return left.uploadedPageNumber - right.uploadedPageNumber;
             }
@@ -1077,9 +1481,9 @@ export function BatchGenerateModal({
           });
 
           console.info(
-            `[Batch Generate][${file.name}] PDF page images prepared: ${ocrVisionPages.length} page(s). Use window.clipcapOcrImages in the browser console, or run window.open(window.clipcapOcrImages[0].previewUrl).`,
+            `[Batch Generate][${file.name}] PDF page images prepared: ${pdfVisionPages.length} page(s). Use window.clipcapPdfPageImages in the browser console, or run window.open(window.clipcapPdfPageImages[0].previewUrl).`,
           );
-          ocrVisionPages.forEach((visionPage, index) => {
+          pdfVisionPages.forEach((visionPage, index) => {
             const uploadedPageNumber =
               uploadedPageNumberMapping[index]?.uploaded_page_number ??
               index + 1;
@@ -1087,7 +1491,7 @@ export function BatchGenerateModal({
               uploadedPageNumberMapping[index]?.original_page_number ??
               visionPage.pageNumber;
             const previewUrl =
-              window.clipcapOcrImages?.find(
+              window.clipcapPdfPageImages?.find(
                 (entry) =>
                   entry.fileName === file.name &&
                   entry.uploadedPageNumber === uploadedPageNumber,
@@ -1100,11 +1504,11 @@ export function BatchGenerateModal({
 
           return {
             file,
-            ocrVisionPages,
+            pageVisionPages: pdfVisionPages,
             selectedOriginalPageNumbers,
             uploadedPageNumberMapping,
             originalTotalPages: parsedPdf.pages.length,
-            forceOcr: true,
+            forceVisionPageFill: true,
             selectedPageRangeLabel:
               rowSelectionState.selectedPageRangeLabel || '',
           };
@@ -1310,15 +1714,26 @@ export function BatchGenerateModal({
             </Stack>
 
             <Group justify="space-between">
-              <Button
-                radius="xl"
-                variant="subtle"
-                onClick={() => {
-                  setRows((currentRows) => [...currentRows, createUploadRow()]);
-                }}
-              >
-                添加记录
-              </Button>
+              <Stack gap={4}>
+                <Button
+                  disabled={!canAddUploadRow}
+                  radius="xl"
+                  variant="subtle"
+                  onClick={() => {
+                    setRows((currentRows) =>
+                      currentRows.length >= maxPdfFillTaskCount
+                        ? currentRows
+                        : [...currentRows, createUploadRow()],
+                    );
+                  }}
+                >
+                  添加记录
+                </Button>
+                <Text c="dimmed" size="xs">
+                  最多添加 {maxPdfFillTaskCount} 个回填任务，当前{' '}
+                  {rows.length}/{maxPdfFillTaskCount}。
+                </Text>
+              </Stack>
               <Group>
                 <Button
                   color="gray"
@@ -1380,6 +1795,13 @@ export function BatchGenerateModal({
                   clientStartedAt,
                 );
                 const isReviewed = false;
+                const pageFilterPages = item.pdf_page_filter_pages ?? [];
+                const confirmedPageNumbers =
+                  confirmedPageNumbersByItemId[item.id] ??
+                  pageFilterPages
+                    .filter((page) => page.selectedForSlotFill !== false)
+                    .map((page) => page.uploadedPageNumber);
+                const confirmedPageNumberSet = new Set(confirmedPageNumbers);
                 return (
                   <Paper key={item.id} p="md" radius="xl" withBorder>
                     <Stack gap="sm">
@@ -1410,6 +1832,7 @@ export function BatchGenerateModal({
                         'uploaded',
                         'running',
                         'pending',
+                        'page_preparing',
                         'ocr_running',
                         'pdf_pages_ready',
                         'slot_filling',
@@ -1418,6 +1841,151 @@ export function BatchGenerateModal({
                           已完成 {item.slot_completed_count} 个槽位，待抽取{' '}
                           {getPendingSlotCount(item)} 个槽位
                         </Text>
+                      ) : null}
+
+                      {item.status === 'pdf_pages_ready' ? (
+                        <>
+                          <Divider />
+                          <Paper
+                            p="sm"
+                            radius="lg"
+                            style={{
+                              background: 'rgba(255,255,255,0.03)',
+                              border: '1px solid rgba(255,255,255,0.06)',
+                            }}
+                          >
+                            <Stack gap="sm">
+                              <Group justify="space-between" align="center">
+                                <div>
+                                  <Text fw={700} size="sm">
+                                    确认用于回填的页面
+                                  </Text>
+                                  <Text c="dimmed" size="xs">
+                                    已由视觉模型预过滤。被误删的页面可以点回来，再开始回填。
+                                  </Text>
+                                </div>
+                                <Button
+                                  disabled={
+                                    confirmedPageNumbers.length === 0 ||
+                                    startGenerationTaskItemSlotFillMutation.isPending
+                                  }
+                                  loading={
+                                    startGenerationTaskItemSlotFillMutation.isPending
+                                  }
+                                  radius="xl"
+                                  size="xs"
+                                  onClick={() => {
+                                    launchSlotFillForItem(
+                                      item,
+                                      'manual',
+                                      confirmedPageNumbers,
+                                    );
+                                  }}
+                                >
+                                  开始回填
+                                </Button>
+                              </Group>
+                              {pageFilterPages.length > 0 ? (
+                                <Group gap="xs">
+                                  {pageFilterPages.map((page) => {
+                                    const selected = confirmedPageNumberSet.has(
+                                      page.uploadedPageNumber,
+                                    );
+                                    const decision = page.filterDecision ?? 'review';
+
+                                    return (
+                                      <Group
+                                        key={`${item.id}-${page.uploadedPageNumber}`}
+                                        gap={4}
+                                      >
+                                        <Button
+                                          color={
+                                            selected
+                                              ? 'teal'
+                                              : decision === 'drop'
+                                                ? 'red'
+                                                : 'gray'
+                                          }
+                                          radius="xl"
+                                          size="compact-xs"
+                                          variant={selected ? 'filled' : 'outline'}
+                                          title={
+                                            page.filterReason ??
+                                            '没有过滤说明'
+                                          }
+                                          onClick={() => {
+                                            setConfirmedPageNumbersByItemId(
+                                              (current) => {
+                                                const currentPages =
+                                                  current[item.id] ??
+                                                  confirmedPageNumbers;
+                                                const nextPageSet = new Set(
+                                                  currentPages,
+                                                );
+
+                                                if (
+                                                  nextPageSet.has(
+                                                    page.uploadedPageNumber,
+                                                  )
+                                                ) {
+                                                  nextPageSet.delete(
+                                                    page.uploadedPageNumber,
+                                                  );
+                                                } else {
+                                                  nextPageSet.add(
+                                                    page.uploadedPageNumber,
+                                                  );
+                                                }
+
+                                                return {
+                                                  ...current,
+                                                  [item.id]: Array.from(
+                                                    nextPageSet,
+                                                  ).sort(
+                                                    (left, right) =>
+                                                      left - right,
+                                                  ),
+                                                };
+                                              },
+                                            );
+                                          }}
+                                        >
+                                          上传{page.uploadedPageNumber}/原
+                                          {page.originalPageNumber}
+                                        </Button>
+                                        {page.imageUrl ? (
+                                          <Button
+                                            radius="xl"
+                                            size="compact-xs"
+                                            variant="subtle"
+                                            onClick={() => {
+                                              window.open(
+                                                page.imageUrl ?? '',
+                                                '_blank',
+                                                'noopener,noreferrer',
+                                              );
+                                            }}
+                                          >
+                                            预览
+                                          </Button>
+                                        ) : null}
+                                      </Group>
+                                    );
+                                  })}
+                                </Group>
+                              ) : (
+                                <Text c="dimmed" size="xs">
+                                  暂无页面过滤结果。可以刷新状态后重试。
+                                </Text>
+                              )}
+                              <Text c="dimmed" size="xs">
+                                当前选择 {confirmedPageNumbers.length}/
+                                {pageFilterPages.length} 页用于 VISION_LLM
+                                回填。
+                              </Text>
+                            </Stack>
+                          </Paper>
+                        </>
                       ) : null}
 
                       {item.status === 'review_pending' ? (

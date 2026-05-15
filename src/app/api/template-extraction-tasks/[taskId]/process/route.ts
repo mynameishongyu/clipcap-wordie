@@ -6,7 +6,7 @@ import {
 } from '@/src/lib/logging/log-event';
 import {
   loadVisionPagesFromStoredAssets,
-  type OcrImageAsset,
+  type PdfPageImageAsset,
 } from '@/src/lib/generation-task-items/runtime';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
@@ -70,7 +70,7 @@ function normalizePdfVisionPages(value: unknown) {
 
 function normalizePdfVisionPageAssets(value: unknown) {
   if (!Array.isArray(value)) {
-    return [] as OcrImageAsset[];
+    return [] as PdfPageImageAsset[];
   }
 
   return value
@@ -99,7 +99,7 @@ function normalizePdfVisionPageAssets(value: unknown) {
         storage_path: storagePath,
       };
     })
-    .filter((item): item is OcrImageAsset => Boolean(item));
+    .filter((item): item is PdfPageImageAsset => Boolean(item));
 }
 
 async function resolvePdfVisionPages(input: {
@@ -116,7 +116,7 @@ async function resolvePdfVisionPages(input: {
 
     return loadVisionPagesFromStoredAssets({
       admin: input.admin,
-      ocrImageAssets: storedAssets,
+      pageImageAssets: storedAssets,
     });
   }
 

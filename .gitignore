@@ -13,3 +13,7 @@ _ocr_tmp_qin/
 .codex_tmp_pdf_pages/
 .tmp_qin_pages/
 png_slot_key/
+pdf_filter_by_rule/
+pdf_filter_by_llm/
+.codex_tmp_pdf_filter_by_llm.err.log
+.codex_tmp_pdf_filter_by_llm.out.log

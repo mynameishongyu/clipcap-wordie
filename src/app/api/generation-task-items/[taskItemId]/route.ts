@@ -156,13 +156,12 @@ export async function GET(
     }
 
     const admin = createSupabaseAdminClient();
-    const { data: signedUrlData, error: signedUrlError } = await admin.storage
-      .from('generation-pdfs')
-      .createSignedUrl(item.source_pdf_path, 60 * 60);
-
-    if (signedUrlError) {
-      throw signedUrlError;
-    }
+    const { data: signedUrlData } =
+      item.source_pdf_path.includes('/staged-pdf-pages/')
+        ? { data: null }
+        : await admin.storage
+            .from('generation-pdfs')
+            .createSignedUrl(item.source_pdf_path, 60 * 60);
 
     const pdfPreviewPages = await createGenerationPdfPreviewPages({
       admin,
@@ -239,7 +238,7 @@ export async function DELETE(
 
     const { data: item, error: itemError } = await admin
       .from('generation_task_items')
-      .select('id, owner_id, task_id, template_id, source_pdf_path, output_docx_path')
+      .select('id, owner_id, task_id, template_id, source_pdf_path, output_docx_path, llm_input')
       .eq('id', taskItemId)
       .single();
 
@@ -259,7 +258,16 @@ export async function DELETE(
 
     const storagePaths = Array.from(
       new Set(
-        [item.source_pdf_path, item.output_docx_path].filter(
+        [
+          item.source_pdf_path?.includes('/staged-pdf-pages/')
+            ? null
+            : item.source_pdf_path,
+          item.output_docx_path,
+          ...normalizePdfPreviewPagesInput(
+            (item as { llm_input?: { ocr_image_assets?: unknown } | null })
+              .llm_input?.ocr_image_assets,
+          ).map((asset) => asset.storage_path),
+        ].filter(
           (value): value is string => typeof value === 'string' && value.trim().length > 0,
         ),
       ),

@@ -16,6 +16,7 @@ import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-s
 interface UploadedFileMetadata {
   file_name?: string;
   storage_path?: string;
+  force_vision_page_fill?: boolean;
   force_ocr?: boolean;
   ocr_image_assets?: Array<{
     uploaded_page_number?: number;
@@ -39,7 +40,7 @@ interface UploadedFileMetadata {
   selected_page_range_label?: string;
 }
 
-function normalizeOcrImageAssets(metadata: UploadedFileMetadata | undefined) {
+function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined) {
   const assets = metadata?.ocr_image_assets;
 
   if (!Array.isArray(assets)) {
@@ -86,24 +87,6 @@ function createUnauthorizedResponse() {
 
 function getErrorMessage(error: unknown) {
   return getRawErrorMessage(error);
-}
-
-function sanitizeFileName(fileName: string) {
-  const lastDotIndex = fileName.lastIndexOf('.');
-  const extension = lastDotIndex >= 0 ? fileName.slice(lastDotIndex).toLowerCase() : '';
-  const baseName = lastDotIndex >= 0 ? fileName.slice(0, lastDotIndex) : fileName;
-
-  const normalizedBaseName = baseName
-    .normalize('NFKD')
-    .replace(/[^\x00-\x7F]/g, '_')
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-
-  const safeBaseName = normalizedBaseName || 'file';
-  const safeExtension = extension === '.pdf' ? extension : '.pdf';
-
-  return `${safeBaseName}${safeExtension}`;
 }
 
 function buildSlotSchemaFromPayload(
@@ -436,13 +419,10 @@ export async function POST(request: Request) {
     const itemInsertPayloads = [];
 
     for (const [index, metadata] of fileMetadatas.entries()) {
-      const file = files[index] ?? null;
       const itemId = crypto.randomUUID();
       const preUploadedStoragePath =
         typeof metadata?.storage_path === 'string' ? metadata.storage_path.trim() : '';
-      const storagePath =
-        preUploadedStoragePath ||
-        (file ? `${user.id}/${task.id}/${itemId}-${sanitizeFileName(file.name)}` : '');
+      const storagePath = preUploadedStoragePath;
 
       if (!storagePath) {
         await admin
@@ -457,34 +437,12 @@ export async function POST(request: Request) {
         throw new Error(`第 ${index + 1} 个 PDF 缺少存储路径。`);
       }
 
-      if (!preUploadedStoragePath) {
-        const { error: uploadError } = await admin.storage
-          .from('generation-pdfs')
-          .upload(storagePath, file as File, {
-            contentType: 'application/pdf',
-            upsert: false,
-          });
-
-        if (uploadError) {
-          await admin
-            .from('generation_tasks')
-            .update({
-              status: 'failed',
-              failed_items: fileMetadatas.length,
-              finished_at: new Date().toISOString(),
-            })
-            .eq('id', task.id);
-
-          throw uploadError;
-        }
-      }
-
       itemInsertPayloads.push({
         id: itemId,
         task_id: task.id,
         owner_id: user.id,
         template_id: templateId,
-        source_pdf_name: metadata?.file_name ?? file?.name ?? `PDF-${index + 1}.pdf`,
+        source_pdf_name: metadata?.file_name ?? files[index]?.name ?? `PDF-${index + 1}.pdf`,
         source_pdf_path: storagePath,
         status: 'uploaded',
         elapsed_seconds: 0,
@@ -502,8 +460,10 @@ export async function POST(request: Request) {
             typeof metadata?.parsed_pdf?.totalTextLength === 'number'
               ? metadata.parsed_pdf.totalTextLength
               : 0,
-          force_ocr: metadata?.force_ocr === true,
-          ocr_image_assets: normalizeOcrImageAssets(metadata),
+          force_vision_page_fill:
+            metadata?.force_vision_page_fill === true ||
+            metadata?.force_ocr === true,
+          ocr_image_assets: normalizePdfPageImageAssets(metadata),
           selected_original_page_numbers: normalizeSelectedOriginalPageNumbers(metadata),
           uploaded_page_number_mapping: normalizeUploadedPageNumberMapping(metadata),
           original_total_pages:
@@ -550,7 +510,7 @@ export async function POST(request: Request) {
       message: `Created generation task with ${items.length} items.`,
       route: '/api/generation-tasks',
       templateId,
-      taskId: task.id,
+        taskId: task.id,
       payload: {
         templateName: task.template_name_snapshot,
         fileCount: fileMetadatas.length,

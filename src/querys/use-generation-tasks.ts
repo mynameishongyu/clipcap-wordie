@@ -10,7 +10,7 @@ const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
 
 export interface CreateGenerationTaskFileInput {
   file: File;
-  ocrVisionPages: PdfVisionPageInput[];
+  pageVisionPages: PdfVisionPageInput[];
   selectedOriginalPageNumbers: number[];
   uploadedPageNumberMapping: Array<{
     uploaded_page_number: number;
@@ -18,7 +18,7 @@ export interface CreateGenerationTaskFileInput {
   }>;
   originalTotalPages: number;
   selectedPageRangeLabel: string;
-  forceOcr: boolean;
+  forceVisionPageFill: boolean;
 }
 
 export interface CreateGenerationTaskInput {
@@ -237,26 +237,16 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
   return Promise.all(
     input.files.map(async (item) => {
       input.onStageChange?.({
-        title: '正在上传 PDF',
-        description: `正在上传 ${item.file.name} 的原始 PDF 到存储。`,
+        title: '正在准备 PDF 页面图片',
+        description: `${item.file.name}：不上传原始 PDF，只上传转换后的 PNG 页面图片。`,
       });
 
-      const storagePath = `${user.id}/staged/${crypto.randomUUID()}-${sanitizeStorageFileName(item.file.name)}`;
-      const { error: uploadError } = await supabase.storage
-        .from('generation-pdfs')
-        .upload(storagePath, item.file, {
-          contentType: 'application/pdf',
-          upsert: false,
-        });
-
-      if (uploadError) {
-        throw new Error(`上传 PDF 到存储失败：${uploadError.message}`);
-      }
-
       let uploadedPageImageCount = 0;
-      const totalPageImageCount = item.ocrVisionPages.length;
+      const totalPageImageCount = item.pageVisionPages.length;
       const uploadConcurrency = getPdfVisionUploadConcurrency();
-      const ocrImageAssets: Array<
+      const pdfAssetId = crypto.randomUUID();
+      const pdfPageFolderPath = `${user.id}/staged-pdf-pages/${pdfAssetId}`;
+      const pageImageAssets: Array<
         | {
             uploaded_page_number: number;
             original_page_number: number;
@@ -273,7 +263,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
       });
 
       await runWithConcurrency(
-        item.ocrVisionPages,
+        item.pageVisionPages,
         uploadConcurrency,
         async (visionPage, index) => {
           const imageBlob = await getPdfVisionPageBlob(visionPage);
@@ -282,31 +272,29 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
           const originalPageNumber =
             item.uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
           const extension = getPdfVisionPageImageExtension(visionPage, imageBlob);
-          const ocrImageStoragePath =
-            `${user.id}/staged-pdf-pages/${crypto.randomUUID()}-` +
-            `${sanitizeStorageFileName(item.file.name).replace(/\.pdf$/i, '')}` +
-            `-page-${uploadedPageNumber}.${extension}`;
-          const { error: ocrUploadError } = await supabase.storage
+          const pageImageStoragePath =
+            `${pdfPageFolderPath}/page-${uploadedPageNumber}.${extension}`;
+          const { error: pageImageUploadError } = await supabase.storage
             .from('generation-pdfs')
-            .upload(ocrImageStoragePath, imageBlob, {
+            .upload(pageImageStoragePath, imageBlob, {
               contentType: imageBlob.type || 'application/octet-stream',
               upsert: false,
             });
 
-          if (ocrUploadError) {
+          if (pageImageUploadError) {
             console.error('[Generation Task][PDF Page Image Upload] Failed', {
               fileName: item.file.name,
               uploadedPageNumber,
               originalPageNumber,
-              storagePath: ocrImageStoragePath,
+              storagePath: pageImageStoragePath,
               contentType: imageBlob.type || 'application/octet-stream',
               size: imageBlob.size,
               error: {
-                name: ocrUploadError.name,
-                message: ocrUploadError.message,
+                name: pageImageUploadError.name,
+                message: pageImageUploadError.message,
               },
             });
-            throw new Error(`上传 PDF 页面图片到存储失败：${ocrUploadError.message}`);
+            throw new Error(`上传 PDF 页面图片到存储失败：${pageImageUploadError.message}`);
           }
 
           uploadedPageImageCount += 1;
@@ -316,10 +304,10 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
               `${item.file.name}：已上传 ${uploadedPageImageCount}/${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
           });
 
-          ocrImageAssets[index] = {
+          pageImageAssets[index] = {
             uploaded_page_number: uploadedPageNumber,
             original_page_number: originalPageNumber,
-            storage_path: ocrImageStoragePath,
+            storage_path: pageImageStoragePath,
             ...(visionPage.crop ? { crop: visionPage.crop } : {}),
           };
         },
@@ -327,9 +315,10 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
 
       return {
         file_name: item.file.name,
-        storage_path: storagePath,
-        ocr_image_assets: ocrImageAssets.filter(
-          (asset): asset is NonNullable<(typeof ocrImageAssets)[number]> =>
+        storage_path: pdfPageFolderPath,
+        pdf_asset_id: pdfAssetId,
+        ocr_image_assets: pageImageAssets.filter(
+          (asset): asset is NonNullable<(typeof pageImageAssets)[number]> =>
             Boolean(asset),
         ),
         selected_original_page_numbers: item.selectedOriginalPageNumbers,
@@ -337,7 +326,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
         original_total_pages: item.originalTotalPages,
         selected_page_count: item.selectedOriginalPageNumbers.length,
         selected_page_range_label: item.selectedPageRangeLabel,
-        force_ocr: item.forceOcr,
+        force_vision_page_fill: item.forceVisionPageFill,
       };
     }),
   );

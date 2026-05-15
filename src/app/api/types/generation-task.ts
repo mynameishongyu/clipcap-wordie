@@ -14,6 +14,21 @@ export const generationTaskItemSummarySchema = z.object({
   reviewed_at: z.string().nullable().optional(),
   output_docx_path: z.string().nullable().optional(),
   error_message: z.string().nullable().optional(),
+  pdf_page_filter_pages: z
+    .array(
+      z.object({
+        uploadedPageNumber: z.number().int().positive(),
+        originalPageNumber: z.number().int().positive(),
+        storagePath: z.string(),
+        imageUrl: z.string().nullable().optional(),
+        filterDecision: z.string().nullable().optional(),
+        filterReason: z.string().nullable().optional(),
+        filterConfidence: z.number().nullable().optional(),
+        selectedForSlotFill: z.boolean().optional(),
+      }),
+    )
+    .optional()
+    .default([]),
 });
 
 export const generationTaskSummarySchema = z.object({

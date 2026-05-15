@@ -65,6 +65,7 @@ function getTaskStatusColor(status: string) {
     case 'failed':
       return 'red';
     case 'running':
+    case 'page_preparing':
     case 'ocr_running':
     case 'slot_filling':
       return 'orange';
@@ -86,6 +87,7 @@ function getTaskStatusLabel(status: string) {
       return '处理失败';
     case 'running':
       return '处理中';
+    case 'page_preparing':
     case 'ocr_running':
       return '处理中';
     case 'pdf_pages_ready':

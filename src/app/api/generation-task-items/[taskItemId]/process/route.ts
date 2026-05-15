@@ -1,3 +1,3 @@
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-export { POST } from '../ocr/route';
+export { POST } from '../page-preparation/route';

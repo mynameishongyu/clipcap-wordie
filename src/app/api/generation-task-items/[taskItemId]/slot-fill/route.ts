@@ -16,8 +16,9 @@ import {
   generationTaskItemSelect,
   type GenerationTaskItemRecord,
   getErrorMessage,
+  filterPdfPageImageAssetsForSlotFill,
   loadVisionPagesFromStoredAssets,
-  normalizeOcrImageAssets,
+  normalizePdfPageImageAssets,
   normalizeVisionPages,
   recalculateTaskSummary,
   updateSlotProgress,
@@ -41,6 +42,29 @@ const SLOT_REFERENCE_LABEL_FONT_PATH = join(
 
 let hasAttemptedSlotReferenceFontRegistration = false;
 let hasRegisteredSlotReferenceFont = false;
+
+function normalizeConfirmedPageNumbers(value: unknown) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .map((pageNumber) =>
+          typeof pageNumber === 'number'
+            ? pageNumber
+            : typeof pageNumber === 'string'
+              ? Number.parseInt(pageNumber, 10)
+              : NaN,
+        )
+        .filter(
+          (pageNumber) =>
+            Number.isInteger(pageNumber) && pageNumber > 0,
+        ),
+    ),
+  ).sort((left, right) => left - right);
+}
 
 function getSlotReferenceLabelFontFamily() {
   if (!hasAttemptedSlotReferenceFontRegistration) {
@@ -348,10 +372,10 @@ async function appendVisionPageImageDebugTraces(params: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
   taskItemId: string;
   visionPages: ReturnType<typeof normalizeVisionPages>;
-  ocrImageAssets: ReturnType<typeof normalizeOcrImageAssets>;
+  pageImageAssets: ReturnType<typeof normalizePdfPageImageAssets>;
 }) {
   const assetsByUploadedPageNumber = new Map(
-    params.ocrImageAssets.map((asset) => [asset.uploaded_page_number, asset]),
+    params.pageImageAssets.map((asset) => [asset.uploaded_page_number, asset]),
   );
 
   await appendProcessingTrace(
@@ -420,9 +444,11 @@ async function runGenerationTaskItemSlotFill(params: {
   const precomputedVisionPages = normalizeVisionPages(
     params.item.llm_input?.vision_pages,
   );
-  const ocrImageAssets = normalizeOcrImageAssets(
+  const allPageImageAssets = normalizePdfPageImageAssets(
     params.item.llm_input?.ocr_image_assets,
   );
+  const pageImageAssets =
+    filterPdfPageImageAssetsForSlotFill(allPageImageAssets);
   const pipelineStartedAt = params.item.started_at
     ? new Date(params.item.started_at)
     : startedAt;
@@ -432,7 +458,7 @@ async function runGenerationTaskItemSlotFill(params: {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
     }
 
-    if (precomputedVisionPages.length === 0 && ocrImageAssets.length === 0) {
+    if (precomputedVisionPages.length === 0 && pageImageAssets.length === 0) {
       throw new Error(
         '当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。',
       );
@@ -443,7 +469,7 @@ async function runGenerationTaskItemSlotFill(params: {
         ? precomputedVisionPages
         : await loadVisionPagesFromStoredAssets({
             admin,
-            ocrImageAssets,
+            pageImageAssets,
           });
 
     if (visionPages.length === 0) {
@@ -482,15 +508,31 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      '槽位回填阶段：跳过新 PDF OCR，直接使用槽位来源、示例 PDF 定位信息和新 PDF 页面图片调用 VISION_LLM。',
+      '槽位回填阶段：直接使用槽位来源、示例 PDF 定位信息和新 PDF 页面图片调用 VISION_LLM。',
     );
 
     await appendVisionPageImageDebugTraces({
       admin,
       taskItemId: params.item.id,
       visionPages,
-      ocrImageAssets,
+      pageImageAssets,
     });
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][VisionPagesUsed] ${JSON.stringify({
+        document_name: params.item.source_pdf_name,
+        confirmed_slot_fill_page_numbers:
+          params.item.llm_input?.confirmed_slot_fill_page_numbers ?? null,
+        used_page_numbers: visionPages.map((page) => page.page_number),
+        all_uploaded_page_numbers: allPageImageAssets.map(
+          (asset) => asset.uploaded_page_number,
+        ),
+        ignored_page_numbers: allPageImageAssets
+          .filter((asset) => asset.used_for_slot_fill === false)
+          .map((asset) => asset.uploaded_page_number),
+      })}`,
+    );
 
     await appendProcessingTrace(
       admin,
@@ -645,12 +687,17 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
+      `[PDF Fill][RawError][SlotFill] ${getErrorMessage(error)}`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
       `[RouteErrorDetails][SlotFill] ${JSON.stringify(
         buildErrorLogPayload(error, {
           sourcePdfName: params.item.source_pdf_name,
           slotCount: slotSchema.length,
           visionPageCount: precomputedVisionPages.length,
-          ocrImageAssetCount: ocrImageAssets.length,
+          pageImageAssetCount: pageImageAssets.length,
         }),
       )}`,
     );
@@ -671,14 +718,14 @@ async function runGenerationTaskItemSlotFill(params: {
         sourcePdfName: params.item.source_pdf_name,
         slotCount: slotSchema.length,
         visionPageCount: precomputedVisionPages.length,
-        ocrImageAssetCount: ocrImageAssets.length,
+        pageImageAssetCount: pageImageAssets.length,
       }),
     });
   }
 }
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ taskItemId: string }> },
 ) {
   const supabase = await createSupabaseServerClient();
@@ -741,9 +788,94 @@ export async function POST(
       );
     }
 
+    const rawBody = await request.json().catch(() => null);
+    const confirmedPageNumbers = normalizeConfirmedPageNumbers(
+      rawBody && typeof rawBody === 'object'
+        ? (rawBody as { confirmedPageNumbers?: unknown }).confirmedPageNumbers
+        : null,
+    );
+    let nextItem = item;
+
+    if (confirmedPageNumbers) {
+      if (confirmedPageNumbers.length === 0) {
+        return NextResponse.json(
+          {
+            code: 'GENERATION_TASK_ITEM_NO_CONFIRMED_PAGES',
+            message: '请至少选择一页用于槽位回填。',
+          },
+          { status: 400 },
+        );
+      }
+
+      const confirmedPageNumberSet = new Set(confirmedPageNumbers);
+      const currentPageImageAssets = normalizePdfPageImageAssets(
+        item.llm_input?.ocr_image_assets,
+      );
+      const nextPageImageAssets = currentPageImageAssets.map((asset) => ({
+        ...asset,
+        used_for_slot_fill: confirmedPageNumberSet.has(
+          asset.uploaded_page_number,
+        ),
+      }));
+
+      if (
+        nextPageImageAssets.filter(
+          (asset) => asset.used_for_slot_fill !== false,
+        ).length === 0
+      ) {
+        return NextResponse.json(
+          {
+            code: 'GENERATION_TASK_ITEM_NO_CONFIRMED_PAGES',
+            message: '请至少选择一页用于槽位回填。',
+          },
+          { status: 400 },
+        );
+      }
+
+      const nextLlmInput = {
+        ...(item.llm_input ?? {}),
+        ocr_image_assets: nextPageImageAssets,
+        confirmed_slot_fill_page_numbers: confirmedPageNumbers,
+      };
+
+      const { data: persistedItem, error: persistError } = await admin
+        .from('generation_task_items')
+        .update({
+          llm_input: nextLlmInput,
+        })
+        .eq('id', item.id)
+        .select(generationTaskItemSelect)
+        .single<GenerationTaskItemRecord>();
+
+      if (persistError || !persistedItem) {
+        throw persistError ?? new Error('Failed to persist confirmed page list.');
+      }
+
+      nextItem = persistedItem;
+
+      await appendProcessingTrace(
+        admin,
+        item.id,
+        `[PDF Fill][ConfirmedPages] ${JSON.stringify({
+          source: 'user',
+          confirmed_page_numbers: confirmedPageNumbers,
+          selected_page_count: confirmedPageNumbers.length,
+          all_uploaded_page_numbers: currentPageImageAssets.map(
+            (asset) => asset.uploaded_page_number,
+          ),
+          ignored_page_numbers: currentPageImageAssets
+            .filter(
+              (asset) =>
+                !confirmedPageNumberSet.has(asset.uploaded_page_number),
+            )
+            .map((asset) => asset.uploaded_page_number),
+        })}`,
+      );
+    }
+
     after(async () => {
       await runGenerationTaskItemSlotFill({
-        item,
+        item: nextItem,
         actorEmail: user.email ?? null,
       });
     });
@@ -752,7 +884,7 @@ export async function POST(
       {
         data: {
           item: {
-            ...item,
+            ...nextItem,
             status: 'slot_filling',
             error_message: null,
           },
