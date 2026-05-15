@@ -113,6 +113,11 @@ declare global {
       label: string;
       data: Record<string, unknown>;
     }>;
+    clipcapSlotFillOutputs?: Array<{
+      fileName: string;
+      taskItemId: string;
+      data: Record<string, unknown>;
+    }>;
     clipcapConfirmedSlotFillPages?: Array<{
       fileName: string;
       taskItemId: string;
@@ -880,6 +885,9 @@ export function BatchGenerateModal({
         const directVisionRawMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionRaw\]\[([^\]]+)\] (.+)$/,
         );
+        const slotFillOutputMatch = traceLine.match(
+          /^\[PDF Fill\]\[SlotFillOutput\] (.+)$/,
+        );
         const confirmedPagesMatch = traceLine.match(
           /^\[PDF Fill\]\[ConfirmedPages\] (.+)$/,
         );
@@ -1146,6 +1154,49 @@ export function BatchGenerateModal({
           console.log(
             `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill raw result (${label})`,
             parsedRaw,
+          );
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill raw model output (${label})`,
+            parsedRaw.raw_response ?? parsedRaw,
+          );
+          return;
+        }
+
+        if (slotFillOutputMatch) {
+          const parsedOutput = parseTraceJson<Record<string, unknown>>(
+            slotFillOutputMatch[1] ?? '{}',
+            'slot fill output',
+          );
+
+          if (!parsedOutput) {
+            return;
+          }
+
+          const currentEntries = window.clipcapSlotFillOutputs ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedOutput,
+          });
+          window.clipcapSlotFillOutputs = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.taskItemId.localeCompare(right.taskItemId);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill LLM parsed output`,
+            parsedOutput,
           );
           return;
         }

@@ -416,6 +416,68 @@ function sharpenCanvas(canvas: HTMLCanvasElement, strength: number) {
   }
 }
 
+function hasVisibleInkInBbox(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+) {
+  const sampleLeft = Math.max(0, Math.floor(left));
+  const sampleTop = Math.max(0, Math.floor(top));
+  const sampleWidth = Math.max(1, Math.floor(width));
+  const sampleHeight = Math.max(1, Math.floor(height));
+
+  try {
+    const imageData = context.getImageData(
+      sampleLeft,
+      sampleTop,
+      sampleWidth,
+      sampleHeight,
+    );
+    const stride = Math.max(
+      1,
+      Math.floor(Math.sqrt((sampleWidth * sampleHeight) / 2500)),
+    );
+    let sampled = 0;
+    let strongInkPixels = 0;
+    let contrastPixels = 0;
+
+    for (let y = 0; y < sampleHeight; y += stride) {
+      for (let x = 0; x < sampleWidth; x += stride) {
+        const offset = (y * sampleWidth + x) * 4;
+        const red = imageData.data[offset] ?? 255;
+        const green = imageData.data[offset + 1] ?? 255;
+        const blue = imageData.data[offset + 2] ?? 255;
+        const maxChannel = Math.max(red, green, blue);
+        const minChannel = Math.min(red, green, blue);
+
+        sampled += 1;
+
+        if (minChannel < 185) {
+          strongInkPixels += 1;
+        }
+
+        if (maxChannel - minChannel > 35 && minChannel < 230) {
+          contrastPixels += 1;
+        }
+      }
+    }
+
+    if (sampled === 0) {
+      return true;
+    }
+
+    return (
+      strongInkPixels / sampled >= 0.003 ||
+      contrastPixels / sampled >= 0.01
+    );
+  } catch {
+    // Signed URLs can be cross-origin; keep overlays when validation cannot run.
+    return true;
+  }
+}
+
 function PdfPreviewPageCanvas({
   alt,
   displayWidth,
@@ -490,6 +552,10 @@ function PdfPreviewPageCanvas({
         const height = Math.max(2, bottom - top);
         const color = overlay.isActive ? '#ff9f1a' : '#12b886';
         const label = overlay.label || overlay.slotKey;
+
+        if (!hasVisibleInkInBbox(context, left, top, width, height)) {
+          return;
+        }
 
         context.save();
         context.lineWidth = overlay.isActive ? 4 * ratio : 2.5 * ratio;

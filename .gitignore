@@ -17,3 +17,6 @@ pdf_filter_by_rule/
 pdf_filter_by_llm/
 .codex_tmp_pdf_filter_by_llm.err.log
 .codex_tmp_pdf_filter_by_llm.out.log
+ocr_qin.txt
+ocr_xin.txt
+kimi.png

@@ -399,7 +399,9 @@ export function buildTextSlotFillPromptPayload(input: {
   return {
     document_name: input.documentName,
     slot_names: input.slots.map((slot) => slot.field_category),
-    slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
+    slot_definitions: input.slots.map((slot) =>
+      buildSlotDefinitionForPrompt(slot),
+    ),
     strict_requirement:
       'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
     page_numbers: input.pageNumbers,
@@ -631,7 +633,18 @@ function buildSlotReferencePromptData(slot: GenerationSlotSchemaItem) {
   };
 }
 
-function buildSlotDefinitionForPrompt(slot: GenerationSlotSchemaItem) {
+function buildSlotDefinitionForPrompt(
+  slot: GenerationSlotSchemaItem,
+  options?: {
+    allowedReferencePageNumbers?: Set<number> | null;
+  },
+) {
+  const referencePageNumber = slot.reference_pdf_evidence?.example_page_number;
+  const shouldIncludeReferenceEvidence =
+    !options?.allowedReferencePageNumbers ||
+    (typeof referencePageNumber === 'number' &&
+      options.allowedReferencePageNumbers.has(referencePageNumber));
+
   return {
     slot_key: slot.slot_key,
     slot_name: slot.field_category,
@@ -639,7 +652,9 @@ function buildSlotDefinitionForPrompt(slot: GenerationSlotSchemaItem) {
       slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
     slot_meaning:
       slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-    reference_example_pdf_evidence: buildSlotReferencePromptData(slot),
+    reference_example_pdf_evidence: shouldIncludeReferenceEvidence
+      ? buildSlotReferencePromptData(slot)
+      : null,
   };
 }
 
@@ -1855,8 +1870,8 @@ async function extractAllSlotsWithTextModel(input: {
                 content: JSON.stringify({
                   document_name: input.documentName,
                   slot_names: input.slots.map((slot) => slot.field_category),
-                  slot_definitions: input.slots.map(
-                    buildSlotDefinitionForPrompt,
+                  slot_definitions: input.slots.map((slot) =>
+                    buildSlotDefinitionForPrompt(slot),
                   ),
                   strict_requirement:
                     'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
@@ -2044,24 +2059,45 @@ function buildDirectVisionSlotFillPromptPayload(input: {
   pageNumbers: number[];
   referencePageNumbers: number[];
 }) {
+  const referencePageNumberSet = new Set(input.referencePageNumbers);
+  const hasReferenceExampleImages = referencePageNumberSet.size > 0;
+
   return {
     task: 'Inspect the provided new PDF page images directly and fill only the requested template slots. Do not run or return full OCR text.',
     document_name: input.documentName,
     page_numbers: input.pageNumbers,
     reference_example_pdf_page_numbers_with_bbox: input.referencePageNumbers,
-    slot_definitions: input.slots.map(buildSlotDefinitionForPrompt),
+    slot_definitions: input.slots.map((slot) =>
+      buildSlotDefinitionForPrompt(slot, {
+        allowedReferencePageNumbers: referencePageNumberSet,
+      }),
+    ),
     strict_requirements: [
       'Return JSON only.',
       'Return the exact same slot_key copied from slot_definitions.',
       'slot_source describes where the template slot value came from.',
-      'reference_example_pdf_evidence contains the reviewed example PDF page number, Gemini-style example_box_2d, visible example value, and source text.',
+      hasReferenceExampleImages
+        ? 'reference_example_pdf_evidence contains the reviewed example PDF page number, Gemini-style example_box_2d, visible example value, and source text only when the matching annotated reference image is actually attached.'
+        : 'No annotated reference example images are attached in this request. Treat reference_example_pdf_evidence=null as intentional and rely on slot_source plus visible new PDF labels/layout only.',
       'example_box_2d uses Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
-      'Annotated reference example images contain orange boxes with small orange corner labels. The label text equals reference_example_pdf_evidence.example_annotation_label, usually the slot_key. These orange boxes are authoritative examples of where the template value came from.',
-      'For each slot, first find the orange corner label matching reference_example_pdf_evidence.example_annotation_label on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.',
-      'Before extracting a value for a slot, first identify the new PDF page whose overall document title, form type, section, and surrounding layout best match the annotated reference example page for that slot.',
-      'Prefer candidates on the layout-equivalent new PDF page and in the layout-equivalent region. Do not choose a semantically similar value from another form, table, row, or page when a layout-equivalent source exists.',
-      'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, the annotated reference box location is more important than generic semantic similarity. If the reference box is in a bottom signature/contact area, choose the corresponding bottom signature/contact area in the new PDF, not a basic information/application table.',
-      'If multiple candidates have the same visible value, choose the one whose surrounding layout and nearby label best match the annotated reference box.',
+      hasReferenceExampleImages
+        ? 'Annotated reference example images contain orange boxes with small orange corner labels. The label text equals reference_example_pdf_evidence.example_annotation_label, usually the slot_key. These orange boxes are authoritative examples of where the template value came from.'
+        : 'Do not claim that an annotated reference box was followed when reference_example_pdf_evidence is null.',
+      hasReferenceExampleImages
+        ? 'For each slot with reference_example_pdf_evidence, first find the orange corner label matching reference_example_pdf_evidence.example_annotation_label on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.'
+        : 'For each slot, identify the most reliable visible value in the new PDF using the slot name, slot_source, nearby labels, form title, and surrounding layout.',
+      hasReferenceExampleImages
+        ? 'Before extracting a value for a slot, first identify the new PDF page whose overall document title, form type, section, and surrounding layout best match the annotated reference example page for that slot.'
+        : 'Before extracting a value for a slot, first identify the new PDF page whose visible labels and form type best match slot_source.',
+      hasReferenceExampleImages
+        ? 'Prefer candidates on the layout-equivalent new PDF page and in the layout-equivalent region. Do not choose a semantically similar value from another form, table, row, or page when a layout-equivalent source exists.'
+        : 'Do not choose a semantically similar value from another form, table, row, or page unless the nearby visible label/context matches slot_source.',
+      hasReferenceExampleImages
+        ? 'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, the annotated reference box location is more important than generic semantic similarity. If the reference box is in a bottom signature/contact area, choose the corresponding bottom signature/contact area in the new PDF, not a basic information/application table.'
+        : 'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, choose only the candidate whose nearby visible label/context matches slot_source; leave the value empty if the source cannot be distinguished.',
+      hasReferenceExampleImages
+        ? 'If multiple candidates have the same visible value, choose the one whose surrounding layout and nearby label best match the annotated reference box.'
+        : 'If multiple candidates are plausible and no reference image is available, choose the one with the clearest nearby label/context; otherwise return an empty value.',
       'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
       'For reference_example_pdf_evidence.example_box_2d, page numbers refer to the provided annotated Reference example PDF page images with the same page_number; do not renumber these reference pages.',
       'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
@@ -2072,9 +2108,9 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'For dates, accept equivalent visible formats such as 2026/3/30, 2026-03-30, 2026.3.30, and return final_value in Chinese format such as 2026年3月30日.',
       'For money amounts, preserve decimals and units when visible. 3400 and 3400元 are equivalent, but final_value should match the template slot format when possible.',
       'matches[0].value must equal final_value. matches[0].evidence_text should include the visible source value and nearby label/context. matches[0].page_number must be one of page_numbers.',
-      'matches[0].matched_reference_label is required and must equal reference_example_pdf_evidence.example_annotation_label for the slot.',
-      'matches[0].new_pdf_bbox is required when a visible source exists. Use Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space around the chosen source on the new PDF image.',
-      'matches[0].layout_match_score is required when a visible source exists. Use 0-1, where 1 means the new PDF source has the same page/form/section/label layout as the annotated reference box.',
+      'matches[0].matched_reference_label is required only when reference_example_pdf_evidence is not null; otherwise return null or an empty string.',
+      'matches[0].new_pdf_bbox must tightly enclose the actual visible final_value on the chosen new PDF image. If the value is inferred, calculated, copied from context, not visible inside the box, or cannot be localized precisely, return new_pdf_bbox=null. Do not invent or approximate boxes.',
+      'matches[0].layout_match_score is required only when a visible source exists. Use 0-1, where 1 means the new PDF source has the same page/form/section/label layout as the annotated reference box when a reference image is available; otherwise score visible-label/context reliability.',
       'matches[0].source_reason is required. Explain briefly which annotated reference slot box was followed, which page/form/section matched, and why semantically similar candidates on other pages were not selected.',
     ],
     output_schema: {
@@ -2088,8 +2124,11 @@ function buildDirectVisionSlotFillPromptPayload(input: {
             evidence_text: 'visible source value and nearby label/context',
             source_reason:
               'why this value/source matches the annotated reference box and slot_source',
-            matched_reference_label: slot.slot_key,
-            new_pdf_bbox: [100, 100, 120, 200],
+            matched_reference_label: hasReferenceExampleImages
+              ? slot.slot_key
+              : null,
+            new_pdf_bbox:
+              'Gemini bbox [y0, x0, y1, x1] tightly around visible final_value, or null',
             layout_match_score: 0.9,
             page_number: input.pageNumbers[0] ?? 1,
             confidence: 0.9,
@@ -2613,7 +2652,9 @@ export async function fillSlotsFromTextPages(params: {
   const fullTextInputPayload = {
     document_name: params.pdfFileName,
     page_numbers: allPageNumbers,
-    slot_definitions: params.slots.map(buildSlotDefinitionForPrompt),
+    slot_definitions: params.slots.map((slot) =>
+      buildSlotDefinitionForPrompt(slot),
+    ),
     content: fullDocumentText,
   };
 

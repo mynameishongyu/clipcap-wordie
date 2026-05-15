@@ -683,6 +683,18 @@ async function runGenerationTaskItemSlotFill(params: {
       Boolean(item.original_value.trim()),
     ).length;
 
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][SlotFillOutput] ${JSON.stringify({
+        document_name: params.item.source_pdf_name,
+        task_item_id: params.item.id,
+        slot_count: slotSchema.length,
+        completed_slot_count: completedSlots,
+        extracted_items: llmOutput.extracted_items,
+      })}`,
+    );
+
     const { error: updateError } = await admin
       .from('generation_task_items')
       .update({
