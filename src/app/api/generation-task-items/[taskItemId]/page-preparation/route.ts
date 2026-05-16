@@ -29,7 +29,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PAGE_FILTER_BATCH_SIZE_DEFAULT = 4;
-const PAGE_FILTER_BATCH_SIZE_MAX = 12;
+const PAGE_FILTER_BATCH_SIZE_MAX = 15;
 const PAGE_FILTER_REQUEST_TIMEOUT_MS = 180000;
 const PAGE_FILTER_DROP_EXAMPLES_DIR_DEFAULT = 'pdf_page_filter_drop_examples';
 const PAGE_FILTER_DROP_EXAMPLES_MAX = 4;
@@ -59,7 +59,9 @@ type PageFilterDropExample = {
 
 function getPageFilterBatchSize() {
   const rawValue = getOptionalEnv('PDF_FILL_PAGE_FILTER_PAGES_PER_REQUEST');
-  const parsedValue = rawValue ? Number(rawValue) : PAGE_FILTER_BATCH_SIZE_DEFAULT;
+  const parsedValue = rawValue
+    ? Number(rawValue)
+    : PAGE_FILTER_BATCH_SIZE_DEFAULT;
 
   if (!Number.isInteger(parsedValue) || parsedValue < 1) {
     return PAGE_FILTER_BATCH_SIZE_DEFAULT;
@@ -166,7 +168,9 @@ function getPageFilterDropExamplesDir() {
     : resolve(process.cwd(), rawValue);
 }
 
-async function loadPageFilterDropExamplesFromFolder(): Promise<PageFilterDropExample[]> {
+async function loadPageFilterDropExamplesFromFolder(): Promise<
+  PageFilterDropExample[]
+> {
   const examplesDir = getPageFilterDropExamplesDir();
   let entries: Array<{ isFile: () => boolean; name: string }>;
 
@@ -212,15 +216,13 @@ function buildPageFilterPromptPayload(input: {
   dropExampleCount: number;
 }) {
   return {
-    task:
-      'Classify scanned PDF page images before a document slot-fill workflow.',
+    task: 'Classify scanned PDF page images before a document slot-fill workflow.',
     document_name: input.documentName,
     render_note:
       'Candidate pages were rendered with the same PDF-to-image process used by the production slot-fill workflow.',
     decision_options: {
       keep: 'Keep this page for later visual slot filling.',
-      drop:
-        'Drop this page because it is similar to the provided irrelevant examples, because it is a dense contract terms/body page with only tiny incidental handwriting, or because it is a handwritten collateral/pledge/mortgage list page that should not be used as a slot-fill source. Do not use drop for real contract signing/confirmation pages with actual signatures, stamps, dates, IDs, responsible-person names, or borrower/bank acknowledgement text.',
+      drop: 'Drop this page because it is similar to the provided irrelevant examples, because it is a dense contract terms/body page with only tiny incidental handwriting, or because it is a handwritten collateral/pledge/mortgage list page that should not be used as a slot-fill source. Do not use drop for real contract signing/confirmation pages with actual signatures, stamps, dates, IDs, responsible-person names, or borrower/bank acknowledgement text.',
       review:
         'Uncertain. Keep for human review instead of dropping automatically.',
     },
@@ -385,41 +387,43 @@ async function classifyVisionPagesForSlotFill(params: {
           `drop example images=${formatBytes(dropExampleImageTotalBytes)}.`,
       });
       await params.onTrace?.({
-        message: `[PDF Fill][PageFilterPrompt][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify({
-          route: '/api/generation-task-items/[taskItemId]/page-preparation',
-          config_scope: 'VISION_LLM',
-          model: traceConfig.model,
-          provider: traceConfig.provider,
-          thinking_enabled: traceConfig.thinkingEnabled,
-          reasoning_effort: traceConfig.reasoningEffort,
-          extra_body: traceConfig.extraBody,
-          request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
-          image_payload: {
-            request_image_total_bytes: requestImageTotalBytes,
-            request_image_total_size: formatBytes(requestImageTotalBytes),
-            candidate_page_count: candidateImageSummaries.length,
-            candidate_image_total_bytes: candidateImageTotalBytes,
-            candidate_image_total_size: formatBytes(candidateImageTotalBytes),
-            drop_example_count: dropExampleImageSummaries.length,
-            drop_example_image_total_bytes: dropExampleImageTotalBytes,
-            drop_example_image_total_size: formatBytes(
-              dropExampleImageTotalBytes,
-            ),
+        message: `[PDF Fill][PageFilterPrompt][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
+          {
+            route: '/api/generation-task-items/[taskItemId]/page-preparation',
+            config_scope: 'VISION_LLM',
+            model: traceConfig.model,
+            provider: traceConfig.provider,
+            thinking_enabled: traceConfig.thinkingEnabled,
+            reasoning_effort: traceConfig.reasoningEffort,
+            extra_body: traceConfig.extraBody,
+            request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
+            image_payload: {
+              request_image_total_bytes: requestImageTotalBytes,
+              request_image_total_size: formatBytes(requestImageTotalBytes),
+              candidate_page_count: candidateImageSummaries.length,
+              candidate_image_total_bytes: candidateImageTotalBytes,
+              candidate_image_total_size: formatBytes(candidateImageTotalBytes),
+              drop_example_count: dropExampleImageSummaries.length,
+              drop_example_image_total_bytes: dropExampleImageTotalBytes,
+              drop_example_image_total_size: formatBytes(
+                dropExampleImageTotalBytes,
+              ),
+            },
+            drop_examples: dropExampleImageSummaries,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
+              },
+              {
+                role: 'user',
+                content: pageFilterPromptPayload,
+              },
+            ],
+            image_placeholders: candidateImageSummaries,
           },
-          drop_examples: dropExampleImageSummaries,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
-            },
-            {
-              role: 'user',
-              content: pageFilterPromptPayload,
-            },
-          ],
-          image_placeholders: candidateImageSummaries,
-        })}`,
+        )}`,
       });
 
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
@@ -462,16 +466,18 @@ async function classifyVisionPagesForSlotFill(params: {
 
       results.push(...batchResults);
       await params.onTrace?.({
-        message: `[PDF Fill][PageFilterRaw][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify({
-          route: '/api/generation-task-items/[taskItemId]/page-preparation',
-          config_scope: 'VISION_LLM',
-          model: llmConfig.model,
-          provider: traceConfig.provider,
-          request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
-          page_numbers: batch.map((page) => page.page_number),
-          raw_response: rawContent,
-          parsed_results: batchResults,
-        })}`,
+        message: `[PDF Fill][PageFilterRaw][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
+          {
+            route: '/api/generation-task-items/[taskItemId]/page-preparation',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: traceConfig.provider,
+            request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
+            page_numbers: batch.map((page) => page.page_number),
+            raw_response: rawContent,
+            parsed_results: batchResults,
+          },
+        )}`,
       });
       await params.onTrace?.({
         message: `[PDF Fill][PageFilter] Completed visual page filter batch ${batchIndex + 1}/${batches.length} for ${params.documentName}; decisions=${JSON.stringify(batchResults)}.`,
@@ -481,7 +487,9 @@ async function classifyVisionPagesForSlotFill(params: {
     }
   }
 
-  const decisionByPage = new Map(results.map((page) => [page.page_number, page]));
+  const decisionByPage = new Map(
+    results.map((page) => [page.page_number, page]),
+  );
 
   return params.visionPages.map((page) => {
     const decision = decisionByPage.get(page.page_number);
@@ -506,7 +514,9 @@ async function runGenerationTaskItemPagePreparation(params: {
   const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
     ? params.item.llm_input.slot_schema
     : [];
-  const precomputedVisionPages = normalizeVisionPages(params.item.llm_input?.vision_pages);
+  const precomputedVisionPages = normalizeVisionPages(
+    params.item.llm_input?.vision_pages,
+  );
   const pageImageAssets = normalizePdfPageImageAssets(
     params.item.llm_input?.ocr_image_assets,
   );
@@ -525,7 +535,9 @@ async function runGenerationTaskItemPagePreparation(params: {
       pageImageAssets.length === 0 &&
       selectedOriginalPageNumbers.length === 0
     ) {
-      throw new Error('当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。');
+      throw new Error(
+        '当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。',
+      );
     }
 
     await admin
@@ -619,9 +631,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         );
 
         nextPageImageAssets = pageImageAssets.map((asset) => {
-          const decision = decisionByPageNumber.get(
-            asset.uploaded_page_number,
-          );
+          const decision = decisionByPageNumber.get(asset.uploaded_page_number);
           const normalizedDecision = decision?.decision ?? 'review';
 
           return {
@@ -684,7 +694,9 @@ async function runGenerationTaskItemPagePreparation(params: {
       1,
       Math.round(
         (Date.now() -
-          new Date(params.item.started_at ?? startedAt.toISOString()).getTime()) /
+          new Date(
+            params.item.started_at ?? startedAt.toISOString(),
+          ).getTime()) /
           1000,
       ),
     );
@@ -725,7 +737,9 @@ async function runGenerationTaskItemPagePreparation(params: {
     }
 
     if (!updatedItem || updatedItem.status !== 'pdf_pages_ready') {
-      throw new Error('PDF page ready status was not persisted correctly before slot-fill handoff.');
+      throw new Error(
+        'PDF page ready status was not persisted correctly before slot-fill handoff.',
+      );
     }
 
     await recalculateTaskSummary(admin, params.item.task_id);
@@ -911,8 +925,9 @@ export async function POST(
           item: {
             ...item,
             status: 'page_preparing',
-            slot_total_count:
-              Array.isArray(item.llm_input?.slot_schema) ? item.llm_input.slot_schema.length : 0,
+            slot_total_count: Array.isArray(item.llm_input?.slot_schema)
+              ? item.llm_input.slot_schema.length
+              : 0,
             slot_completed_count: 0,
             processing_trace: '',
             error_message: null,
