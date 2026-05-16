@@ -223,6 +223,21 @@ function parseTraceJson<T>(raw: string, label: string): T | null {
   }
 }
 
+function logConsoleTextChunks(label: string, text: string) {
+  const chunkSize = 12000;
+  const totalChunks = Math.max(1, Math.ceil(text.length / chunkSize));
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const chunk = text.slice(index * chunkSize, (index + 1) * chunkSize);
+
+    console.log(
+      totalChunks === 1
+        ? `${label}\n${chunk}`
+        : `${label} chunk ${index + 1}/${totalChunks}\n${chunk}`,
+    );
+  }
+}
+
 function dataUrlToObjectUrl(dataUrl: string) {
   const [header, base64Payload] = dataUrl.split(',', 2);
 
@@ -1113,6 +1128,10 @@ export function BatchGenerateModal({
                 parsedPrompt.reference_image_placeholders,
               prompt: userPromptContent,
             },
+          );
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill user prompt JSON (${label})`,
+            JSON.stringify(userPromptContent, null, 2),
           );
           return;
         }
