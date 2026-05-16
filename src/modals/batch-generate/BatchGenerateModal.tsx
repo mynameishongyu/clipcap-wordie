@@ -998,6 +998,9 @@ export function BatchGenerateModal({
         const slotFillReferenceImagesMatch = traceLine.match(
           /^\[PDF Fill\]\[ReferenceExampleImages\] (.+)$/,
         );
+        const slotFillReferenceMissingMatch = traceLine.match(
+          /^\[PDF Fill\]\[ReferenceExampleMissing\] (.+)$/,
+        );
         const slotFillPreflightMatch = traceLine.match(
           /^\[PDF Fill\]\[SlotFillPreflight\] (.+)$/,
         );
@@ -1585,6 +1588,12 @@ export function BatchGenerateModal({
             slotFillReferenceImagesMatch[1] ?? '{}',
           ) as {
             document_name?: string;
+            skipped_reference_page_downloads?: Array<{
+              page_number?: number;
+              storage_path?: string;
+              slot_count?: number;
+              error_message?: string;
+            }>;
             pages?: Array<{
               example_pdf_file_name?: string | null;
               page_number?: number;
@@ -1601,6 +1610,27 @@ export function BatchGenerateModal({
               }>;
             }>;
           };
+          const skippedReferencePageDownloads =
+            parsedReferenceImages.skipped_reference_page_downloads ?? [];
+
+          if (skippedReferencePageDownloads.length > 0) {
+            console.warn(
+              `[Batch Generate][${item.source_pdf_name}] Slot fill reference PDF page images were not attached because Storage objects are missing.`,
+              skippedReferencePageDownloads,
+            );
+
+            skippedReferencePageDownloads.forEach((downloadFailure) => {
+              console.warn(
+                `[Batch Generate][${item.source_pdf_name}][PDF Fill][ReferenceExampleMissing] ` +
+                  `reference_page=${downloadFailure.page_number ?? 'unknown'}, storage_path=${
+                    downloadFailure.storage_path ?? 'none'
+                  }, slot_count=${downloadFailure.slot_count ?? 0}, error=${
+                    downloadFailure.error_message ?? 'unknown'
+                  }`,
+              );
+            });
+          }
+
           const currentEntries = window.clipcapSlotFillReferenceImages ?? [];
           const nextEntries = currentEntries.filter(
             (entry) =>
@@ -1706,6 +1736,34 @@ export function BatchGenerateModal({
             );
             console.info(page.previewUrl);
           });
+          return;
+        }
+
+        if (slotFillReferenceMissingMatch) {
+          const parsedMissingReferencePage = parseTraceJson<{
+            document_name?: string;
+            page_number?: number;
+            storage_path?: string;
+            slot_count?: number;
+            error_message?: string;
+          }>(
+            slotFillReferenceMissingMatch[1] ?? '{}',
+            'slot fill missing reference example page',
+          );
+
+          if (!parsedMissingReferencePage) {
+            return;
+          }
+
+          console.warn(
+            `[Batch Generate][${item.source_pdf_name}][PDF Fill][ReferenceExampleMissing] ` +
+              `reference_page=${parsedMissingReferencePage.page_number ?? 'unknown'}, storage_path=${
+                parsedMissingReferencePage.storage_path ?? 'none'
+              }, slot_count=${parsedMissingReferencePage.slot_count ?? 0}, error=${
+                parsedMissingReferencePage.error_message ?? 'unknown'
+              }`,
+            parsedMissingReferencePage,
+          );
           return;
         }
 

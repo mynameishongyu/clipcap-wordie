@@ -58,10 +58,7 @@ function normalizeConfirmedPageNumbers(value: unknown) {
               ? Number.parseInt(pageNumber, 10)
               : NaN,
         )
-        .filter(
-          (pageNumber) =>
-            Number.isInteger(pageNumber) && pageNumber > 0,
-        ),
+        .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0),
     ),
   ).sort((left, right) => left - right);
 }
@@ -189,7 +186,11 @@ async function buildAnnotatedReferencePageDataUrl(params: {
     context.fillStyle = 'rgba(255, 153, 0, 0.92)';
     context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
     context.fillStyle = '#111111';
-    context.fillText(label, labelLeft + labelPaddingX, labelTop + labelPaddingY);
+    context.fillText(
+      label,
+      labelLeft + labelPaddingX,
+      labelTop + labelPaddingY,
+    );
   });
 
   const annotatedBuffer = canvas.toBuffer('image/png');
@@ -615,6 +616,19 @@ async function runGenerationTaskItemSlotFill(params: {
         })),
       })}`,
     );
+    for (const downloadFailure of referenceExamplePages.skippedReferencePageDownloads) {
+      await appendProcessingTrace(
+        admin,
+        params.item.id,
+        `[PDF Fill][ReferenceExampleMissing] ${JSON.stringify({
+          document_name: params.item.source_pdf_name,
+          page_number: downloadFailure.page_number,
+          storage_path: downloadFailure.storage_path,
+          slot_count: downloadFailure.slot_count,
+          error_message: downloadFailure.error_message,
+        })}`,
+      );
+    }
 
     console.log('[Generation Task Item] Direct visual slot fill starting', {
       taskItemId: params.item.id,
@@ -947,7 +961,9 @@ export async function POST(
         .single<GenerationTaskItemRecord>();
 
       if (persistError || !persistedItem) {
-        throw persistError ?? new Error('Failed to persist confirmed page list.');
+        throw (
+          persistError ?? new Error('Failed to persist confirmed page list.')
+        );
       }
 
       nextItem = persistedItem;

@@ -19,6 +19,10 @@ interface LegacyTemplateSummaryRecord {
   created_at: string;
 }
 
+type SlotReviewPdfEvidencePage = NonNullable<
+  SlotReviewSessionPayload['pdfEvidence']
+>['pages'][number];
+
 const TEMPLATE_SUMMARY_COLUMNS =
   'id, template_name, upload_docx_name, created_at, updated_at';
 const TEMPLATE_DETAIL_COLUMNS =
@@ -60,15 +64,183 @@ function normalizeLegacyTemplateSummary(
   };
 }
 
+function sanitizeStorageFileName(fileName: string) {
+  return fileName
+    .trim()
+    .replace(/[\\/:*?"<>|#%{}[\]^~`]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+}
+
+function getReferencePageImageExtension(page: SlotReviewPdfEvidencePage) {
+  const storagePath = page.storagePath?.toLowerCase() ?? '';
+
+  if (storagePath.endsWith('.jpg') || storagePath.endsWith('.jpeg')) {
+    return 'jpg';
+  }
+
+  if (storagePath.endsWith('.webp')) {
+    return 'webp';
+  }
+
+  const dataUrlMatch = page.imageDataUrl?.match(
+    /^data:image\/([^;]+);base64,/i,
+  );
+
+  if (dataUrlMatch?.[1]) {
+    return dataUrlMatch[1].replace('jpeg', 'jpg');
+  }
+
+  return 'png';
+}
+
+function getContentTypeForReferencePageExtension(extension: string) {
+  if (extension === 'jpg' || extension === 'jpeg') {
+    return 'image/jpeg';
+  }
+
+  if (extension === 'webp') {
+    return 'image/webp';
+  }
+
+  return 'image/png';
+}
+
+function decodeDataUrlImage(dataUrl: string) {
+  const match = dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/i);
+
+  if (!match?.[1] || !match?.[2]) {
+    return null;
+  }
+
+  return {
+    contentType: match[1],
+    buffer: Buffer.from(match[2], 'base64'),
+  };
+}
+
+async function persistReferencePdfPageForTemplate(input: {
+  supabase: SupabaseClient;
+  user: User;
+  templateId: string;
+  templateName: string;
+  page: SlotReviewPdfEvidencePage;
+}) {
+  const currentPath = input.page.storagePath?.trim() ?? '';
+  const stablePrefix = `${input.user.id}/template-reference-pages/${input.templateId}/`;
+
+  if (currentPath.startsWith(stablePrefix)) {
+    return input.page;
+  }
+
+  if (!currentPath && !input.page.imageDataUrl?.startsWith('data:image/')) {
+    return input.page;
+  }
+
+  const extension = getReferencePageImageExtension(input.page);
+  const safeTemplateName =
+    sanitizeStorageFileName(input.templateName) || 'template';
+  const targetPath =
+    `${stablePrefix}${String(input.page.pageNumber).padStart(4, '0')}-` +
+    `${crypto.randomUUID()}-${safeTemplateName}.${extension}`;
+  const storage = input.supabase.storage.from('generation-pdfs');
+
+  try {
+    if (currentPath) {
+      const { error: copyError } = await storage.copy(currentPath, targetPath);
+
+      if (copyError) {
+        throw copyError;
+      }
+    } else if (input.page.imageDataUrl) {
+      const decodedImage = decodeDataUrlImage(input.page.imageDataUrl);
+
+      if (!decodedImage) {
+        return input.page;
+      }
+
+      const { error: uploadError } = await storage.upload(
+        targetPath,
+        decodedImage.buffer,
+        {
+          contentType: decodedImage.contentType,
+          upsert: true,
+        },
+      );
+
+      if (uploadError) {
+        throw uploadError;
+      }
+    }
+
+    const { data: signedUrlData, error: signedUrlError } =
+      await storage.createSignedUrl(targetPath, 60 * 60 * 24);
+
+    if (signedUrlError || !signedUrlData?.signedUrl) {
+      throw signedUrlError ?? new Error(`Missing signed URL for ${targetPath}`);
+    }
+
+    return {
+      ...input.page,
+      storagePath: targetPath,
+      imageUrl: signedUrlData.signedUrl,
+      fallbackImageUrl: signedUrlData.signedUrl,
+    };
+  } catch (error) {
+    console.warn('[Templates] Failed to persist reference PDF page image.', {
+      templateId: input.templateId,
+      pageNumber: input.page.pageNumber,
+      sourcePath: currentPath || null,
+      targetPath,
+      error,
+    });
+
+    return input.page;
+  }
+}
+
+async function persistTemplateReferencePdfPages(input: {
+  supabase: SupabaseClient;
+  user: User;
+  templateId: string;
+  templateName: string;
+  slotReviewPayload: SlotReviewSessionPayload;
+}) {
+  const pdfEvidence = input.slotReviewPayload.pdfEvidence;
+
+  if (!pdfEvidence?.pages?.length) {
+    return input.slotReviewPayload;
+  }
+
+  const pages = await Promise.all(
+    pdfEvidence.pages.map((page) =>
+      persistReferencePdfPageForTemplate({
+        supabase: input.supabase,
+        user: input.user,
+        templateId: input.templateId,
+        templateName: input.templateName,
+        page,
+      }),
+    ),
+  );
+
+  return {
+    ...input.slotReviewPayload,
+    pdfEvidence: {
+      ...pdfEvidence,
+      pages,
+    },
+  };
+}
+
 /**
  * Lists saved templates for the current authenticated user.
  *
  * @returns User-owned template summaries sorted by last update time descending.
  */
-export async function listUserTemplates(
-  supabase: SupabaseClient,
-  user: User,
-) {
+export async function listUserTemplates(supabase: SupabaseClient, user: User) {
   const { data, error } = await supabase
     .from('templates')
     .select(TEMPLATE_SUMMARY_COLUMNS)
@@ -121,7 +293,9 @@ export async function getUserTemplateById(
   }
 
   if (isMissingTemplateLibraryColumnError(error)) {
-    throw new Error('数据库缺少模板库字段，请先执行 0004_saved_templates_library.sql 迁移。');
+    throw new Error(
+      '数据库缺少模板库字段，请先执行 0004_saved_templates_library.sql 迁移。',
+    );
   }
 
   throw error;
@@ -145,7 +319,9 @@ export async function saveUserTemplate(
   }
 
   if (!input.slotReviewPayload.uploadDocxBase64?.trim()) {
-    throw new Error('当前会话缺少原始 DOCX 文件，请返回首页重新上传并识别后再保存模板。');
+    throw new Error(
+      '当前会话缺少原始 DOCX 文件，请返回首页重新上传并识别后再保存模板。',
+    );
   }
 
   let templateId = input.templateId?.trim() || crypto.randomUUID();
@@ -163,8 +339,20 @@ export async function saveUserTemplate(
     }
   }
 
-  const nextPayload: SlotReviewSessionPayload = {
-    ...input.slotReviewPayload,
+  const nextPayload = await persistTemplateReferencePdfPages({
+    supabase,
+    user,
+    templateId,
+    templateName: normalizedTemplateName,
+    slotReviewPayload: {
+      ...input.slotReviewPayload,
+      templateId,
+      templateName: normalizedTemplateName,
+    },
+  });
+
+  const payloadToSave: SlotReviewSessionPayload = {
+    ...nextPayload,
     templateId,
     templateName: normalizedTemplateName,
   };
@@ -177,14 +365,14 @@ export async function saveUserTemplate(
         owner_id: user.id,
         template_name: normalizedTemplateName,
         upload_docx_name:
-          nextPayload.uploadDocxName?.trim() || nextPayload.fileName.trim(),
-        upload_docx_base64: nextPayload.uploadDocxBase64!.trim(),
-        upload_text: nextPayload.uploadText,
-        upload_html: nextPayload.uploadHtml,
-        prompt: nextPayload.prompt,
+          payloadToSave.uploadDocxName?.trim() || payloadToSave.fileName.trim(),
+        upload_docx_base64: payloadToSave.uploadDocxBase64!.trim(),
+        upload_text: payloadToSave.uploadText,
+        upload_html: payloadToSave.uploadHtml,
+        prompt: payloadToSave.prompt,
         result: input.slotPreview,
         slot_preview: input.slotPreview,
-        slot_review_payload: nextPayload,
+        slot_review_payload: payloadToSave,
         updated_at: nextTimestamp,
       },
       { onConflict: 'id' },
@@ -194,7 +382,9 @@ export async function saveUserTemplate(
 
   if (error) {
     if (isMissingTemplateLibraryColumnError(error)) {
-      throw new Error('数据库缺少模板库字段，请先执行 0004_saved_templates_library.sql 迁移。');
+      throw new Error(
+        '数据库缺少模板库字段，请先执行 0004_saved_templates_library.sql 迁移。',
+      );
     }
 
     throw error;
