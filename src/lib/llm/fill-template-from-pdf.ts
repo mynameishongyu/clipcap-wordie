@@ -1353,7 +1353,8 @@ function mergeSlotResults(
         ).sort((left, right) => left - right),
         notes: preferredMatch?.notes ?? '',
         confidence: preferredMatch?.confidence ?? null,
-        matched_reference_label: preferredMatch?.matched_reference_label ?? null,
+        matched_reference_label:
+          preferredMatch?.matched_reference_label ?? null,
         new_pdf_bbox: preferredMatch?.new_pdf_bbox ?? null,
         layout_match_score: preferredMatch?.layout_match_score ?? null,
       };
@@ -1498,7 +1499,8 @@ function resolveBestModelMatch(matches: ModelMatch[] | undefined) {
     }) ?? [];
 
   return validMatches.sort((left, right) => {
-    const layoutScoreDiff = getMatchLayoutScore(right) - getMatchLayoutScore(left);
+    const layoutScoreDiff =
+      getMatchLayoutScore(right) - getMatchLayoutScore(left);
 
     if (layoutScoreDiff !== 0) {
       return layoutScoreDiff;
@@ -2067,6 +2069,21 @@ function buildDirectVisionSlotFillPromptPayload(input: {
     document_name: input.documentName,
     page_numbers: input.pageNumbers,
     reference_example_pdf_page_numbers_with_bbox: input.referencePageNumbers,
+    attached_images: {
+      reference_example_pdf_pages: input.referencePageNumbers.map(
+        (pageNumber) => ({
+          label: `Annotated reference example PDF page ${pageNumber}`,
+          page_number: pageNumber,
+          purpose:
+            'Layout/source clue only. Do not extract final values from this reference image.',
+        }),
+      ),
+      new_pdf_pages: input.pageNumbers.map((pageNumber) => ({
+        label: `New PDF uploaded page ${pageNumber}`,
+        page_number: pageNumber,
+        purpose: 'Extract final slot values only from these new PDF images.',
+      })),
+    },
     slot_definitions: input.slots.map((slot) =>
       buildSlotDefinitionForPrompt(slot, {
         allowedReferencePageNumbers: referencePageNumberSet,
@@ -2074,67 +2091,50 @@ function buildDirectVisionSlotFillPromptPayload(input: {
     ),
     strict_requirements: [
       'Return JSON only.',
-      'Return the exact same slot_key copied from slot_definitions.',
-      'slot_source describes where the template slot value came from.',
+      'Return one results item for every slot_key in slot_definitions, using the exact same slot_key and slot_name.',
       hasReferenceExampleImages
-        ? 'reference_example_pdf_evidence contains the reviewed example PDF page number, Gemini-style example_box_2d, visible example value, and source text only when the matching annotated reference image is actually attached.'
+        ? 'Use annotated reference example PDF pages only to understand the template source location, nearby labels, form section, and expected value type. Never copy final_value from a reference example image.'
         : 'No annotated reference example images are attached in this request. Treat reference_example_pdf_evidence=null as intentional and rely on slot_source plus visible new PDF labels/layout only.',
-      'example_box_2d uses Gemini-style normalized bbox [y0, x0, y1, x1] in a 0-1000 coordinate space.',
       hasReferenceExampleImages
-        ? 'Annotated reference example images contain orange boxes with small orange corner labels. The label text equals reference_example_pdf_evidence.example_annotation_label, usually the slot_key. These orange boxes are authoritative examples of where the template value came from.'
+        ? 'On reference images, orange boxes and labels mark reviewed template source positions. Match each slot to reference_example_pdf_evidence.example_annotation_label when present.'
         : 'Do not claim that an annotated reference box was followed when reference_example_pdf_evidence is null.',
       hasReferenceExampleImages
-        ? 'For each slot with reference_example_pdf_evidence, first find the orange corner label matching reference_example_pdf_evidence.example_annotation_label on the annotated reference image, understand its nearby labels/layout/visual region, then search for the corresponding visual source in the new PDF images.'
+        ? 'For each slot with reference_example_pdf_evidence, first inspect the matching reference box and then search the provided new PDF images for the layout-equivalent source.'
         : 'For each slot, identify the most reliable visible value in the new PDF using the slot name, slot_source, nearby labels, form title, and surrounding layout.',
-      hasReferenceExampleImages
-        ? 'Before extracting a value for a slot, first identify the new PDF page whose overall document title, form type, section, and surrounding layout best match the annotated reference example page for that slot.'
-        : 'Before extracting a value for a slot, first identify the new PDF page whose visible labels and form type best match slot_source.',
-      hasReferenceExampleImages
-        ? 'Prefer candidates on the layout-equivalent new PDF page and in the layout-equivalent region. Do not choose a semantically similar value from another form, table, row, or page when a layout-equivalent source exists.'
-        : 'Do not choose a semantically similar value from another form, table, row, or page unless the nearby visible label/context matches slot_source.',
-      hasReferenceExampleImages
-        ? 'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, the annotated reference box location is more important than generic semantic similarity. If the reference box is in a bottom signature/contact area, choose the corresponding bottom signature/contact area in the new PDF, not a basic information/application table.'
-        : 'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, choose only the candidate whose nearby visible label/context matches slot_source; leave the value empty if the source cannot be distinguished.',
-      hasReferenceExampleImages
-        ? 'If multiple candidates have the same visible value, choose the one whose surrounding layout and nearby label best match the annotated reference box.'
-        : 'If multiple candidates are plausible and no reference image is available, choose the one with the clearest nearby label/context; otherwise return an empty value.',
-      'Only reference example PDF pages that have at least one bbox are provided. Pages without bbox are intentionally omitted.',
-      'For reference_example_pdf_evidence.example_box_2d, page numbers refer to the provided annotated Reference example PDF page images with the same page_number; do not renumber these reference pages.',
-      'The new PDF may have different pages, page numbers, and layout. Search only the provided new PDF page images in this request.',
-      'For matches[0].page_number, use only the uploaded-page sequence shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". This is the only valid page numbering system.',
-      'Do not use original PDF page numbers, page numbers printed inside the PDF image, screenshot page numbers, document page numbers, or reference example page numbers.',
-      'Do not copy example_slot_value unless the same value is visible in the new PDF images.',
-      'For each slot, return a value only if it is visible or strongly inferable from the provided new PDF page images.',
-      'For dates, accept equivalent visible formats such as 2026/3/30, 2026-03-30, 2026.3.30, and return final_value in Chinese format such as 2026年3月30日.',
-      'For money amounts, preserve decimals and units when visible. 3400 and 3400元 are equivalent, but final_value should match the template slot format when possible.',
-      'matches[0].value must equal final_value. matches[0].evidence_text should include the visible source value and nearby label/context. matches[0].page_number must be one of page_numbers.',
-      'matches[0].matched_reference_label is required only when reference_example_pdf_evidence is not null; otherwise return null or an empty string.',
+      'Search only New PDF uploaded page images for final values. The new PDF may have different page numbers and layout than the reference PDF.',
+      'For matches[0].page_number, use only the uploaded-page number shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". Do not use printed page numbers or reference page numbers.',
+      'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, prefer the candidate whose page, section, nearby label, and visual region best match slot_source and the reference box when available. Leave final_value empty if the source cannot be distinguished.',
+      'Return a final_value only if it is visible or strongly inferable from the provided new PDF images.',
+      'For dates, normalize visible dates to Chinese date format when possible, such as 2026年3月30日. For money amounts, preserve decimals and units when visible.',
+      'matches[0].value must equal final_value. matches[0].evidence_text must include the visible source value and nearby label/context. matches[0].source_reason must briefly explain why this source was selected.',
+      'matches[0].matched_reference_label should equal reference_example_pdf_evidence.example_annotation_label only when a reference box was used; otherwise return null or an empty string.',
       'matches[0].new_pdf_bbox must tightly enclose the actual visible final_value on the chosen new PDF image. If the value is inferred, calculated, copied from context, not visible inside the box, or cannot be localized precisely, return new_pdf_bbox=null. Do not invent or approximate boxes.',
-      'matches[0].layout_match_score is required only when a visible source exists. Use 0-1, where 1 means the new PDF source has the same page/form/section/label layout as the annotated reference box when a reference image is available; otherwise score visible-label/context reliability.',
-      'matches[0].source_reason is required. Explain briefly which annotated reference slot box was followed, which page/form/section matched, and why semantically similar candidates on other pages were not selected.',
     ],
     output_schema: {
-      results: input.slots.map((slot) => ({
-        slot_key: slot.slot_key,
-        slot_name: slot.field_category,
-        final_value: 'final extracted value, or empty string when not found',
-        matches: [
-          {
-            value: 'matched value',
-            evidence_text: 'visible source value and nearby label/context',
-            source_reason:
-              'why this value/source matches the annotated reference box and slot_source',
-            matched_reference_label: hasReferenceExampleImages
-              ? slot.slot_key
-              : null,
-            new_pdf_bbox:
-              'Gemini bbox [y0, x0, y1, x1] tightly around visible final_value, or null',
-            layout_match_score: 0.9,
-            page_number: input.pageNumbers[0] ?? 1,
-            confidence: 0.9,
-          },
-        ],
-      })),
+      results: [
+        {
+          slot_key: 'copy from slot_definitions',
+          slot_name: 'copy from slot_definitions',
+          final_value: 'extracted value from new PDF images, or empty string',
+          matches: [
+            {
+              value: 'same as final_value, or empty string',
+              evidence_text: 'visible source value plus nearby label/context',
+              source_reason:
+                'brief reason; mention matched reference label/region when used',
+              matched_reference_label:
+                'reference label such as slot_key when a reference box was used, otherwise null',
+              new_pdf_bbox:
+                'tight Gemini [y0,x0,y1,x1] bbox around visible final_value, or null',
+              layout_match_score:
+                '0-1 confidence that chosen source matches slot_source/reference layout',
+              page_number:
+                'uploaded page number from New PDF uploaded page N, or null when not found',
+              confidence: '0-1 extraction confidence',
+            },
+          ],
+        },
+      ],
     },
   };
 }
@@ -2198,12 +2198,17 @@ async function extractSlotsFromVisionPageBatch(input: {
             page_number: page.page_number,
             original_page_number: page.original_page_number ?? page.page_number,
             file_name: page.example_pdf_file_name ?? null,
+            annotated_preview_url: page.annotated_preview_url ?? null,
+            annotated_storage_path: page.annotated_storage_path ?? null,
             uses_annotated_image: Boolean(page.annotated_image_data_url),
             has_image_data_url: Boolean(
               page.annotated_image_data_url ?? page.image_data_url,
             ),
             image_bytes: imageBytes,
             image_size: formatBytes(imageBytes),
+            annotated_slot_count: page.annotated_slots?.length ?? 0,
+            annotated_slot_keys:
+              page.annotated_slots?.map((slot) => slot.slot_key) ?? [],
           };
         },
       );
@@ -2280,7 +2285,11 @@ async function extractSlotsFromVisionPageBatch(input: {
           ',',
         )}, llm concurrency: ${llmConcurrency}, slots: ${input.slots.length}, timeout: ${formatElapsedMs(
           requestTimeoutMs,
-        )}, total image size: ${formatBytes(totalImageBytes)}${formatProcessBudgetSuffix(
+        )}, total image size: ${formatBytes(
+          requestImageTotalBytes,
+        )}, new PDF images: ${formatBytes(
+          totalImageBytes,
+        )}, reference images: ${formatBytes(referenceImageTotalBytes)}${formatProcessBudgetSuffix(
           {
             processStartedAtMs: input.processStartedAtMs,
             processHardTimeoutMs: input.processHardTimeoutMs,

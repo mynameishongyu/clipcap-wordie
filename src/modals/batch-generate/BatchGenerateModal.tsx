@@ -165,7 +165,9 @@ const DEFAULT_PDF_FILL_MAX_TASK_COUNT = 3;
 
 function getPdfFillMaxTaskCount() {
   const rawValue = process.env.NEXT_PUBLIC_PDF_FILL_MAX_TASK_COUNT;
-  const parsedValue = rawValue ? Number(rawValue) : DEFAULT_PDF_FILL_MAX_TASK_COUNT;
+  const parsedValue = rawValue
+    ? Number(rawValue)
+    : DEFAULT_PDF_FILL_MAX_TASK_COUNT;
 
   if (!Number.isInteger(parsedValue) || parsedValue < 1) {
     return DEFAULT_PDF_FILL_MAX_TASK_COUNT;
@@ -236,6 +238,123 @@ function logConsoleTextChunks(label: string, text: string) {
         : `${label} chunk ${index + 1}/${totalChunks}\n${chunk}`,
     );
   }
+}
+
+function formatVisionImageAttachmentList(
+  rawImagePlaceholders: unknown,
+): string | null {
+  if (
+    !Array.isArray(rawImagePlaceholders) ||
+    rawImagePlaceholders.length === 0
+  ) {
+    return null;
+  }
+
+  const lines = rawImagePlaceholders.flatMap((placeholder, index) => {
+    if (!placeholder || typeof placeholder !== 'object') {
+      return [];
+    }
+
+    const imagePlaceholder = placeholder as {
+      label?: unknown;
+      page_number?: unknown;
+      image_size?: unknown;
+    };
+    const label =
+      typeof imagePlaceholder.label === 'string'
+        ? imagePlaceholder.label
+        : `New PDF uploaded page ${index + 1}`;
+    const pageNumber =
+      typeof imagePlaceholder.page_number === 'number'
+        ? imagePlaceholder.page_number
+        : index + 1;
+    const imageSize =
+      typeof imagePlaceholder.image_size === 'string'
+        ? `，大小 ${imagePlaceholder.image_size}`
+        : '';
+
+    return [label, `[图片：第 ${pageNumber} 张保留页面${imageSize}]`, ''];
+  });
+
+  return lines.length > 0 ? lines.join('\n').trimEnd() : null;
+}
+
+function formatReferenceImageAttachmentList(
+  rawImagePlaceholders: unknown,
+): string | null {
+  if (
+    !Array.isArray(rawImagePlaceholders) ||
+    rawImagePlaceholders.length === 0
+  ) {
+    return null;
+  }
+
+  const lines = rawImagePlaceholders.flatMap((placeholder, index) => {
+    if (!placeholder || typeof placeholder !== 'object') {
+      return [];
+    }
+
+    const imagePlaceholder = placeholder as {
+      label?: unknown;
+      page_number?: unknown;
+      original_page_number?: unknown;
+      file_name?: unknown;
+      image_size?: unknown;
+      annotated_preview_url?: unknown;
+      annotated_storage_path?: unknown;
+      annotated_slot_count?: unknown;
+      annotated_slot_keys?: unknown;
+    };
+    const label =
+      typeof imagePlaceholder.label === 'string'
+        ? imagePlaceholder.label
+        : `Annotated reference example PDF page ${index + 1}`;
+    const pageNumber =
+      typeof imagePlaceholder.page_number === 'number'
+        ? imagePlaceholder.page_number
+        : index + 1;
+    const originalPageNumber =
+      typeof imagePlaceholder.original_page_number === 'number'
+        ? imagePlaceholder.original_page_number
+        : pageNumber;
+    const imageSize =
+      typeof imagePlaceholder.image_size === 'string'
+        ? `，大小 ${imagePlaceholder.image_size}`
+        : '';
+    const fileName =
+      typeof imagePlaceholder.file_name === 'string' &&
+      imagePlaceholder.file_name.trim()
+        ? `，参考 PDF：${imagePlaceholder.file_name}`
+        : '';
+    const slotCount =
+      typeof imagePlaceholder.annotated_slot_count === 'number'
+        ? `，标注槽位 ${imagePlaceholder.annotated_slot_count} 个`
+        : '';
+    const slotKeys = Array.isArray(imagePlaceholder.annotated_slot_keys)
+      ? imagePlaceholder.annotated_slot_keys
+          .filter((slotKey): slotKey is string => typeof slotKey === 'string')
+          .join(', ')
+      : '';
+    const slotKeysText = slotKeys ? `，slot_keys=${slotKeys}` : '';
+    const storagePath =
+      typeof imagePlaceholder.annotated_storage_path === 'string'
+        ? imagePlaceholder.annotated_storage_path
+        : 'none';
+    const previewUrl =
+      typeof imagePlaceholder.annotated_preview_url === 'string'
+        ? imagePlaceholder.annotated_preview_url
+        : 'none';
+
+    return [
+      label,
+      `[图片：参考 PDF 第 ${pageNumber} 页，原 PDF 第 ${originalPageNumber} 页，已画 bbox${imageSize}${fileName}${slotCount}${slotKeysText}]`,
+      `storage_path=${storagePath}`,
+      `signed_url=${previewUrl}`,
+      '',
+    ];
+  });
+
+  return lines.length > 0 ? lines.join('\n').trimEnd() : null;
 }
 
 function dataUrlToObjectUrl(dataUrl: string) {
@@ -1061,15 +1180,18 @@ export function BatchGenerateModal({
           const label = directVisionPromptMatch[1] ?? 'Full';
           const parsedPrompt = parseTraceJson<
             Record<string, unknown> & {
-            route?: string;
-            model?: string;
-            request_label?: string;
-            messages?: Array<{
-              role: string;
-              content: unknown;
-            }>;
+              route?: string;
+              model?: string;
+              request_label?: string;
+              messages?: Array<{
+                role: string;
+                content: unknown;
+              }>;
             }
-          >(directVisionPromptMatch[2] ?? '{}', `direct vision prompt ${label}`);
+          >(
+            directVisionPromptMatch[2] ?? '{}',
+            `direct vision prompt ${label}`,
+          );
 
           if (!parsedPrompt) {
             return;
@@ -1129,6 +1251,29 @@ export function BatchGenerateModal({
               prompt: userPromptContent,
             },
           );
+          const imageAttachmentList = formatVisionImageAttachmentList(
+            parsedPrompt.image_placeholders,
+          );
+
+          if (imageAttachmentList) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill image attachments (${label})`,
+              imageAttachmentList,
+            );
+          }
+
+          const referenceImageAttachmentList =
+            formatReferenceImageAttachmentList(
+              parsedPrompt.reference_image_placeholders,
+            );
+
+          if (referenceImageAttachmentList) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill reference image attachments (${label})`,
+              referenceImageAttachmentList,
+            );
+          }
+
           logConsoleTextChunks(
             `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill user prompt JSON (${label})`,
             JSON.stringify(userPromptContent, null, 2),
@@ -1505,27 +1650,62 @@ export function BatchGenerateModal({
             },
           );
 
-          console.info(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill reference example images stored in window.clipcapSlotFillReferenceImages. Run window.open(window.clipcapSlotFillReferenceImages[0].previewUrl) to inspect the annotated example image.`,
+          const currentFileReferenceEntries =
             window.clipcapSlotFillReferenceImages.filter(
               (entry) =>
                 entry.fileName === item.source_pdf_name &&
                 entry.taskItemId === item.id,
-            ),
+            );
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill reference example images stored in window.clipcapSlotFillReferenceImages. Run window.open(window.clipcapSlotFillReferenceImages[0].previewUrl) to inspect the annotated example image.`,
+            currentFileReferenceEntries,
           );
-          window.clipcapSlotFillReferenceImages
-            .filter(
-              (entry) =>
-                entry.fileName === item.source_pdf_name &&
-                entry.taskItemId === item.id,
-            )
-            .forEach((entry) => {
-              console.info(
-                `[Batch Generate][${item.source_pdf_name}][Slot Fill Reference Image] ` +
-                  `slot ${entry.slotKey} ${entry.slotName}, example PDF page ${entry.referencePageNumber}: ${entry.previewUrl}`,
-              );
-              console.info(entry.previewUrl);
+
+          const referencePagesByKey = new Map<
+            string,
+            {
+              referencePageNumber: number;
+              originalReferencePageNumber?: number;
+              examplePdfFileName?: string | null;
+              previewUrl: string;
+              storagePath?: string | null;
+              slotKeys: string[];
+            }
+          >();
+
+          currentFileReferenceEntries.forEach((entry) => {
+            const pageKey = `${entry.referencePageNumber}:${entry.previewUrl}`;
+            const existingPage = referencePagesByKey.get(pageKey);
+
+            if (existingPage) {
+              existingPage.slotKeys.push(entry.slotKey);
+              return;
+            }
+
+            referencePagesByKey.set(pageKey, {
+              referencePageNumber: entry.referencePageNumber,
+              originalReferencePageNumber: entry.originalReferencePageNumber,
+              examplePdfFileName: entry.examplePdfFileName,
+              previewUrl: entry.previewUrl,
+              storagePath: entry.storagePath,
+              slotKeys: [entry.slotKey],
             });
+          });
+
+          [...referencePagesByKey.values()].forEach((page) => {
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}][PDF Fill][ReferenceExampleImage] ` +
+                `reference_page=${page.referencePageNumber}, original_page=${
+                  page.originalReferencePageNumber ?? page.referencePageNumber
+                }, example_pdf=${page.examplePdfFileName ?? 'none'}, storage_path=${
+                  page.storagePath ?? 'none'
+                }, slot_keys=${page.slotKeys.join(',')}, signed_url=${
+                  page.previewUrl
+                }`,
+            );
+            console.info(page.previewUrl);
+          });
           return;
         }
 
@@ -1948,8 +2128,8 @@ export function BatchGenerateModal({
         {duplicatePdfFileNameAlert ? (
           <Stack gap="sm">
             <Text size="sm">
-              当前选择的文件名“{duplicatePdfFileNameAlert.fileName}”已经上传过，请选择其他
-              PDF，或先删除/替换已有记录。
+              当前选择的文件名“{duplicatePdfFileNameAlert.fileName}
+              ”已经上传过，请选择其他 PDF，或先删除/替换已有记录。
             </Text>
             {duplicatePdfFileNameAlert.duplicateRows.length > 0 ? (
               <Text c="dimmed" size="xs">
@@ -2129,8 +2309,8 @@ export function BatchGenerateModal({
                   添加记录
                 </Button>
                 <Text c="dimmed" size="xs">
-                  最多添加 {maxPdfFillTaskCount} 个回填任务，当前{' '}
-                  {rows.length}/{maxPdfFillTaskCount}。
+                  最多添加 {maxPdfFillTaskCount} 个回填任务，当前 {rows.length}/
+                  {maxPdfFillTaskCount}。
                 </Text>
               </Stack>
               <Group>
@@ -2292,7 +2472,10 @@ export function BatchGenerateModal({
                                 </Button>
                               </Group>
 
-                              <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="xs">
+                              <SimpleGrid
+                                cols={{ base: 2, sm: 4 }}
+                                spacing="xs"
+                              >
                                 {[
                                   {
                                     label: '已保留',
@@ -2314,7 +2497,8 @@ export function BatchGenerateModal({
                                   <Box
                                     key={metric.label}
                                     style={{
-                                      border: '1px solid rgba(255,255,255,0.07)',
+                                      border:
+                                        '1px solid rgba(255,255,255,0.07)',
                                       borderRadius: 8,
                                       padding: '8px 10px',
                                     }}
@@ -2342,7 +2526,8 @@ export function BatchGenerateModal({
                                       </Text>
                                       <Text c="dimmed" size="xs">
                                         当前将使用{' '}
-                                        {retainedPageFilterPages.length} 页进行视觉回填
+                                        {retainedPageFilterPages.length}{' '}
+                                        页进行视觉回填
                                       </Text>
                                     </Group>
                                     {retainedPageFilterPages.length > 0 ? (
