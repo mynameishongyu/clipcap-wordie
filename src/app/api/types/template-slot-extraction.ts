@@ -53,11 +53,32 @@ export const templatePdfEvidenceMatchSchema = z.object({
   ]),
 });
 
-export const templatePdfEvidenceResultSchema = z.object({
-  pdf_file_name: z.string(),
-  ocr_pages: z.array(templatePdfEvidencePageSchema),
-  matches: z.array(templatePdfEvidenceMatchSchema),
-});
+export const templatePdfEvidenceResultSchema = z
+  .preprocess(
+    (value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return value;
+      }
+
+      const record = value as Record<string, unknown>;
+
+      if (!Array.isArray(record.pdf_pages) && Array.isArray(record.ocr_pages)) {
+        return {
+          ...record,
+          pdf_pages: record.ocr_pages,
+        };
+      }
+
+      return value;
+    },
+    z.object({
+      pdf_file_name: z.string(),
+      pdf_pages: z.array(templatePdfEvidencePageSchema),
+      ocr_pages: z.array(templatePdfEvidencePageSchema).optional(),
+      matches: z.array(templatePdfEvidenceMatchSchema),
+    }),
+  )
+  .transform(({ ocr_pages: _legacyOcrPages, ...value }) => value);
 
 export type ExtractionItem = z.infer<typeof extractionItemSchema>;
 export type ExtractionParagraph = z.infer<typeof extractionParagraphSchema>;

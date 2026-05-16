@@ -38,6 +38,14 @@ function createUnauthorizedResponse() {
   );
 }
 
+function formatDurationMs(durationMs: number) {
+  if (durationMs < 1000) {
+    return `${Math.max(0, Math.round(durationMs))}ms`;
+  }
+
+  return `${(durationMs / 1000).toFixed(2)}s`;
+}
+
 function normalizePdfVisionPages(value: unknown) {
   if (!Array.isArray(value)) {
     return [] as PdfVisionPageInput[];
@@ -224,6 +232,7 @@ export async function POST(
     let lastPersistedCompletedParagraphs = 0;
     let lastLoggedCompletedParagraphs = 0;
 
+    const textExtractionStartedAt = Date.now();
     const result = await extractTemplateSlotsFromDocx({
       buffer,
       fileName: task.source_docx_name,
@@ -274,6 +283,25 @@ export async function POST(
         }
       },
     });
+    const textExtractionFinishedAt = Date.now();
+    await appendProcessingTrace(
+      routeAdmin,
+      task.id,
+      `[Template Extract][Timing] ${JSON.stringify({
+        stage: 'text_slot_extraction',
+        document_name: task.source_docx_name,
+        started_at: new Date(textExtractionStartedAt).toISOString(),
+        finished_at: new Date(textExtractionFinishedAt).toISOString(),
+        duration_ms: textExtractionFinishedAt - textExtractionStartedAt,
+        duration_text: formatDurationMs(
+          textExtractionFinishedAt - textExtractionStartedAt,
+        ),
+        total_paragraphs: result.totalParagraphs,
+        succeeded_paragraphs: result.succeededParagraphs,
+        failed_paragraphs: result.failedParagraphs,
+        extracted_paragraphs: result.extraction_result.length,
+      })}`,
+    );
 
     const pdfVisionPages = await resolvePdfVisionPages({
       admin: routeAdmin,
@@ -282,6 +310,7 @@ export async function POST(
         await appendProcessingTrace(routeAdmin, task.id, entry.message);
       },
     });
+    const pdfMappingStartedAt = Date.now();
     const pdfEvidence =
       task.source_pdf_name && pdfVisionPages.length > 0
         ? await buildTemplatePdfEvidence({
@@ -293,6 +322,28 @@ export async function POST(
             },
           })
         : null;
+    const pdfMappingFinishedAt = Date.now();
+    await appendProcessingTrace(
+      routeAdmin,
+      task.id,
+      `[Template Extract][Timing] ${JSON.stringify({
+        stage: 'slot_pdf_page_mapping',
+        document_name: task.source_docx_name,
+        pdf_file_name: task.source_pdf_name ?? null,
+        started_at: new Date(pdfMappingStartedAt).toISOString(),
+        finished_at: new Date(pdfMappingFinishedAt).toISOString(),
+        duration_ms: pdfMappingFinishedAt - pdfMappingStartedAt,
+        duration_text: formatDurationMs(
+          pdfMappingFinishedAt - pdfMappingStartedAt,
+        ),
+        pdf_page_image_count: pdfVisionPages.length,
+        slot_count: result.extraction_result.reduce(
+          (sum, paragraph) => sum + paragraph.items.length,
+          0,
+        ),
+        matched_slot_count: pdfEvidence?.matches.length ?? 0,
+      })}`,
+    );
 
     const partialCompletionMessage =
       result.failedParagraphs > 0
@@ -340,7 +391,7 @@ export async function POST(
         succeededParagraphs: result.succeededParagraphs,
         failedParagraphs: result.failedParagraphs,
         pdfEvidenceMatchCount: pdfEvidence?.matches.length ?? 0,
-        pdfEvidenceOcrPageCount: pdfEvidence?.ocr_pages.length ?? 0,
+        pdfEvidencePageCount: pdfEvidence?.pdf_pages.length ?? 0,
         uploadTextLength: result.uploadText.length,
       },
     });

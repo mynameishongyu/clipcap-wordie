@@ -25,7 +25,7 @@ export interface SlotReviewPdfEvidencePayload {
       contentRatio: number;
     };
   }>;
-  ocrPages: TemplatePdfEvidenceResult['ocr_pages'];
+  pdfPages: TemplatePdfEvidenceResult['pdf_pages'];
   matches: TemplatePdfEvidenceResult['matches'];
 }
 

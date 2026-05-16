@@ -29,12 +29,15 @@ interface TemplatePdfLocateSlot {
 interface VisionLocateCandidate {
   slot_key?: string;
   page_number?: number;
-  bbox?: {
-    x?: number;
-    y?: number;
-    width?: number;
-    height?: number;
-  } | { bbox_2d?: unknown; box_2d?: unknown } | null;
+  bbox?:
+    | {
+        x?: number;
+        y?: number;
+        width?: number;
+        height?: number;
+      }
+    | { bbox_2d?: unknown; box_2d?: unknown }
+    | null;
   bbox_2d?: unknown;
   box_2d?: unknown;
   bbox_target?: string;
@@ -86,7 +89,10 @@ function buildLlmTraceConfigPayload(
 
 function splitPagesByConcurrency<T>(items: T[], concurrency: number) {
   const chunks: T[][] = [];
-  const workerCount = Math.min(Math.max(1, concurrency), Math.max(1, items.length));
+  const workerCount = Math.min(
+    Math.max(1, concurrency),
+    Math.max(1, items.length),
+  );
   const chunkSize = Math.ceil(items.length / workerCount);
 
   for (let index = 0; index < items.length; index += chunkSize) {
@@ -263,8 +269,7 @@ async function repairVisionLocationJsonWithLlm(input: {
             {
               role: 'user',
               content: JSON.stringify({
-                task:
-                  'Repair this malformed vision-location response into JSON that can be parsed by JSON.parse. Preserve all valid matches. If a trailing match is incomplete, drop only that incomplete match. Output exactly {"matches":[...]} and nothing else.',
+                task: 'Repair this malformed vision-location response into JSON that can be parsed by JSON.parse. Preserve all valid matches. If a trailing match is incomplete, drop only that incomplete match. Output exactly {"matches":[...]} and nothing else.',
                 parse_error: input.parseError.message,
                 required_schema:
                   '{"matches":[{"slot_key":"string","page_number":number,"bbox_target":"text|cell","bbox":{"x":number,"y":number,"width":number,"height":number},"box_2d":[number,number,number,number],"bbox_2d":[number,number,number,number],"evidence_text":"string","confidence":number}]}',
@@ -296,18 +301,15 @@ async function repairVisionLocationJsonWithLlm(input: {
       throw new Error('Vision location JSON repair returned empty content.');
     }
 
-    const repaired = parseModelJsonWithLocalRepair<VisionLocateModelResponse>(
-      repairedContent,
-    );
-    const completedMessage =
-      `[Template PDF Locate] LLM JSON repair completed with ${repaired.data.matches?.length ?? 0} match(es).`;
+    const repaired =
+      parseModelJsonWithLocalRepair<VisionLocateModelResponse>(repairedContent);
+    const completedMessage = `[Template PDF Locate] LLM JSON repair completed with ${repaired.data.matches?.length ?? 0} match(es).`;
     console.info(completedMessage);
     await input.onTrace?.({ message: completedMessage });
 
     return repaired.data;
   } catch (error) {
-    const failedMessage =
-      `[Template PDF Locate] LLM JSON repair failed: ${error instanceof Error ? error.message : String(error)}`;
+    const failedMessage = `[Template PDF Locate] LLM JSON repair failed: ${error instanceof Error ? error.message : String(error)}`;
     console.error(failedMessage);
     await input.onTrace?.({ message: failedMessage });
     throw error;
@@ -337,7 +339,8 @@ async function parseVisionLocationResponse(input: {
 
     return parsed.data;
   } catch (error) {
-    const parseError = error instanceof Error ? error : new Error(String(error));
+    const parseError =
+      error instanceof Error ? error : new Error(String(error));
 
     return repairVisionLocationJsonWithLlm({
       rawContent: input.rawContent,
@@ -358,9 +361,7 @@ function clamp01(value: number) {
 type PdfBboxTargetMode = 'text' | 'cell';
 
 function getTemplatePdfBboxTargetMode(): PdfBboxTargetMode {
-  const rawValue = getOptionalEnv('PDF_BBOX_TARGET_MODE')
-    ?.trim()
-    .toLowerCase();
+  const rawValue = getOptionalEnv('PDF_BBOX_TARGET_MODE')?.trim().toLowerCase();
 
   return rawValue === 'cell' ? 'cell' : 'text';
 }
@@ -467,7 +468,10 @@ function normalizeLegacyBbox(bbox: unknown) {
   };
 }
 
-function getNestedBbox(candidate: VisionLocateCandidate, fieldName: 'bbox_2d' | 'box_2d') {
+function getNestedBbox(
+  candidate: VisionLocateCandidate,
+  fieldName: 'bbox_2d' | 'box_2d',
+) {
   const bbox = candidate.bbox;
 
   if (!bbox || typeof bbox !== 'object' || Array.isArray(bbox)) {
@@ -477,7 +481,10 @@ function getNestedBbox(candidate: VisionLocateCandidate, fieldName: 'bbox_2d' | 
   return (bbox as { bbox_2d?: unknown; box_2d?: unknown })[fieldName] ?? null;
 }
 
-function normalizeBbox(candidate: VisionLocateCandidate, provider: LlmProvider) {
+function normalizeBbox(
+  candidate: VisionLocateCandidate,
+  provider: LlmProvider,
+) {
   if (provider === 'gemini') {
     return (
       normalizeYFirstBbox(candidate.box_2d) ??
@@ -647,8 +654,7 @@ function isDateLikeSlot(slot: TemplatePdfLocateSlot) {
   return (
     /(?:\u65e5\u671f|\u65f6\u95f4|\u51fa\u751f|\u7b7e\u8ba2|\u7b7e\u7f72|\u622a\u6b62|\u652f\u4ed8\u65e5|\u5e74\u6708\u65e5|date|time)/iu.test(
       metadata,
-    ) ||
-    getDateCandidates(slot.original_value).size > 0
+    ) || getDateCandidates(slot.original_value).size > 0
   );
 }
 
@@ -659,8 +665,7 @@ function isIdentityLikeSlot(slot: TemplatePdfLocateSlot) {
   return (
     /(?:\u8eab\u4efd\u8bc1|\u8bc1\u4ef6|\u516c\u6c11\u8eab\u4efd|\u8eab\u4efd\u53f7\u7801|id\s*number)/iu.test(
       metadata,
-    ) ||
-    /^\d{15}$|^\d{17}[\dX]$/u.test(identityValue)
+    ) || /^\d{15}$|^\d{17}[\dX]$/u.test(identityValue)
   );
 }
 
@@ -745,7 +750,9 @@ function validateVisionEvidenceValue(input: {
     const evidenceDates = getDateCandidates(evidenceText);
 
     return {
-      valid: originalDates.size > 0 && hasMatchingVariant(originalDates, evidenceDates),
+      valid:
+        originalDates.size > 0 &&
+        hasMatchingVariant(originalDates, evidenceDates),
       reason: 'date_value_mismatch',
     };
   }
@@ -834,8 +841,7 @@ function getProviderBboxFormat(provider: LlmProvider) {
 
     return {
       field: 'bbox_2d',
-      coordinateSystem:
-        `${providerHint} bbox_2d must be [x1, y1, x2, y2], normalized to integers from 0 to 999 or 0 to 1000 relative to the full image.`,
+      coordinateSystem: `${providerHint} bbox_2d must be [x1, y1, x2, y2], normalized to integers from 0 to 999 or 0 to 1000 relative to the full image.`,
       example: [100, 200, 400, 240],
     } as const;
   }
@@ -1135,7 +1141,10 @@ export async function buildTemplatePdfEvidence(input: {
   const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
   const visionProvider = visionConfig.provider;
   const llmConcurrency = getTemplatePdfLocateLlmConcurrency();
-  const pageBatches = splitPagesByConcurrency(input.visionPages, llmConcurrency);
+  const pageBatches = splitPagesByConcurrency(
+    input.visionPages,
+    llmConcurrency,
+  );
 
   await input.onTrace?.({
     message:
@@ -1249,7 +1258,7 @@ export async function buildTemplatePdfEvidence(input: {
 
   return {
     pdf_file_name: input.pdfFileName,
-    ocr_pages: [],
+    pdf_pages: [],
     matches,
   };
 }

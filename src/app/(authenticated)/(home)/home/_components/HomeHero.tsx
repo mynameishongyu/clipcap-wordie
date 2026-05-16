@@ -92,6 +92,51 @@ function logTemplateExtractionLlmTrace(line: string) {
   return true;
 }
 
+function formatDurationMs(durationMs: number) {
+  if (durationMs < 1000) {
+    return `${Math.max(0, Math.round(durationMs))}ms`;
+  }
+
+  return `${(durationMs / 1000).toFixed(2)}s`;
+}
+
+function logTemplateExtractionTimingTrace(line: string) {
+  const marker = '[Template Extract][Timing]';
+
+  if (!line.includes(marker)) {
+    return false;
+  }
+
+  const jsonStartIndex = line.indexOf('{');
+
+  if (jsonStartIndex < 0) {
+    browserProcessLog.info(line);
+    return true;
+  }
+
+  try {
+    const timing = JSON.parse(line.slice(jsonStartIndex)) as {
+      stage?: string;
+      duration_ms?: number;
+      duration_text?: string;
+    };
+
+    browserProcessLog.info(
+      `[Template Extract][Timing] ${timing.stage ?? 'unknown'} completed in ${
+        timing.duration_text ??
+        (typeof timing.duration_ms === 'number'
+          ? formatDurationMs(timing.duration_ms)
+          : 'unknown')
+      }`,
+      timing,
+    );
+  } catch {
+    browserProcessLog.info(line);
+  }
+
+  return true;
+}
+
 function readFileAsBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -275,6 +320,16 @@ async function preparePdfVisionPageAssets(file: File) {
     },
   );
 
+  const uploadStartedAt = performance.now();
+  browserProcessLog.info(
+    `[Template Extract][Timing] pdf_page_image_upload started for ${file.name}.`,
+    {
+      stage: 'pdf_page_image_upload',
+      pdfFileName: file.name,
+      pageCount: visionPages.length,
+    },
+  );
+
   const uploadedAssets = await uploadPdfVisionPagesToSupabase({
     pdfFileName: file.name,
     visionPages,
@@ -282,6 +337,25 @@ async function preparePdfVisionPageAssets(file: File) {
       browserProcessLog.info(message, details);
     },
   });
+  const uploadDurationMs = performance.now() - uploadStartedAt;
+  const uploadedTotalBytes = uploadedAssets.reduce(
+    (sum, asset) => sum + asset.size,
+    0,
+  );
+
+  browserProcessLog.info(
+    `[Template Extract][Timing] pdf_page_image_upload completed in ${formatDurationMs(
+      uploadDurationMs,
+    )}.`,
+    {
+      stage: 'pdf_page_image_upload',
+      pdfFileName: file.name,
+      pageCount: uploadedAssets.length,
+      totalBytes: uploadedTotalBytes,
+      durationMs: Math.round(uploadDurationMs),
+      durationText: formatDurationMs(uploadDurationMs),
+    },
+  );
 
   if (typeof window !== 'undefined') {
     (
@@ -520,7 +594,7 @@ export function HomeHero() {
                       storagePath: asset.storagePath,
                       crop: asset.crop,
                     })),
-                    ocrPages: task.pdf_evidence.ocr_pages,
+                    pdfPages: task.pdf_evidence.pdf_pages,
                     matches: task.pdf_evidence.matches,
                   }
                 : undefined,
@@ -587,6 +661,10 @@ export function HomeHero() {
       }
 
       if (logTemplatePdfLocateLlmTrace(line)) {
+        continue;
+      }
+
+      if (logTemplateExtractionTimingTrace(line)) {
         continue;
       }
 

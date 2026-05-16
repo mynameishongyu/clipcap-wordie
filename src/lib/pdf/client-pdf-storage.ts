@@ -102,7 +102,9 @@ async function getPdfVisionPageBlob(visionPage: PdfVisionPageInput) {
     return dataUrlToBlob(visionPage.imageDataUrl);
   }
 
-  throw new Error('PDF page image data is empty, cannot upload to Supabase Storage.');
+  throw new Error(
+    'PDF page image data is empty, cannot upload to Supabase Storage.',
+  );
 }
 
 function getPdfVisionPageContentType(
@@ -209,7 +211,7 @@ export async function uploadPdfVisionPagesToSupabase(input: {
       const blob = await getPdfVisionPageBlob(visionPage);
       const extension = getPdfVisionPageImageExtension(visionPage, blob);
       const storagePath =
-        `${user.id}/template-extraction-ocr/${crypto.randomUUID()}-` +
+        `${user.id}/template-extraction-pages/${crypto.randomUUID()}-` +
         `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
       const contentType = getPdfVisionPageContentType(visionPage, blob);
       const localPreviewUrl =
