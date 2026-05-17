@@ -9,6 +9,7 @@ export const SLOT_REVIEW_SESSION_KEY = 'clipcap:slot-review-session';
 
 export interface SlotReviewPdfEvidencePayload {
   pdfFileName: string;
+  extractionTaskId?: string;
   pages: Array<{
     pageNumber: number;
     imageDataUrl?: string;

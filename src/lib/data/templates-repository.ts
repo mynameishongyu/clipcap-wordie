@@ -226,6 +226,14 @@ async function persistTemplateReferencePdfPages(input: {
     ),
   );
 
+  await cleanupTemplateExtractionPages({
+    supabase: input.supabase,
+    user: input.user,
+    extractionTaskId: pdfEvidence.extractionTaskId,
+    originalPages: pdfEvidence.pages,
+    persistedPages: pages,
+  });
+
   return {
     ...input.slotReviewPayload,
     pdfEvidence: {
@@ -233,6 +241,50 @@ async function persistTemplateReferencePdfPages(input: {
       pages,
     },
   };
+}
+
+async function cleanupTemplateExtractionPages(input: {
+  supabase: SupabaseClient;
+  user: User;
+  extractionTaskId?: string;
+  originalPages: SlotReviewPdfEvidencePage[];
+  persistedPages: SlotReviewPdfEvidencePage[];
+}) {
+  const extractionTaskId = input.extractionTaskId?.trim();
+
+  if (!extractionTaskId) {
+    return;
+  }
+
+  const temporaryPrefix = `${input.user.id}/template-extraction-pages/${extractionTaskId}/`;
+  const storagePathsToRemove = input.originalPages
+    .map((page, index) => ({
+      originalPath: page.storagePath?.trim() ?? '',
+      persistedPath: input.persistedPages[index]?.storagePath?.trim() ?? '',
+    }))
+    .filter(
+      (entry) =>
+        entry.originalPath.startsWith(temporaryPrefix) &&
+        entry.persistedPath &&
+        entry.persistedPath !== entry.originalPath,
+    )
+    .map((entry) => entry.originalPath);
+
+  if (storagePathsToRemove.length === 0) {
+    return;
+  }
+
+  const { error } = await input.supabase.storage
+    .from('generation-pdfs')
+    .remove(Array.from(new Set(storagePathsToRemove)));
+
+  if (error) {
+    console.warn('[Templates] Failed to clean up temporary extraction pages.', {
+      extractionTaskId,
+      storagePathCount: storagePathsToRemove.length,
+      error,
+    });
+  }
 }
 
 /**

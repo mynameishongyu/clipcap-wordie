@@ -179,6 +179,7 @@ async function runWithConcurrency<T>(
 
 export async function uploadPdfVisionPagesToSupabase(input: {
   pdfFileName: string;
+  extractionTaskId?: string;
   visionPages: PdfVisionPageInput[];
   onLog?: (message: string, details?: Record<string, unknown>) => void;
 }) {
@@ -193,6 +194,10 @@ export async function uploadPdfVisionPagesToSupabase(input: {
   }
 
   const safeBaseName = sanitizeStorageFileName(input.pdfFileName);
+  const extractionTaskId = input.extractionTaskId?.trim();
+  const directoryPrefix = extractionTaskId
+    ? `${user.id}/template-extraction-pages/${extractionTaskId}/`
+    : `${user.id}/template-extraction-pages/`;
   const totalPageCount = input.visionPages.length;
   const uploadedAssets: Array<StoredPdfVisionPageAsset | undefined> =
     Array.from({ length: totalPageCount });
@@ -211,7 +216,7 @@ export async function uploadPdfVisionPagesToSupabase(input: {
       const blob = await getPdfVisionPageBlob(visionPage);
       const extension = getPdfVisionPageImageExtension(visionPage, blob);
       const storagePath =
-        `${user.id}/template-extraction-pages/${crypto.randomUUID()}-` +
+        `${directoryPrefix}${crypto.randomUUID()}-` +
         `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
       const contentType = getPdfVisionPageContentType(visionPage, blob);
       const localPreviewUrl =

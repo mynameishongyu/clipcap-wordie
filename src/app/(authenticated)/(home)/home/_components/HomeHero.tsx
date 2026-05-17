@@ -332,6 +332,7 @@ function readFileAsBase64(file: File) {
 interface TemplateExtractionTaskSummary extends TemplateExtractionTaskResponse {}
 
 interface CreateTemplateExtractionTaskInput {
+  extractionTaskId?: string;
   file: File;
   prompt: string;
   pdfName?: string;
@@ -382,6 +383,9 @@ async function createTemplateExtractionTask(
   input: CreateTemplateExtractionTaskInput,
 ) {
   const formData = new FormData();
+  if (input.extractionTaskId) {
+    formData.append('extractionTaskId', input.extractionTaskId);
+  }
   formData.append('file', input.file);
   formData.append('prompt', input.prompt);
 
@@ -450,7 +454,10 @@ async function startTemplateExtractionTask(taskId: string) {
   }
 }
 
-async function preparePdfVisionPageAssets(file: File) {
+async function preparePdfVisionPageAssets(
+  file: File,
+  extractionTaskId: string,
+) {
   const pdfRenderConfig = getPdfRenderConfig();
 
   browserProcessLog.info(
@@ -500,6 +507,7 @@ async function preparePdfVisionPageAssets(file: File) {
 
   const uploadedAssets = await uploadPdfVisionPagesToSupabase({
     pdfFileName: file.name,
+    extractionTaskId,
     visionPages,
     onLog: (message, details) => {
       browserProcessLog.info(message, details);
@@ -545,6 +553,7 @@ async function preparePdfVisionPageAssets(file: File) {
         size: asset.size,
       })),
       consolePreviewVariable: 'window.clipcapTemplatePdfEvidencePages',
+      extractionTaskId,
     },
   );
 
@@ -753,6 +762,7 @@ export function HomeHero() {
               task.pdf_evidence && pdfVisionPageAssetsRef.current.length > 0
                 ? {
                     pdfFileName: task.pdf_evidence.pdf_file_name,
+                    extractionTaskId: task.id,
                     pages: pdfVisionPageAssetsRef.current.map((asset) => ({
                       pageNumber: asset.pageNumber,
                       imageUrl: asset.localPreviewUrl ?? asset.previewUrl,
@@ -976,6 +986,7 @@ export function HomeHero() {
 
       const notificationId = 'template-slot-extraction';
       const sourcePdfFile = selectedPdfFile;
+      const extractionTaskId = crypto.randomUUID();
       setProcessingSeconds(0);
       setIsSubmissionLocked(true);
       hasHandledTaskCompletionRef.current = false;
@@ -983,10 +994,12 @@ export function HomeHero() {
       uploadDocxBase64PromiseRef.current = readFileAsBase64(selectedDocxFile);
       pdfVisionPageAssetsRef.current = [];
       pdfVisionPageAssetsPromiseRef.current = sourcePdfFile
-        ? preparePdfVisionPageAssets(sourcePdfFile).then((assets) => {
-            pdfVisionPageAssetsRef.current = assets;
-            return assets;
-          })
+        ? preparePdfVisionPageAssets(sourcePdfFile, extractionTaskId).then(
+            (assets) => {
+              pdfVisionPageAssetsRef.current = assets;
+              return assets;
+            },
+          )
         : Promise.resolve([]);
 
       notifications.show({
@@ -1005,6 +1018,7 @@ export function HomeHero() {
         const pdfVisionPageAssets =
           await (pdfVisionPageAssetsPromiseRef.current ?? Promise.resolve([]));
         const task = await createTemplateExtractionTask({
+          extractionTaskId,
           file: selectedDocxFile,
           prompt,
           pdfName: sourcePdfFile?.name,

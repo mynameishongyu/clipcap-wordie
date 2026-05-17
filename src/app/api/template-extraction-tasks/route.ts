@@ -11,6 +11,20 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
 
+function normalizeClientTaskId(value: FormDataEntryValue | null) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    normalized,
+  )
+    ? normalized
+    : null;
+}
+
 function createUnauthorizedResponse() {
   return NextResponse.json(
     {
@@ -134,6 +148,9 @@ export async function POST(request: Request) {
       pdfVisionPageAssets.length > 0
         ? []
         : parsePdfVisionPages(formData.get('pdfVisionPages'));
+    const clientTaskId = normalizeClientTaskId(
+      formData.get('extractionTaskId'),
+    );
     const prompt = String(formData.get('prompt') ?? '').trim();
     const hasPdfEvidence =
       pdfVisionPageAssets.length > 0 || pdfVisionPages.length > 0;
@@ -187,6 +204,7 @@ export async function POST(request: Request) {
     const { data: task, error } = await admin
       .from('template_extraction_tasks')
       .insert({
+        ...(clientTaskId ? { id: clientTaskId } : {}),
         owner_id: user.id,
         source_docx_name: file.name,
         source_docx_base64: buffer.toString('base64'),
