@@ -188,6 +188,31 @@ function logTemplatePdfLocateLlmTrace(line: string) {
         payload,
       ];
       browserProcessLog.info(label, payload);
+
+      if (typeof payload.raw_response === 'string') {
+        logConsoleTextChunks(
+          '[Template PDF Locate] VISION_LLM raw response text',
+          payload.raw_response,
+        );
+      } else if (typeof payload.raw_response_chunk === 'string') {
+        const chunkIndex =
+          typeof payload.chunk_index === 'number'
+            ? payload.chunk_index
+            : undefined;
+        const totalChunks =
+          typeof payload.total_chunks === 'number'
+            ? payload.total_chunks
+            : undefined;
+        const chunkLabel =
+          chunkIndex && totalChunks
+            ? ` chunk ${chunkIndex}/${totalChunks}`
+            : '';
+
+        logConsoleTextChunks(
+          `[Template PDF Locate] VISION_LLM raw response text${chunkLabel}`,
+          payload.raw_response_chunk,
+        );
+      }
     } else {
       debugWindow.clipcapTemplatePdfLocateParsedMatches = [
         ...(debugWindow.clipcapTemplatePdfLocateParsedMatches ?? []),
@@ -268,6 +293,21 @@ function formatDurationMs(durationMs: number) {
   return `${(durationMs / 1000).toFixed(2)}s`;
 }
 
+function getTemplateExtractionTimingStageLabel(stage: string | undefined) {
+  switch (stage) {
+    case 'pdf_page_render':
+      return 'PDF 转 PNG';
+    case 'pdf_page_image_upload':
+      return 'PNG 上传 Supabase';
+    case 'text_slot_extraction':
+      return 'DOCX 槽位抽取';
+    case 'slot_pdf_page_mapping':
+      return '槽位与 PDF 内容关联';
+    default:
+      return stage ?? 'unknown';
+  }
+}
+
 function logTemplateExtractionTimingTrace(line: string) {
   const marker = '[Template Extract][Timing]';
 
@@ -288,15 +328,33 @@ function logTemplateExtractionTimingTrace(line: string) {
       duration_ms?: number;
       duration_text?: string;
     };
+    const stageLabel = getTemplateExtractionTimingStageLabel(timing.stage);
+    const timingWindow = window as typeof window & {
+      clipcapTemplateExtractionTimings?: Array<
+        typeof timing & { stage_label: string }
+      >;
+    };
+    const payload = {
+      ...timing,
+      stage_label: stageLabel,
+    };
+
+    timingWindow.clipcapTemplateExtractionTimings = [
+      ...(timingWindow.clipcapTemplateExtractionTimings ?? []),
+      payload,
+    ];
+
+    const durationText =
+      timing.duration_text ??
+      (typeof timing.duration_ms === 'number'
+        ? formatDurationMs(timing.duration_ms)
+        : null);
 
     browserProcessLog.info(
-      `[Template Extract][Timing] ${timing.stage ?? 'unknown'} completed in ${
-        timing.duration_text ??
-        (typeof timing.duration_ms === 'number'
-          ? formatDurationMs(timing.duration_ms)
-          : 'unknown')
-      }`,
-      timing,
+      durationText
+        ? `[Template Extract][Timing] ${stageLabel} completed in ${durationText}`
+        : `[Template Extract][Timing] ${stageLabel} started`,
+      payload,
     );
   } catch {
     browserProcessLog.info(line);
@@ -479,7 +537,23 @@ async function preparePdfVisionPageAssets(
     },
   );
 
+  const renderStartedAt = performance.now();
+  browserProcessLog.info(
+    `[Template Extract][Timing] ${JSON.stringify({
+      stage: 'pdf_page_render',
+      pdf_file_name: file.name,
+      started_at: new Date().toISOString(),
+      page_count: pageNumbers.length,
+      pdf_render_config: pdfRenderConfig,
+    })}`,
+  );
+
   const visionPages = await renderPdfPagesForVision(file, pageNumbers);
+  const renderDurationMs = performance.now() - renderStartedAt;
+  const renderedTotalBytes = visionPages.reduce(
+    (sum, page) => sum + (page.imageBlob?.size ?? 0),
+    0,
+  );
 
   browserProcessLog.info(
     `[Template Extract][PDF Evidence] Rendered ${visionPages.length} PDF page image(s) for ${file.name}.`,
@@ -495,14 +569,31 @@ async function preparePdfVisionPageAssets(
     },
   );
 
+  browserProcessLog.info(
+    `[Template Extract][Timing] ${JSON.stringify({
+      stage: 'pdf_page_render',
+      pdf_file_name: file.name,
+      started_at: new Date(
+        Date.now() - Math.round(renderDurationMs),
+      ).toISOString(),
+      finished_at: new Date().toISOString(),
+      duration_ms: Math.round(renderDurationMs),
+      duration_text: formatDurationMs(renderDurationMs),
+      page_count: visionPages.length,
+      total_bytes: renderedTotalBytes,
+      pdf_render_config: pdfRenderConfig,
+    })}`,
+  );
+
   const uploadStartedAt = performance.now();
   browserProcessLog.info(
-    `[Template Extract][Timing] pdf_page_image_upload started for ${file.name}.`,
-    {
+    `[Template Extract][Timing] ${JSON.stringify({
       stage: 'pdf_page_image_upload',
-      pdfFileName: file.name,
-      pageCount: visionPages.length,
-    },
+      pdf_file_name: file.name,
+      started_at: new Date().toISOString(),
+      page_count: visionPages.length,
+      total_bytes: renderedTotalBytes,
+    })}`,
   );
 
   const uploadedAssets = await uploadPdfVisionPagesToSupabase({
@@ -520,17 +611,18 @@ async function preparePdfVisionPageAssets(
   );
 
   browserProcessLog.info(
-    `[Template Extract][Timing] pdf_page_image_upload completed in ${formatDurationMs(
-      uploadDurationMs,
-    )}.`,
-    {
+    `[Template Extract][Timing] ${JSON.stringify({
       stage: 'pdf_page_image_upload',
-      pdfFileName: file.name,
-      pageCount: uploadedAssets.length,
-      totalBytes: uploadedTotalBytes,
-      durationMs: Math.round(uploadDurationMs),
-      durationText: formatDurationMs(uploadDurationMs),
-    },
+      pdf_file_name: file.name,
+      started_at: new Date(
+        Date.now() - Math.round(uploadDurationMs),
+      ).toISOString(),
+      finished_at: new Date().toISOString(),
+      page_count: uploadedAssets.length,
+      total_bytes: uploadedTotalBytes,
+      duration_ms: Math.round(uploadDurationMs),
+      duration_text: formatDurationMs(uploadDurationMs),
+    })}`,
   );
 
   if (typeof window !== 'undefined') {

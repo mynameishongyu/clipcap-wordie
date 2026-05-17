@@ -61,6 +61,7 @@ const visionLocateFetchDispatcher = new Agent({
 
 const TEMPLATE_PDF_LOCATE_REQUEST_TIMEOUT_MS = 180_000;
 const TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS = 90_000;
+const TEMPLATE_PDF_LOCATE_RAW_RESPONSE_TRACE_CHUNK_SIZE = 8000;
 const DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 1;
 const MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 8;
 
@@ -121,6 +122,20 @@ function formatBytes(bytes: number) {
   }
 
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function splitTraceTextIntoChunks(text: string, chunkSize: number) {
+  if (text.length <= chunkSize) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+
+  for (let index = 0; index < text.length; index += chunkSize) {
+    chunks.push(text.slice(index, index + chunkSize));
+  }
+
+  return chunks;
 }
 
 function summarizeImageUrlForTrace(url: string) {
@@ -1245,15 +1260,25 @@ async function locateSlotsInPageBatch(input: {
       return [] as VisionLocateCandidate[];
     }
 
-    await input.onTrace?.({
-      message:
-        `[Template PDF Locate][LLM Raw Response][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
-        JSON.stringify({
-          pdf_file_name: input.pdfFileName,
-          page_numbers: pageNumbers,
-          raw_response: rawContent,
-        }),
-    });
+    const rawResponseChunks = splitTraceTextIntoChunks(
+      rawContent,
+      TEMPLATE_PDF_LOCATE_RAW_RESPONSE_TRACE_CHUNK_SIZE,
+    );
+
+    for (const [chunkIndex, rawResponseChunk] of rawResponseChunks.entries()) {
+      await input.onTrace?.({
+        message:
+          `[Template PDF Locate][LLM Raw Response][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}][Chunk ${chunkIndex + 1}/${rawResponseChunks.length}] ` +
+          JSON.stringify({
+            pdf_file_name: input.pdfFileName,
+            page_numbers: pageNumbers,
+            raw_response_chunk: rawResponseChunk,
+            raw_response_length: rawContent.length,
+            chunk_index: chunkIndex + 1,
+            total_chunks: rawResponseChunks.length,
+          }),
+      });
+    }
 
     const normalized = await parseVisionLocationResponse({
       rawContent,
