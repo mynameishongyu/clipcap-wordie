@@ -64,8 +64,6 @@ const TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS = 90_000;
 const TEMPLATE_PDF_LOCATE_RAW_RESPONSE_TRACE_CHUNK_SIZE = 8000;
 const DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 1;
 const MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 8;
-const DEFAULT_TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST = 8;
-const MAX_TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST = 12;
 
 function getTemplatePdfLocateLlmConcurrency() {
   const rawValue = getOptionalEnv('TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY');
@@ -78,19 +76,6 @@ function getTemplatePdfLocateLlmConcurrency() {
   }
 
   return Math.min(MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY, parsedValue);
-}
-
-function getTemplatePdfLocationPagesPerRequest() {
-  const rawValue = getOptionalEnv('TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST');
-  const parsedValue = rawValue
-    ? Number(rawValue)
-    : DEFAULT_TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST;
-
-  if (!Number.isInteger(parsedValue) || parsedValue < 1) {
-    return DEFAULT_TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST;
-  }
-
-  return Math.min(MAX_TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST, parsedValue);
 }
 
 function buildLlmTraceConfigPayload(
@@ -213,46 +198,19 @@ function summarizeChatCompletionBodyForTrace(
   };
 }
 
-function chunkItems<T>(items: T[], chunkSize: number) {
+function splitPagesByConcurrency<T>(items: T[], concurrency: number) {
   const chunks: T[][] = [];
-  const normalizedChunkSize = Math.max(1, Math.floor(chunkSize));
+  const workerCount = Math.min(
+    Math.max(1, concurrency),
+    Math.max(1, items.length),
+  );
+  const chunkSize = Math.ceil(items.length / workerCount);
 
-  for (let index = 0; index < items.length; index += normalizedChunkSize) {
-    chunks.push(items.slice(index, index + normalizedChunkSize));
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
   }
 
   return chunks;
-}
-
-async function runWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-) {
-  const results: Array<R | undefined> = Array.from({ length: items.length });
-  let nextIndex = 0;
-  const workerCount = Math.min(
-    Math.max(1, Math.floor(concurrency)),
-    Math.max(1, items.length),
-  );
-
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < items.length) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        const currentItem = items[currentIndex];
-
-        if (!currentItem) {
-          continue;
-        }
-
-        results[currentIndex] = await worker(currentItem, currentIndex);
-      }
-    }),
-  );
-
-  return results.filter((result): result is R => typeof result !== 'undefined');
 }
 
 function normalizeJsonText(rawContent: string) {
@@ -1363,18 +1321,16 @@ export async function buildTemplatePdfEvidence(input: {
   const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
   const visionProvider = visionConfig.provider;
   const llmConcurrency = getTemplatePdfLocateLlmConcurrency();
-  const pagesPerRequest = getTemplatePdfLocationPagesPerRequest();
-  const pageBatches = chunkItems(
+  const pageBatches = splitPagesByConcurrency(
     input.visionPages,
-    pagesPerRequest,
+    llmConcurrency,
   );
 
   await input.onTrace?.({
     message:
       `[Template PDF Locate] Visual location started for ${input.pdfFileName} ` +
       `(pages: ${input.visionPages.length}, batches: ${pageBatches.length}, slots: ${slots.length}, ` +
-      `pages_per_request: ${pagesPerRequest}, llm_concurrency: ${llmConcurrency}, provider: ${visionProvider}, ` +
-      `model: ${visionConfig.model}, bbox_target_mode: ${targetMode}).`,
+      `llm_concurrency: ${llmConcurrency}, provider: ${visionProvider}, model: ${visionConfig.model}, bbox_target_mode: ${targetMode}).`,
   });
   await input.onTrace?.({
     message:
@@ -1383,7 +1339,6 @@ export async function buildTemplatePdfEvidence(input: {
         buildLlmTraceConfigPayload(visionTraceConfig, {
           PDF_BBOX_TARGET_MODE: targetMode,
           TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY: llmConcurrency,
-          TEMPLATE_PDF_LOCATION_PAGES_PER_REQUEST: pagesPerRequest,
         }),
       ),
   });
@@ -1397,10 +1352,8 @@ export async function buildTemplatePdfEvidence(input: {
     TemplatePdfEvidenceResult['matches'][number]
   >();
 
-  const settledBatchResults = await runWithConcurrency(
-    pageBatches,
-    llmConcurrency,
-    async (pageBatch, pageBatchIndex) => {
+  const settledBatchResults = await Promise.all(
+    pageBatches.map(async (pageBatch, pageBatchIndex) => {
       try {
         const rawMatches = await locateSlotsInPageBatch({
           pdfFileName: input.pdfFileName,
@@ -1421,7 +1374,7 @@ export async function buildTemplatePdfEvidence(input: {
         await input.onTrace?.({ message: failedMessage });
         return { pageBatchIndex, rawMatches: [] };
       }
-    },
+    }),
   );
 
   for (const { rawMatches } of settledBatchResults) {
