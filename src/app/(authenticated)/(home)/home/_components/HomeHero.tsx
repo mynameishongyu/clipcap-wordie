@@ -507,8 +507,18 @@ async function startTemplateExtractionTask(taskId: string) {
   );
 
   if (!response.ok) {
-    const payload = (await response.json()) as { message?: string };
-    throw new Error(payload.message ?? '启动槽位抽取任务失败，请稍后重试。');
+    const { payload, message } =
+      await parseTemplateExtractionTaskResponse(response);
+
+    browserProcessLog.error('[Template Extract][ProcessRoute] Failed', {
+      taskId,
+      status: response.status,
+      statusText: response.statusText,
+      payload,
+      message,
+    });
+
+    throw new Error(message ?? '启动槽位抽取任务失败，请稍后重试。');
   }
 }
 
@@ -805,7 +815,21 @@ export function HomeHero() {
 
     try {
       await startTemplateExtractionTask(taskId);
-    } catch {
+    } catch (error) {
+      browserProcessLog.error(
+        '[Template Extract][ProcessRoute] Start failed; polling will continue.',
+        {
+          taskId,
+          error:
+            error instanceof Error
+              ? {
+                  name: error.name,
+                  message: error.message,
+                  stack: error.stack,
+                }
+              : error,
+        },
+      );
       // Keep polling; the next poll can retry kicking off the task if it is still pending.
     } finally {
       processKickoffInFlightRef.current = false;
