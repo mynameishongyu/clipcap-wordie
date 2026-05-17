@@ -129,7 +129,7 @@ async function persistReferencePdfPageForTemplate(input: {
   page: SlotReviewPdfEvidencePage;
 }) {
   const currentPath = input.page.storagePath?.trim() ?? '';
-  const stablePrefix = `${input.user.id}/template-reference-pages/${input.templateId}/`;
+  const stablePrefix = `${input.user.id}/template-reference-pages/template/${input.templateId}/`;
 
   if (currentPath.startsWith(stablePrefix)) {
     return input.page;
@@ -256,7 +256,10 @@ async function cleanupTemplateExtractionPages(input: {
     return;
   }
 
-  const temporaryPrefix = `${input.user.id}/template-extraction-pages/${extractionTaskId}/`;
+  const temporaryPrefixes = [
+    `${input.user.id}/template-extraction-pages/task/${extractionTaskId}/`,
+    `${input.user.id}/template-extraction-pages/${extractionTaskId}/`,
+  ];
   const storagePathsToRemove = input.originalPages
     .map((page, index) => ({
       originalPath: page.storagePath?.trim() ?? '',
@@ -264,7 +267,9 @@ async function cleanupTemplateExtractionPages(input: {
     }))
     .filter(
       (entry) =>
-        entry.originalPath.startsWith(temporaryPrefix) &&
+        temporaryPrefixes.some((temporaryPrefix) =>
+          entry.originalPath.startsWith(temporaryPrefix),
+        ) &&
         entry.persistedPath &&
         entry.persistedPath !== entry.originalPath,
     )

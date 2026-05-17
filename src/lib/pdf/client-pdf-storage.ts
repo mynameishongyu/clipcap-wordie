@@ -194,10 +194,8 @@ export async function uploadPdfVisionPagesToSupabase(input: {
   }
 
   const safeBaseName = sanitizeStorageFileName(input.pdfFileName);
-  const extractionTaskId = input.extractionTaskId?.trim();
-  const directoryPrefix = extractionTaskId
-    ? `${user.id}/template-extraction-pages/${extractionTaskId}/`
-    : `${user.id}/template-extraction-pages/`;
+  const extractionTaskId = input.extractionTaskId?.trim() || crypto.randomUUID();
+  const directoryPrefix = `${user.id}/template-extraction-pages/task/${extractionTaskId}/`;
   const totalPageCount = input.visionPages.length;
   const uploadedAssets: Array<StoredPdfVisionPageAsset | undefined> =
     Array.from({ length: totalPageCount });
