@@ -1397,7 +1397,7 @@ export async function buildTemplatePdfEvidence(input: {
 
       if (!validation.valid) {
         const rejectedMessage =
-          `[Template PDF Locate] Rejected visual match for ${slot.field_category} because ${validation.reason}: ` +
+          `[Template PDF Locate] Rejected visual match for ${slot.field_category} slot_key=${slot.slot_key} because ${validation.reason}: ` +
           `original="${slot.original_value}", evidence="${typeof candidate.evidence_text === 'string' ? candidate.evidence_text.trim() : ''}", page=${pageNumber}.`;
         console.warn(rejectedMessage);
         await input.onTrace?.({ message: rejectedMessage });

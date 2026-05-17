@@ -2578,13 +2578,18 @@ export function SlotReviewWorkspace() {
                       >
                         <Stack gap="xs">
                           <Group justify="space-between">
-                            <Badge
-                              color="teal"
-                              radius="sm"
-                              variant={isActive ? 'filled' : 'light'}
-                            >
-                              {item.field_category}
-                            </Badge>
+                            <Group gap={6} wrap="wrap">
+                              <Badge
+                                color="teal"
+                                radius="sm"
+                                variant={isActive ? 'filled' : 'light'}
+                              >
+                                {item.field_category}
+                              </Badge>
+                              <Badge color="gray" radius="sm" variant="light">
+                                slot-key: {item.id}
+                              </Badge>
+                            </Group>
                             <Group gap="xs">
                               {payload.pdfEvidence ? (
                                 <Button
