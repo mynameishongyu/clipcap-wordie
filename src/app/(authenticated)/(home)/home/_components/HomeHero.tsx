@@ -227,6 +227,72 @@ function logTemplatePdfLocateLlmTrace(line: string) {
   return true;
 }
 
+function formatTextLlmMessageContent(content: unknown) {
+  if (typeof content !== 'string') {
+    return JSON.stringify(content, null, 2);
+  }
+
+  const trimmedContent = content.trim();
+
+  if (
+    (trimmedContent.startsWith('{') && trimmedContent.endsWith('}')) ||
+    (trimmedContent.startsWith('[') && trimmedContent.endsWith(']'))
+  ) {
+    try {
+      return JSON.stringify(JSON.parse(trimmedContent), null, 2);
+    } catch {
+      return content;
+    }
+  }
+
+  return content;
+}
+
+function formatTextLlmPromptPayload(payload: Record<string, unknown>) {
+  const requestBody =
+    payload.request_body &&
+    typeof payload.request_body === 'object' &&
+    !Array.isArray(payload.request_body)
+      ? (payload.request_body as { messages?: unknown })
+      : null;
+  const messages = Array.isArray(requestBody?.messages)
+    ? requestBody.messages
+    : [];
+  const paragraphDisplayNumber =
+    typeof payload.paragraph_display_index === 'number'
+      ? payload.paragraph_display_index + 1
+      : payload.paragraph_display_index;
+  const header = [
+    `route: ${String(payload.route ?? '/api/template-extraction-tasks/[taskId]/process')}`,
+    `config_scope: ${String(payload.config_scope ?? 'TEXT_LLM')}`,
+    `provider: ${String(payload.provider ?? 'unknown')}`,
+    `model: ${String(payload.model ?? 'unknown')}`,
+    `file_name: ${String(payload.file_name ?? 'unknown')}`,
+    `paragraph: ${String(paragraphDisplayNumber ?? '?')}/${String(
+      payload.total_paragraphs ?? '?',
+    )}`,
+    `paragraph_title: ${String(payload.paragraph_title ?? '')}`,
+  ].join('\n');
+  const messageText = messages
+    .map((message, index) => {
+      const record =
+        message && typeof message === 'object'
+          ? (message as { role?: unknown; content?: unknown })
+          : {};
+      const role = String(record.role ?? `message_${index + 1}`);
+
+      return [
+        `--- ${role.toUpperCase()} MESSAGE ---`,
+        formatTextLlmMessageContent(record.content),
+      ].join('\n');
+    })
+    .join('\n\n');
+
+  return [header, messageText || JSON.stringify(payload, null, 2)].join(
+    '\n\n',
+  );
+}
+
 function logTemplateExtractionLlmTrace(line: string) {
   const promptMarker = '[Template Extract][TextPrompt]';
   const rawMarker = '[Template Extract][LLM Raw Response]';
@@ -265,6 +331,10 @@ function logTemplateExtractionLlmTrace(line: string) {
         ...(debugWindow.clipcapTemplateTextLlmPrompts ?? []),
         payload,
       ];
+      logConsoleTextChunks(
+        '[Template Extract] TEXT_LLM prompt',
+        formatTextLlmPromptPayload(payload as Record<string, unknown>),
+      );
     } else if (line.includes(rawMarker)) {
       debugWindow.clipcapTemplateTextLlmRawResponses = [
         ...(debugWindow.clipcapTemplateTextLlmRawResponses ?? []),
@@ -275,6 +345,10 @@ function logTemplateExtractionLlmTrace(line: string) {
         ...(debugWindow.clipcapTemplateTextLlmParsedResults ?? []),
         payload,
       ];
+    }
+
+    if (line.includes(promptMarker)) {
+      return true;
     }
 
     browserProcessLog.info(label, payload);
