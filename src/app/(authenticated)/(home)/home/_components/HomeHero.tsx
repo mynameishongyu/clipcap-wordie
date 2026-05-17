@@ -38,18 +38,83 @@ import { openCompleteRegistrationModal } from '@/src/modals/complete-registratio
 import { openUsageGuideModal } from '@/src/modals/usage-guide';
 import { useRegistrationGateStore } from '@/src/stores/registration-gate-store';
 
+function logConsoleTextChunks(label: string, text: string) {
+  const chunkSize = 12000;
+  const totalChunks = Math.max(1, Math.ceil(text.length / chunkSize));
+
+  for (let index = 0; index < totalChunks; index += 1) {
+    const chunk = text.slice(index * chunkSize, (index + 1) * chunkSize);
+
+    console.log(
+      totalChunks === 1
+        ? `${label}\n${chunk}`
+        : `${label} chunk ${index + 1}/${totalChunks}\n${chunk}`,
+    );
+  }
+}
+
+function formatVisionImageAttachmentList(
+  rawImagePlaceholders: unknown,
+): string | null {
+  if (
+    !Array.isArray(rawImagePlaceholders) ||
+    rawImagePlaceholders.length === 0
+  ) {
+    return null;
+  }
+
+  const lines = rawImagePlaceholders.flatMap((placeholder, index) => {
+    if (!placeholder || typeof placeholder !== 'object') {
+      return [];
+    }
+
+    const imagePlaceholder = placeholder as {
+      label?: unknown;
+      page_number?: unknown;
+      image_size?: unknown;
+    };
+    const label =
+      typeof imagePlaceholder.label === 'string'
+        ? imagePlaceholder.label
+        : `Page ${index + 1}`;
+    const pageNumber =
+      typeof imagePlaceholder.page_number === 'number'
+        ? imagePlaceholder.page_number
+        : index + 1;
+    const imageSize =
+      typeof imagePlaceholder.image_size === 'string'
+        ? `，大小 ${imagePlaceholder.image_size}`
+        : '';
+
+    return [label, `[图片：PDF 第 ${pageNumber} 页${imageSize}]`, ''];
+  });
+
+  return lines.length > 0 ? lines.join('\n').trimEnd() : null;
+}
+
 function logTemplatePdfLocateLlmTrace(line: string) {
+  const promptMarker = '[Template PDF Locate][VisionPrompt]';
+  const requestBodyMarker = '[Template PDF Locate][VisionRequestBody]';
   const rawMarker = '[Template PDF Locate][LLM Raw Response]';
   const parsedMarker = '[Template PDF Locate][LLM Parsed Matches]';
 
-  if (!line.includes(rawMarker) && !line.includes(parsedMarker)) {
+  if (
+    !line.includes(promptMarker) &&
+    !line.includes(requestBodyMarker) &&
+    !line.includes(rawMarker) &&
+    !line.includes(parsedMarker)
+  ) {
     return false;
   }
 
   const jsonStartIndex = line.indexOf('{');
-  const label = line.includes(rawMarker)
-    ? '[Template PDF Locate][LLM Raw Response]'
-    : '[Template PDF Locate][LLM Parsed Matches]';
+  const label = line.includes(promptMarker)
+    ? '[Template PDF Locate][Vision Prompt]'
+    : line.includes(requestBodyMarker)
+      ? '[Template PDF Locate][Actual VISION_LLM Request Body]'
+      : line.includes(rawMarker)
+        ? '[Template PDF Locate][LLM Raw Response]'
+        : '[Template PDF Locate][LLM Parsed Matches]';
 
   if (jsonStartIndex < 0) {
     browserProcessLog.info(line);
@@ -57,7 +122,79 @@ function logTemplatePdfLocateLlmTrace(line: string) {
   }
 
   try {
-    browserProcessLog.info(label, JSON.parse(line.slice(jsonStartIndex)));
+    const payload = JSON.parse(line.slice(jsonStartIndex)) as Record<
+      string,
+      unknown
+    >;
+    const debugWindow = window as typeof window & {
+      clipcapTemplatePdfLocatePrompts?: unknown[];
+      clipcapTemplatePdfLocateActualRequestBodies?: unknown[];
+      clipcapTemplatePdfLocateRawResponses?: unknown[];
+      clipcapTemplatePdfLocateParsedMatches?: unknown[];
+    };
+
+    if (line.includes(promptMarker)) {
+      debugWindow.clipcapTemplatePdfLocatePrompts = [
+        ...(debugWindow.clipcapTemplatePdfLocatePrompts ?? []),
+        payload,
+      ];
+      browserProcessLog.info(label, payload);
+
+      const userPromptContent =
+        Array.isArray(payload.messages) &&
+        payload.messages.find(
+          (message) =>
+            !!message &&
+            typeof message === 'object' &&
+            (message as { role?: unknown }).role === 'user',
+        )
+          ? (
+              payload.messages.find(
+                (message) =>
+                  !!message &&
+                  typeof message === 'object' &&
+                  (message as { role?: unknown }).role === 'user',
+              ) as { content?: unknown }
+            ).content
+          : null;
+      const imageAttachmentList = formatVisionImageAttachmentList(
+        payload.image_placeholders,
+      );
+
+      if (imageAttachmentList) {
+        logConsoleTextChunks(
+          '[Template PDF Locate] VISION_LLM image attachments',
+          imageAttachmentList,
+        );
+      }
+
+      logConsoleTextChunks(
+        '[Template PDF Locate] VISION_LLM user prompt JSON',
+        JSON.stringify(userPromptContent, null, 2),
+      );
+    } else if (line.includes(requestBodyMarker)) {
+      debugWindow.clipcapTemplatePdfLocateActualRequestBodies = [
+        ...(debugWindow.clipcapTemplatePdfLocateActualRequestBodies ?? []),
+        payload,
+      ];
+      browserProcessLog.info(label, payload);
+      logConsoleTextChunks(
+        '[Template PDF Locate] Actual VISION_LLM request body JSON',
+        JSON.stringify(payload.request_body ?? payload, null, 2),
+      );
+    } else if (line.includes(rawMarker)) {
+      debugWindow.clipcapTemplatePdfLocateRawResponses = [
+        ...(debugWindow.clipcapTemplatePdfLocateRawResponses ?? []),
+        payload,
+      ];
+      browserProcessLog.info(label, payload);
+    } else {
+      debugWindow.clipcapTemplatePdfLocateParsedMatches = [
+        ...(debugWindow.clipcapTemplatePdfLocateParsedMatches ?? []),
+        payload,
+      ];
+      browserProcessLog.info(label, payload);
+    }
   } catch {
     browserProcessLog.info(line);
   }
@@ -66,17 +203,24 @@ function logTemplatePdfLocateLlmTrace(line: string) {
 }
 
 function logTemplateExtractionLlmTrace(line: string) {
+  const promptMarker = '[Template Extract][TextPrompt]';
   const rawMarker = '[Template Extract][LLM Raw Response]';
   const parsedMarker = '[Template Extract][LLM Parsed JSON]';
 
-  if (!line.includes(rawMarker) && !line.includes(parsedMarker)) {
+  if (
+    !line.includes(promptMarker) &&
+    !line.includes(rawMarker) &&
+    !line.includes(parsedMarker)
+  ) {
     return false;
   }
 
   const jsonStartIndex = line.indexOf('{');
-  const label = line.includes(rawMarker)
-    ? '[Template Extract][LLM Raw Response]'
-    : '[Template Extract][LLM Parsed JSON]';
+  const label = line.includes(promptMarker)
+    ? '[Template Extract][Text LLM Prompt]'
+    : line.includes(rawMarker)
+      ? '[Template Extract][LLM Raw Response]'
+      : '[Template Extract][LLM Parsed JSON]';
 
   if (jsonStartIndex < 0) {
     browserProcessLog.info(line);
@@ -84,7 +228,31 @@ function logTemplateExtractionLlmTrace(line: string) {
   }
 
   try {
-    browserProcessLog.info(label, JSON.parse(line.slice(jsonStartIndex)));
+    const payload = JSON.parse(line.slice(jsonStartIndex));
+    const debugWindow = window as typeof window & {
+      clipcapTemplateTextLlmPrompts?: unknown[];
+      clipcapTemplateTextLlmRawResponses?: unknown[];
+      clipcapTemplateTextLlmParsedResults?: unknown[];
+    };
+
+    if (line.includes(promptMarker)) {
+      debugWindow.clipcapTemplateTextLlmPrompts = [
+        ...(debugWindow.clipcapTemplateTextLlmPrompts ?? []),
+        payload,
+      ];
+    } else if (line.includes(rawMarker)) {
+      debugWindow.clipcapTemplateTextLlmRawResponses = [
+        ...(debugWindow.clipcapTemplateTextLlmRawResponses ?? []),
+        payload,
+      ];
+    } else {
+      debugWindow.clipcapTemplateTextLlmParsedResults = [
+        ...(debugWindow.clipcapTemplateTextLlmParsedResults ?? []),
+        payload,
+      ];
+    }
+
+    browserProcessLog.info(label, payload);
   } catch {
     browserProcessLog.info(line);
   }

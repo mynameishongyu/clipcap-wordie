@@ -49,6 +49,10 @@ interface VisionLocateModelResponse {
   matches?: VisionLocateCandidate[];
 }
 
+type VisionMessageContentPart =
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'text'; text: string };
+
 const visionLocateFetchDispatcher = new Agent({
   connect: {
     timeout: 30_000,
@@ -84,6 +88,98 @@ function buildLlmTraceConfigPayload(
     provider: traceConfig.provider,
     effective_extra_body: traceConfig.extraBody,
     ...extra,
+  };
+}
+
+function estimateDataUrlBytes(dataUrl: string) {
+  const commaIndex = dataUrl.indexOf(',');
+
+  if (commaIndex < 0) {
+    return 0;
+  }
+
+  const base64Payload = dataUrl.slice(commaIndex + 1);
+  const paddingLength = base64Payload.endsWith('==')
+    ? 2
+    : base64Payload.endsWith('=')
+      ? 1
+      : 0;
+
+  return Math.max(
+    0,
+    Math.floor((base64Payload.length * 3) / 4) - paddingLength,
+  );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function summarizeImageUrlForTrace(url: string) {
+  if (!url.startsWith('data:')) {
+    return {
+      kind: 'url',
+      url,
+      bytes: url.length,
+      size: formatBytes(url.length),
+    };
+  }
+
+  const commaIndex = url.indexOf(',');
+  const metadata = commaIndex >= 0 ? url.slice(0, commaIndex) : 'data:';
+  const mimeTypeMatch = metadata.match(/^data:([^;]+)/);
+  const base64Length =
+    commaIndex >= 0 ? Math.max(0, url.length - commaIndex - 1) : 0;
+  const bytes = estimateDataUrlBytes(url);
+
+  return {
+    kind: 'data_url',
+    mime_type: mimeTypeMatch?.[1] ?? 'application/octet-stream',
+    bytes,
+    size: formatBytes(bytes),
+    prefix: `${url.slice(0, Math.min(url.length, 80))}...`,
+    omitted_base64_chars: Math.max(0, base64Length - 32),
+  };
+}
+
+function summarizeVisionMessageContentForTrace(
+  content: string | VisionMessageContentPart[],
+) {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  return content.map((part) => {
+    if (part.type === 'text') {
+      return part;
+    }
+
+    return {
+      type: 'image_url',
+      image_url: summarizeImageUrlForTrace(part.image_url.url),
+    };
+  });
+}
+
+function summarizeChatCompletionBodyForTrace(
+  body: ReturnType<typeof buildChatCompletionBody>,
+) {
+  return {
+    ...body,
+    messages: body.messages.map((message) => ({
+      ...message,
+      content: summarizeVisionMessageContentForTrace(
+        message.content as string | VisionMessageContentPart[],
+      ),
+    })),
   };
 }
 
@@ -1011,6 +1107,21 @@ async function locateSlotsInPageBatch(input: {
   }, TEMPLATE_PDF_LOCATE_REQUEST_TIMEOUT_MS);
 
   const pageNumbers = input.pageBatch.map((page) => page.page_number);
+  const pageSizeSummary = input.pageBatch.map((page) => {
+    const imageBytes = estimateDataUrlBytes(page.image_data_url);
+
+    return {
+      label: `Page ${page.page_number}`,
+      page_number: page.page_number,
+      has_image_data_url: true,
+      image_bytes: imageBytes,
+      image_size: formatBytes(imageBytes),
+    };
+  });
+  const totalImageBytes = pageSizeSummary.reduce(
+    (sum, page) => sum + page.image_bytes,
+    0,
+  );
   const startedMessage =
     `[Template PDF Locate] Starting visual location batch ${input.pageBatchIndex + 1}/${input.totalPageBatches} ` +
     `for ${input.pdfFileName} (pages: ${pageNumbers.join(', ')}, slots: ${input.slots.length}).`;
@@ -1018,21 +1129,50 @@ async function locateSlotsInPageBatch(input: {
   await input.onTrace?.({ message: startedMessage });
 
   try {
-    const content: Array<
-      | { type: 'image_url'; image_url: { url: string } }
-      | { type: 'text'; text: string }
-    > = [
+    const promptPayload = buildPdfBboxLocatePrompt({
+      pdfFileName: input.pdfFileName,
+      pageNumbers,
+      provider: llmConfig.provider,
+      targetMode: input.targetMode,
+      slots: input.slots,
+    });
+    const requestLabel = `visual location batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}`;
+    const traceConfig = getLlmRuntimeTraceConfig('vision');
+
+    await input.onTrace?.({
+      message:
+        `[Template PDF Locate][VisionPrompt][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+        JSON.stringify({
+          route: '/api/template-extraction-tasks/[taskId]/process',
+          config_scope: 'VISION_LLM',
+          model: llmConfig.model,
+          provider: traceConfig.provider,
+          request_label: requestLabel,
+          page_numbers: pageNumbers,
+          slot_count: input.slots.length,
+          image_payload: {
+            uploaded_pdf_page_count: pageSizeSummary.length,
+            uploaded_pdf_image_total_bytes: totalImageBytes,
+            uploaded_pdf_image_total_size: formatBytes(totalImageBytes),
+          },
+          messages: [
+            {
+              role: 'system',
+              content: PDF_BBOX_SYSTEM_PROMPT,
+            },
+            {
+              role: 'user',
+              content: promptPayload,
+            },
+          ],
+          image_placeholders: pageSizeSummary,
+        }),
+    });
+
+    const content: VisionMessageContentPart[] = [
       {
         type: 'text',
-        text: JSON.stringify(
-          buildPdfBboxLocatePrompt({
-            pdfFileName: input.pdfFileName,
-            pageNumbers,
-            provider: llmConfig.provider,
-            targetMode: input.targetMode,
-            slots: input.slots,
-          }),
-        ),
+        text: JSON.stringify(promptPayload),
       },
     ];
 
@@ -1049,25 +1189,40 @@ async function locateSlotsInPageBatch(input: {
       });
     });
 
+    const requestBody = buildChatCompletionBody(llmConfig, {
+      messages: [
+        {
+          role: 'system',
+          content: PDF_BBOX_SYSTEM_PROMPT,
+        },
+        {
+          role: 'user',
+          content,
+        },
+      ],
+    });
+
+    await input.onTrace?.({
+      message:
+        `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+        JSON.stringify({
+          route: '/api/template-extraction-tasks/[taskId]/process',
+          config_scope: 'VISION_LLM',
+          model: llmConfig.model,
+          provider: traceConfig.provider,
+          request_label: requestLabel,
+          request_body: summarizeChatCompletionBodyForTrace(requestBody),
+          image_url_note:
+            'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request uses the full data:image/... base64 URL.',
+        }),
+    });
+
     const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
       method: 'POST',
       headers: buildChatCompletionHeaders(llmConfig),
       dispatcher: visionLocateFetchDispatcher,
       signal: controller.signal,
-      body: JSON.stringify(
-        buildChatCompletionBody(llmConfig, {
-          messages: [
-            {
-              role: 'system',
-              content: PDF_BBOX_SYSTEM_PROMPT,
-            },
-            {
-              role: 'user',
-              content,
-            },
-          ],
-        }),
-      ),
+      body: JSON.stringify(requestBody),
     } as UndiciFetchInit);
 
     if (!upstream.ok) {

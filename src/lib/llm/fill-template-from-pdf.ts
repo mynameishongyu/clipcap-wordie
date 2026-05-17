@@ -108,6 +108,24 @@ interface ModelResultCandidate {
   matches?: ModelMatch[];
 }
 
+interface ReferencePageAlignment {
+  reference_page_number: number;
+  matched_uploaded_page_number: number;
+  confidence: number | null;
+  reason: string;
+}
+
+interface DirectVisionSlotFillJob {
+  slots: GenerationSlotSchemaItem[];
+  visionPages: PdfVisionPageInput[];
+  referenceExamplePages: ReferencePdfVisionPageInput[];
+  requestLabel: string;
+}
+
+type VisionMessageContentPart =
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'text'; text: string };
+
 const generationExtractedItemSchema = z.object({
   slot_key: z.string(),
   field_category: z.string(),
@@ -129,6 +147,25 @@ const generationPdfFillResultSchema = z.object({
   document_summary: z.string().nullable().optional(),
   extracted_items: z
     .array(generationExtractedItemSchema)
+    .optional()
+    .default([]),
+});
+
+const referencePageAlignmentResponseSchema = z.object({
+  alignments: z
+    .array(
+      z.object({
+        reference_page_number: z.number().int().positive(),
+        matched_uploaded_page_number: z
+          .number()
+          .int()
+          .positive()
+          .nullable()
+          .optional(),
+        confidence: z.number().min(0).max(1).nullable().optional(),
+        reason: z.string().nullable().optional(),
+      }),
+    )
     .optional()
     .default([]),
 });
@@ -372,6 +409,66 @@ function estimateDataUrlBytes(dataUrl: string) {
     0,
     Math.floor((base64Payload.length * 3) / 4) - paddingLength,
   );
+}
+
+function summarizeImageUrlForTrace(url: string) {
+  if (!url.startsWith('data:')) {
+    return {
+      kind: 'url',
+      url,
+      bytes: url.length,
+      size: formatBytes(url.length),
+    };
+  }
+
+  const commaIndex = url.indexOf(',');
+  const metadata = commaIndex >= 0 ? url.slice(0, commaIndex) : 'data:';
+  const mimeTypeMatch = metadata.match(/^data:([^;]+)/);
+  const base64Length =
+    commaIndex >= 0 ? Math.max(0, url.length - commaIndex - 1) : 0;
+  const bytes = estimateDataUrlBytes(url);
+
+  return {
+    kind: 'data_url',
+    mime_type: mimeTypeMatch?.[1] ?? 'application/octet-stream',
+    bytes,
+    size: formatBytes(bytes),
+    prefix: `${url.slice(0, Math.min(url.length, 80))}...`,
+    omitted_base64_chars: Math.max(0, base64Length - 32),
+  };
+}
+
+function summarizeVisionMessageContentForTrace(
+  content: string | VisionMessageContentPart[],
+) {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  return content.map((part) => {
+    if (part.type === 'text') {
+      return part;
+    }
+
+    return {
+      type: 'image_url',
+      image_url: summarizeImageUrlForTrace(part.image_url.url),
+    };
+  });
+}
+
+function summarizeChatCompletionBodyForTrace(
+  body: ReturnType<typeof buildChatCompletionBody>,
+) {
+  return {
+    ...body,
+    messages: body.messages.map((message) => ({
+      ...message,
+      content: summarizeVisionMessageContentForTrace(
+        message.content as string | VisionMessageContentPart[],
+      ),
+    })),
+  };
 }
 
 function formatBytes(bytes: number) {
@@ -2139,6 +2236,497 @@ function buildDirectVisionSlotFillPromptPayload(input: {
   };
 }
 
+function buildReferencePageAlignmentPromptPayload(input: {
+  documentName: string;
+  referenceExamplePages: ReferencePdfVisionPageInput[];
+  visionPages: PdfVisionPageInput[];
+}) {
+  return {
+    task: 'Align annotated reference example PDF pages to the most layout-equivalent uploaded new PDF pages before slot filling. Do not extract slot values.',
+    document_name: input.documentName,
+    reference_example_pdf_pages: input.referenceExamplePages.map((page) => ({
+      label: `Annotated reference example PDF page ${page.page_number}`,
+      page_number: page.page_number,
+      original_page_number: page.original_page_number ?? page.page_number,
+      file_name: page.example_pdf_file_name ?? null,
+      annotated_slots:
+        page.annotated_slots?.map((slot) => ({
+          slot_key: slot.slot_key,
+          slot_name: slot.slot_name,
+          slot_source: slot.slot_source,
+          example_annotation_label:
+            slot.example_annotation_label ?? slot.slot_key,
+          example_box_2d: slot.example_box_2d,
+          example_evidence_text: slot.example_evidence_text,
+          example_slot_value: slot.example_slot_value,
+        })) ?? [],
+    })),
+    new_pdf_pages: input.visionPages.map((page) => ({
+      label: `New PDF uploaded page ${page.page_number}`,
+      page_number: page.page_number,
+      original_page_number: page.original_page_number ?? page.page_number,
+    })),
+    strict_requirements: [
+      'Return JSON only.',
+      'For each reference_example_pdf_pages item, choose the one uploaded new PDF page that best matches the reference page as a whole.',
+      'Use page title, document/form type, table/grid structure, nearby field labels, section headings, and relative positions of annotated boxes as the primary matching signals.',
+      'Do not choose a new PDF page merely because it contains the same slot values. Repeated values on a different layout or form type are weaker evidence than matching layout and labels.',
+      'If several new PDF pages contain identical values, select the page whose overall layout and labels best match the annotated reference page.',
+      'matched_uploaded_page_number must be one of new_pdf_pages.page_number, or null when no reliable match exists.',
+      'Do not use printed page numbers inside the PDF image. Use only the uploaded page label: New PDF uploaded page N.',
+    ],
+    output_schema: {
+      alignments: [
+        {
+          reference_page_number: 'page_number from reference_example_pdf_pages',
+          matched_uploaded_page_number:
+            'page_number from new_pdf_pages, or null',
+          confidence: '0-1 alignment confidence',
+          reason:
+            'brief page-level reason based on title, layout, labels, and annotated box context; do not cite value equality alone',
+        },
+      ],
+    },
+  };
+}
+
+function getReferenceImageSummaries(
+  referenceExamplePages: ReferencePdfVisionPageInput[],
+) {
+  return referenceExamplePages.map((page) => {
+    const imageBytes = estimateDataUrlBytes(
+      page.annotated_image_data_url ?? page.image_data_url,
+    );
+
+    return {
+      label: `Annotated reference example PDF page ${page.page_number}`,
+      page_number: page.page_number,
+      original_page_number: page.original_page_number ?? page.page_number,
+      file_name: page.example_pdf_file_name ?? null,
+      annotated_preview_url: page.annotated_preview_url ?? null,
+      annotated_storage_path: page.annotated_storage_path ?? null,
+      uses_annotated_image: Boolean(page.annotated_image_data_url),
+      has_image_data_url: Boolean(
+        page.annotated_image_data_url ?? page.image_data_url,
+      ),
+      image_bytes: imageBytes,
+      image_size: formatBytes(imageBytes),
+      annotated_slot_count: page.annotated_slots?.length ?? 0,
+      annotated_slot_keys:
+        page.annotated_slots?.map((slot) => slot.slot_key) ?? [],
+    };
+  });
+}
+
+function getVisionPageSizeSummary(visionPages: PdfVisionPageInput[]) {
+  return visionPages.map((page) => ({
+    pageNumber: page.page_number,
+    bytes: estimateDataUrlBytes(page.image_data_url),
+  }));
+}
+
+function getSlotReferencePageNumber(slot: GenerationSlotSchemaItem) {
+  const pageNumber = slot.reference_pdf_evidence?.example_page_number;
+
+  return typeof pageNumber === 'number' &&
+    Number.isInteger(pageNumber) &&
+    pageNumber > 0
+    ? pageNumber
+    : null;
+}
+
+function sanitizeReferencePageAlignments(input: {
+  parsed: z.infer<typeof referencePageAlignmentResponseSchema>;
+  referenceExamplePages: ReferencePdfVisionPageInput[];
+  visionPages: PdfVisionPageInput[];
+}) {
+  const referencePageNumberSet = new Set(
+    input.referenceExamplePages.map((page) => page.page_number),
+  );
+  const uploadedPageNumberSet = new Set(
+    input.visionPages.map((page) => page.page_number),
+  );
+  const alignments = new Map<number, ReferencePageAlignment>();
+
+  for (const alignment of input.parsed.alignments) {
+    const referencePageNumber = alignment.reference_page_number;
+    const matchedUploadedPageNumber = alignment.matched_uploaded_page_number;
+
+    if (
+      !referencePageNumberSet.has(referencePageNumber) ||
+      typeof matchedUploadedPageNumber !== 'number' ||
+      !uploadedPageNumberSet.has(matchedUploadedPageNumber)
+    ) {
+      continue;
+    }
+
+    alignments.set(referencePageNumber, {
+      reference_page_number: referencePageNumber,
+      matched_uploaded_page_number: matchedUploadedPageNumber,
+      confidence:
+        typeof alignment.confidence === 'number' ? alignment.confidence : null,
+      reason: alignment.reason?.trim() ?? '',
+    });
+  }
+
+  return alignments;
+}
+
+async function alignReferencePagesToVisionPages(input: {
+  documentName: string;
+  referenceExamplePages: ReferencePdfVisionPageInput[];
+  visionPages: PdfVisionPageInput[];
+  onTrace?: (trace: { message: string }) => Promise<void> | void;
+  processStartedAtMs?: number;
+  processHardTimeoutMs?: number;
+}) {
+  if (
+    input.referenceExamplePages.length === 0 ||
+    input.visionPages.length === 0
+  ) {
+    return new Map<number, ReferencePageAlignment>();
+  }
+
+  for (let attempt = 1; attempt <= MAX_VISION_REQUEST_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const requestTimeoutMs = getVisionRequestTimeoutMs({
+      pageCount: input.visionPages.length + input.referenceExamplePages.length,
+      slotCount: input.referenceExamplePages.length,
+      attempt,
+    });
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const requestStartedAt = Date.now();
+
+    try {
+      const promptPayload = buildReferencePageAlignmentPromptPayload(input);
+      const pageSizeSummary = getVisionPageSizeSummary(input.visionPages);
+      const referenceImageSummaries = getReferenceImageSummaries(
+        input.referenceExamplePages,
+      );
+      const newPdfImageTotalBytes = pageSizeSummary.reduce(
+        (sum, page) => sum + page.bytes,
+        0,
+      );
+      const referenceImageTotalBytes = referenceImageSummaries.reduce(
+        (sum, page) => sum + page.image_bytes,
+        0,
+      );
+      const requestImageTotalBytes =
+        newPdfImageTotalBytes + referenceImageTotalBytes;
+      const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+
+      await input.onTrace?.({
+        message: `[PDF Fill][ReferenceAlignmentPrompt] ${stringifyTraceJson({
+          route: '/api/generation-task-items/[taskItemId]/slot-fill',
+          config_scope: 'VISION_LLM',
+          model: getVisionLlmModel(),
+          provider: visionTraceConfig.provider,
+          request_label: 'reference page alignment',
+          reference_example_page_numbers: input.referenceExamplePages.map(
+            (page) => page.page_number,
+          ),
+          new_pdf_page_numbers: input.visionPages.map(
+            (page) => page.page_number,
+          ),
+          image_payload: {
+            request_image_total_bytes: requestImageTotalBytes,
+            request_image_total_size: formatBytes(requestImageTotalBytes),
+            uploaded_pdf_page_count: pageSizeSummary.length,
+            uploaded_pdf_image_total_bytes: newPdfImageTotalBytes,
+            uploaded_pdf_image_total_size: formatBytes(newPdfImageTotalBytes),
+            reference_example_page_count: referenceImageSummaries.length,
+            reference_example_image_total_bytes: referenceImageTotalBytes,
+            reference_example_image_total_size: formatBytes(
+              referenceImageTotalBytes,
+            ),
+          },
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF page alignment assistant. Match annotated reference pages to uploaded new PDF pages by page-level layout, labels, titles, and form structure. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content: promptPayload,
+            },
+          ],
+          image_placeholders: pageSizeSummary.map((page) => ({
+            label: `New PDF uploaded page ${page.pageNumber}`,
+            page_number: page.pageNumber,
+            has_image_data_url: true,
+            image_bytes: page.bytes,
+            image_size: formatBytes(page.bytes),
+          })),
+          reference_image_placeholders: referenceImageSummaries,
+        })}`,
+      });
+
+      const startedMessage =
+        `[PDF Fill][ReferenceAlignment] Starting reference page alignment for ${input.documentName} ` +
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}, reference pages: ${input.referenceExamplePages.length}, new PDF pages: ${input.visionPages.length}, timeout: ${formatElapsedMs(
+          requestTimeoutMs,
+        )}, total image size: ${formatBytes(
+          requestImageTotalBytes,
+        )}${formatProcessBudgetSuffix({
+          processStartedAtMs: input.processStartedAtMs,
+          processHardTimeoutMs: input.processHardTimeoutMs,
+        })}).`;
+      console.info(startedMessage);
+      await input.onTrace?.({ message: startedMessage });
+
+      const content: Array<
+        | { type: 'image_url'; image_url: { url: string } }
+        | { type: 'text'; text: string }
+      > = [
+        {
+          type: 'text',
+          text: JSON.stringify(promptPayload),
+        },
+      ];
+
+      input.referenceExamplePages.forEach((page) => {
+        content.push({
+          type: 'text',
+          text: `Annotated reference example PDF page ${page.page_number}`,
+        });
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: page.annotated_image_data_url ?? page.image_data_url,
+          },
+        });
+      });
+
+      input.visionPages.forEach((page) => {
+        content.push({
+          type: 'text',
+          text: `New PDF uploaded page ${page.page_number}`,
+        });
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: page.image_data_url,
+          },
+        });
+      });
+
+      const llmConfig = getLlmRuntimeConfig('vision');
+      const requestBody = buildChatCompletionBody(llmConfig, {
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a visual PDF page alignment assistant. Match annotated reference pages to uploaded new PDF pages by page-level layout, labels, titles, and form structure. Return compact JSON only.',
+          },
+          {
+            role: 'user',
+            content,
+          },
+        ],
+      });
+
+      await input.onTrace?.({
+        message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: visionTraceConfig.provider,
+            request_label: 'reference page alignment',
+            request_body: summarizeChatCompletionBodyForTrace(requestBody),
+            image_url_note:
+              'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
+          },
+        )}`,
+      });
+
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+        method: 'POST',
+        headers: buildChatCompletionHeaders(llmConfig),
+        dispatcher: llmFetchDispatcher,
+        signal: controller.signal,
+        body: JSON.stringify(requestBody),
+      } as UndiciFetchInit);
+
+      if (!upstream.ok) {
+        const details = await upstream.text();
+        throw new Error(
+          `PDF reference page alignment request failed (${upstream.status}): ${details}`,
+        );
+      }
+
+      const payload = (await upstream.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
+      const rawContent = payload?.choices?.[0]?.message?.content;
+
+      if (typeof rawContent !== 'string' || !rawContent.trim()) {
+        return new Map<number, ReferencePageAlignment>();
+      }
+
+      await input.onTrace?.({
+        message: `[PDF Fill][ReferenceAlignmentRaw] ${stringifyTraceJson({
+          route: '/api/generation-task-items/[taskItemId]/slot-fill',
+          config_scope: 'VISION_LLM',
+          model: llmConfig.model,
+          provider: visionTraceConfig.provider,
+          request_label: 'reference page alignment',
+          raw_response: rawContent,
+        })}`,
+      });
+
+      const normalized = parseModelJson<unknown>(rawContent);
+      const parsed = referencePageAlignmentResponseSchema.parse(normalized);
+      const alignments = sanitizeReferencePageAlignments({
+        parsed,
+        referenceExamplePages: input.referenceExamplePages,
+        visionPages: input.visionPages,
+      });
+      const completedMessage =
+        `[PDF Fill][ReferenceAlignment] Completed reference page alignment for ${input.documentName} ` +
+        `in ${formatElapsedMs(Date.now() - requestStartedAt)} with ${
+          alignments.size
+        }/${input.referenceExamplePages.length} reference page(s) aligned.`;
+      console.info(completedMessage);
+      await input.onTrace?.({ message: completedMessage });
+      await input.onTrace?.({
+        message: `[PDF Fill][ReferenceAlignmentResult] ${stringifyTraceJson({
+          document_name: input.documentName,
+          alignments: Array.from(alignments.values()),
+        })}`,
+      });
+
+      return alignments;
+    } catch (error) {
+      const normalizedError = wrapFetchFailure(error, {
+        stage: 'vision-slot-fill',
+        documentName: input.documentName,
+        model: getLlmRuntimeConfig('vision').model,
+        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
+        attempt,
+      });
+      const shouldRetry =
+        attempt < MAX_VISION_REQUEST_RETRIES &&
+        shouldRetryPdfFillRequest(normalizedError);
+      const failedMessage =
+        `[PDF Fill][ReferenceAlignment] Failed reference page alignment for ${input.documentName} ` +
+        `(attempt ${attempt}/${MAX_VISION_REQUEST_RETRIES}): ${getErrorMessage(
+          normalizedError,
+        )}`;
+      console.error(failedMessage, normalizedError);
+      await input.onTrace?.({ message: failedMessage });
+
+      if (!shouldRetry) {
+        await input.onTrace?.({
+          message:
+            `[PDF Fill][ReferenceAlignment][ErrorDetails] ` +
+            stringifyTraceJson(
+              buildTraceErrorDetails(normalizedError, {
+                documentName: input.documentName,
+              }),
+            ),
+        });
+        return new Map<number, ReferencePageAlignment>();
+      }
+
+      await sleep(1500 * attempt);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return new Map<number, ReferencePageAlignment>();
+}
+
+function buildDirectVisionSlotFillJobs(input: {
+  slots: GenerationSlotSchemaItem[];
+  visionPages: PdfVisionPageInput[];
+  referenceExamplePages: ReferencePdfVisionPageInput[];
+  alignmentsByReferencePageNumber: Map<number, ReferencePageAlignment>;
+}) {
+  const jobs: DirectVisionSlotFillJob[] = [];
+  const fallbackSlots: GenerationSlotSchemaItem[] = [];
+  const visionPageByNumber = new Map(
+    input.visionPages.map((page) => [page.page_number, page]),
+  );
+  const referencePageByNumber = new Map(
+    input.referenceExamplePages.map((page) => [page.page_number, page]),
+  );
+  const slotsByReferencePageNumber = new Map<
+    number,
+    GenerationSlotSchemaItem[]
+  >();
+
+  input.slots.forEach((slot) => {
+    const referencePageNumber = getSlotReferencePageNumber(slot);
+    const alignment =
+      typeof referencePageNumber === 'number'
+        ? input.alignmentsByReferencePageNumber.get(referencePageNumber)
+        : null;
+    const alignedVisionPage =
+      typeof alignment?.matched_uploaded_page_number === 'number'
+        ? visionPageByNumber.get(alignment.matched_uploaded_page_number)
+        : null;
+
+    if (
+      typeof referencePageNumber === 'number' &&
+      alignment &&
+      alignedVisionPage
+    ) {
+      const group = slotsByReferencePageNumber.get(referencePageNumber) ?? [];
+      group.push(slot);
+      slotsByReferencePageNumber.set(referencePageNumber, group);
+      return;
+    }
+
+    fallbackSlots.push(slot);
+  });
+
+  slotsByReferencePageNumber.forEach((slots, referencePageNumber) => {
+    const alignment =
+      input.alignmentsByReferencePageNumber.get(referencePageNumber);
+    const alignedVisionPage =
+      typeof alignment?.matched_uploaded_page_number === 'number'
+        ? visionPageByNumber.get(alignment.matched_uploaded_page_number)
+        : null;
+    const referencePage = referencePageByNumber.get(referencePageNumber);
+
+    if (!alignment || !alignedVisionPage || !referencePage) {
+      fallbackSlots.push(...slots);
+      return;
+    }
+
+    jobs.push({
+      slots,
+      visionPages: [alignedVisionPage],
+      referenceExamplePages: [referencePage],
+      requestLabel: `reference page ${referencePageNumber} aligned to uploaded page ${alignment.matched_uploaded_page_number}`,
+    });
+  });
+
+  if (fallbackSlots.length > 0) {
+    buildDirectVisionPageBatches(input.visionPages).forEach(
+      (visionPageBatch, batchIndex, batches) => {
+        jobs.push({
+          slots: fallbackSlots,
+          visionPages: visionPageBatch,
+          referenceExamplePages: input.referenceExamplePages,
+          requestLabel: `fallback visual slot fill batch ${
+            batchIndex + 1
+          }/${batches.length}`,
+        });
+      },
+    );
+  }
+
+  return jobs;
+}
+
 async function extractSlotsFromVisionPageBatch(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
@@ -2147,6 +2735,7 @@ async function extractSlotsFromVisionPageBatch(input: {
   batchIndex: number;
   totalBatches: number;
   totalVisionPages: number;
+  requestLabel?: string;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
@@ -2182,7 +2771,9 @@ async function extractSlotsFromVisionPageBatch(input: {
         (sum, entry) => sum + entry.bytes,
         0,
       );
-      const requestLabel = `visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches}`;
+      const requestLabel =
+        input.requestLabel ??
+        `visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches}`;
       const llmConcurrency = getDirectVisionPagesLlmConcurrency();
       const referencePageNumbers = input.referenceExamplePages.map(
         (page) => page.page_number,
@@ -2371,26 +2962,41 @@ async function extractSlotsFromVisionPageBatch(input: {
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');
+      const requestBody = buildChatCompletionBody(llmConfig, {
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
+          },
+          {
+            role: 'user',
+            content,
+          },
+        ],
+      });
+
+      await input.onTrace?.({
+        message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: visionTraceConfig.provider,
+            request_label: requestLabel,
+            request_body: summarizeChatCompletionBodyForTrace(requestBody),
+            image_url_note:
+              'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
+          },
+        )}`,
+      });
+
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: buildChatCompletionHeaders(llmConfig),
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify(
-          buildChatCompletionBody(llmConfig, {
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
-              },
-              {
-                role: 'user',
-                content,
-              },
-            ],
-          }),
-        ),
+        body: JSON.stringify(requestBody),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -2579,36 +3185,54 @@ export async function fillSlotsFromVisionPages(params: {
   });
 
   const startedAt = Date.now();
-  const batches = buildDirectVisionPageBatches(validVisionPages);
   const llmConcurrency = getDirectVisionPagesLlmConcurrency();
-  const referenceExamplePageCount = params.referenceExamplePages?.length ?? 0;
+  const referenceExamplePages = params.referenceExamplePages ?? [];
+  const referenceExamplePageCount = referenceExamplePages.length;
+  const alignmentsByReferencePageNumber =
+    await alignReferencePagesToVisionPages({
+      documentName: params.pdfFileName,
+      referenceExamplePages,
+      visionPages: validVisionPages,
+      onTrace: params.onTrace,
+      processStartedAtMs: params.processStartedAtMs,
+      processHardTimeoutMs: params.processHardTimeoutMs,
+    });
+  const slotFillJobs = buildDirectVisionSlotFillJobs({
+    slots: params.slots,
+    visionPages: validVisionPages,
+    referenceExamplePages,
+    alignmentsByReferencePageNumber,
+  });
   const startedMessage =
     `[PDF Fill][DirectVision] Direct visual slot fill started for ${params.pdfFileName} ` +
-    `(vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, batches: ${batches.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
+    `(vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, aligned reference pages: ${alignmentsByReferencePageNumber.size}, jobs: ${slotFillJobs.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
   console.info(startedMessage);
   await params.onTrace?.({ message: startedMessage });
 
   const batchResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
   const completedSlotKeys = new Set<string>();
 
-  const settledBatchResults = await Promise.all(
-    batches.map(async (batch, batchIndex) => {
+  const settledBatchResults = await runWithConcurrency({
+    items: slotFillJobs,
+    concurrency: llmConcurrency,
+    worker: async (job, batchIndex) => {
       const batchResult = await extractSlotsFromVisionPageBatch({
         documentName: params.pdfFileName,
-        slots: params.slots,
-        visionPages: batch,
-        referenceExamplePages: params.referenceExamplePages ?? [],
+        slots: job.slots,
+        visionPages: job.visionPages,
+        referenceExamplePages: job.referenceExamplePages,
         batchIndex,
-        totalBatches: batches.length,
+        totalBatches: slotFillJobs.length,
         totalVisionPages: validVisionPages.length,
+        requestLabel: job.requestLabel,
         onTrace: params.onTrace,
         processStartedAtMs: params.processStartedAtMs,
         processHardTimeoutMs: params.processHardTimeoutMs,
       });
 
       return { batchIndex, batchResult };
-    }),
-  );
+    },
+  });
 
   for (const { batchResult } of settledBatchResults) {
     batchResults.push(batchResult);

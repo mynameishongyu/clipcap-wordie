@@ -98,6 +98,11 @@ declare global {
         }>;
       };
     }>;
+    clipcapSlotFillActualRequestBodies?: Array<{
+      fileName: string;
+      label: string;
+      data: Record<string, unknown>;
+    }>;
     clipcapPageFilterPrompts?: Array<{
       fileName: string;
       label: string;
@@ -111,6 +116,26 @@ declare global {
     clipcapSlotFillRawResponses?: Array<{
       fileName: string;
       label: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapReferencePageAlignmentPrompts?: Array<{
+      fileName: string;
+      taskItemId: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapReferencePageAlignmentRequestBodies?: Array<{
+      fileName: string;
+      taskItemId: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapReferencePageAlignmentRawResponses?: Array<{
+      fileName: string;
+      taskItemId: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapReferencePageAlignments?: Array<{
+      fileName: string;
+      taskItemId: string;
       data: Record<string, unknown>;
     }>;
     clipcapSlotFillOutputs?: Array<{
@@ -1019,8 +1044,23 @@ export function BatchGenerateModal({
         const directVisionPromptMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionPrompt\]\[([^\]]+)\] (.+)$/,
         );
+        const directVisionRequestBodyMatch = traceLine.match(
+          /^\[PDF Fill\]\[DirectVisionRequestBody\]\[([^\]]+)\] (.+)$/,
+        );
         const directVisionRawMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionRaw\]\[([^\]]+)\] (.+)$/,
+        );
+        const referenceAlignmentPromptMatch = traceLine.match(
+          /^\[PDF Fill\]\[ReferenceAlignmentPrompt\] (.+)$/,
+        );
+        const referenceAlignmentRequestBodyMatch = traceLine.match(
+          /^\[PDF Fill\]\[ReferenceAlignmentRequestBody\] (.+)$/,
+        );
+        const referenceAlignmentRawMatch = traceLine.match(
+          /^\[PDF Fill\]\[ReferenceAlignmentRaw\] (.+)$/,
+        );
+        const referenceAlignmentResultMatch = traceLine.match(
+          /^\[PDF Fill\]\[ReferenceAlignmentResult\] (.+)$/,
         );
         const slotFillOutputMatch = traceLine.match(
           /^\[PDF Fill\]\[SlotFillOutput\] (.+)$/,
@@ -1175,6 +1215,281 @@ export function BatchGenerateModal({
           console.log(
             `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM raw result (${label})`,
             parsedResult,
+          );
+          return;
+        }
+
+        if (referenceAlignmentPromptMatch) {
+          const parsedPrompt = parseTraceJson<Record<string, unknown>>(
+            referenceAlignmentPromptMatch[1] ?? '{}',
+            'reference page alignment prompt',
+          );
+
+          if (!parsedPrompt) {
+            return;
+          }
+
+          const currentEntries =
+            window.clipcapReferencePageAlignmentPrompts ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedPrompt,
+          });
+          window.clipcapReferencePageAlignmentPrompts = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.taskItemId.localeCompare(right.taskItemId);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment prompt`,
+            parsedPrompt,
+          );
+
+          const userPromptContent =
+            Array.isArray(parsedPrompt.messages) &&
+            parsedPrompt.messages.find(
+              (message) =>
+                !!message &&
+                typeof message === 'object' &&
+                (message as { role?: unknown }).role === 'user',
+            )
+              ? (
+                  parsedPrompt.messages.find(
+                    (message) =>
+                      !!message &&
+                      typeof message === 'object' &&
+                      (message as { role?: unknown }).role === 'user',
+                  ) as { content?: unknown }
+                ).content
+              : null;
+
+          const imageAttachmentList = formatVisionImageAttachmentList(
+            parsedPrompt.image_placeholders,
+          );
+
+          if (imageAttachmentList) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] Reference page alignment new PDF image attachments`,
+              imageAttachmentList,
+            );
+          }
+
+          const referenceImageAttachmentList =
+            formatReferenceImageAttachmentList(
+              parsedPrompt.reference_image_placeholders,
+            );
+
+          if (referenceImageAttachmentList) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] Reference page alignment reference image attachments`,
+              referenceImageAttachmentList,
+            );
+          }
+
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment user prompt JSON`,
+            JSON.stringify(userPromptContent, null, 2),
+          );
+          return;
+        }
+
+        if (referenceAlignmentRequestBodyMatch) {
+          const parsedRequestBody = parseTraceJson<Record<string, unknown>>(
+            referenceAlignmentRequestBodyMatch[1] ?? '{}',
+            'reference page alignment request body',
+          );
+
+          if (!parsedRequestBody) {
+            return;
+          }
+
+          const currentEntries =
+            window.clipcapReferencePageAlignmentRequestBodies ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedRequestBody,
+          });
+          window.clipcapReferencePageAlignmentRequestBodies = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.taskItemId.localeCompare(right.taskItemId);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment actual Gemini request body`,
+            parsedRequestBody,
+          );
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment actual Gemini request body JSON`,
+            JSON.stringify(
+              parsedRequestBody.request_body ?? parsedRequestBody,
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+
+        if (referenceAlignmentRawMatch) {
+          const parsedRaw = parseTraceJson<Record<string, unknown>>(
+            referenceAlignmentRawMatch[1] ?? '{}',
+            'reference page alignment raw result',
+          );
+
+          if (!parsedRaw) {
+            return;
+          }
+
+          const currentEntries =
+            window.clipcapReferencePageAlignmentRawResponses ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedRaw,
+          });
+          window.clipcapReferencePageAlignmentRawResponses = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.taskItemId.localeCompare(right.taskItemId);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment raw result`,
+            parsedRaw,
+          );
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment raw model output`,
+            parsedRaw.raw_response ?? parsedRaw,
+          );
+          return;
+        }
+
+        if (referenceAlignmentResultMatch) {
+          const parsedResult = parseTraceJson<Record<string, unknown>>(
+            referenceAlignmentResultMatch[1] ?? '{}',
+            'reference page alignment result',
+          );
+
+          if (!parsedResult) {
+            return;
+          }
+
+          const currentEntries = window.clipcapReferencePageAlignments ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name &&
+                entry.taskItemId === item.id
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            data: parsedResult,
+          });
+          window.clipcapReferencePageAlignments = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.taskItemId.localeCompare(right.taskItemId);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment result`,
+            parsedResult,
+          );
+          return;
+        }
+
+        if (directVisionRequestBodyMatch) {
+          const label = directVisionRequestBodyMatch[1] ?? 'Full';
+          const parsedRequestBody = parseTraceJson<Record<string, unknown>>(
+            directVisionRequestBodyMatch[2] ?? '{}',
+            `direct vision request body ${label}`,
+          );
+
+          if (!parsedRequestBody) {
+            return;
+          }
+
+          const currentEntries =
+            window.clipcapSlotFillActualRequestBodies ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedRequestBody,
+          });
+          window.clipcapSlotFillActualRequestBodies = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.label.localeCompare(right.label);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill actual Gemini request body (${label})`,
+            parsedRequestBody,
+          );
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill actual Gemini request body JSON (${label})`,
+            JSON.stringify(
+              parsedRequestBody.request_body ?? parsedRequestBody,
+              null,
+              2,
+            ),
           );
           return;
         }

@@ -30,6 +30,9 @@ const templateExtractionFetchDispatcher = new Agent({
 let templateExtractionRequestQueue = Promise.resolve();
 let lastTemplateExtractionRequestStartedAt = 0;
 
+const MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE =
+  'meaning_to_applicant must be derived from the nearby label, field name, sentence, or description around original_value in the same paragraph. Do not infer meaning from original_value alone, and do not use distant or unrelated context. original_doc_position should include the nearby wording that supports this meaning.';
+
 const EXTRACTION_SYSTEM_PROMPT = `
 你是中文法律文书模板槽位抽取助手。
 
@@ -48,6 +51,7 @@ const EXTRACTION_SYSTEM_PROMPT = `
 7. field_category 必须返回中文，不要返回 vehicle_plate_number、vehicle_brand 这种英文字段名。
 8. 除非用户明确要求，否则忽略与目标主体无关的申请人、法院、仲裁委、代理人等主体信息。
 
+${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}
 固定 JSON 结构：
 {
   "document_info": {
@@ -63,7 +67,7 @@ const EXTRACTION_SYSTEM_PROMPT = `
           "paragraph_index": 0,
           "field_category": "中文字段类别",
           "original_value": "原文中的具体值",
-          "meaning_to_applicant": "这个值对目标主体的含义",
+          "meaning_to_applicant": "从 original_value 附近字段名、标签或描述得到的槽位含义",
           "original_doc_position": "来自原文的定位片段"
         }
       ]
@@ -438,6 +442,42 @@ async function requestTextLlmJson(input: {
         totalParagraphs: input.totalParagraphs,
         onTrace: input.onTrace,
       });
+      const messages: Parameters<
+        typeof buildChatCompletionBody
+      >[1]['messages'] = [
+        {
+          role: 'system',
+          content: EXTRACTION_SYSTEM_PROMPT,
+        },
+        {
+          role: 'user',
+          content: input.prompt,
+        },
+      ];
+      const chatCompletionBody = buildChatCompletionBody(llmConfig, {
+        messages,
+      });
+
+      await input.onTrace?.({
+        message:
+          `[Template Extract][TextPrompt][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+          stringifyTraceJson({
+            route: '/api/template-extraction-tasks/[taskId]/process',
+            config_scope: 'TEXT_LLM',
+            provider: llmConfig.provider,
+            model: llmConfig.model,
+            file_name: input.fileName,
+            source_paragraph_index: input.paragraphIndex,
+            paragraph_display_index: input.paragraphDisplayIndex,
+            total_paragraphs: input.totalParagraphs,
+            paragraph_title: input.paragraphTitle,
+            paragraph_char_count: input.paragraphCharCount,
+            attempt: attempt + 1,
+            max_attempts: maxRetries + 1,
+            request_body: chatCompletionBody,
+          }),
+      });
+
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
@@ -446,20 +486,7 @@ async function requestTextLlmJson(input: {
         },
         dispatcher: templateExtractionFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify(
-          buildChatCompletionBody(llmConfig, {
-            messages: [
-              {
-                role: 'system',
-                content: EXTRACTION_SYSTEM_PROMPT,
-              },
-              {
-                role: 'user',
-                content: input.prompt,
-              },
-            ],
-          }),
-        ),
+        body: JSON.stringify(chatCompletionBody),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -672,6 +699,7 @@ async function extractSlotsForParagraph(params: {
     `当前段落序号：${params.paragraph.paragraph_index}`,
     `当前段落标题：${params.paragraph.paragraph_title}`,
     '请只从下面这个段落中抽取槽位。',
+    MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE,
     params.paragraph.paragraph_text,
   ].join('\n\n');
 
@@ -747,8 +775,7 @@ async function extractSlotsForParagraphBatch(params: {
   const promptPayload = {
     document_name: params.fileName,
     extra_extraction_requirement: params.prompt || null,
-    strict_requirement:
-      'Process each paragraph independently. Return JSON only. Return extraction_result as an array with one entry per paragraph that has extracted items. Copy paragraph_index exactly from the input paragraph.',
+    strict_requirement: `Process each paragraph independently. Return JSON only. Return extraction_result as an array with one entry per paragraph that has extracted items. Copy paragraph_index exactly from the input paragraph. ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}`,
     paragraphs: params.paragraphs.map((paragraph) => ({
       paragraph_index: paragraph.paragraph_index,
       paragraph_title: paragraph.paragraph_title,
@@ -767,7 +794,8 @@ async function extractSlotsForParagraphBatch(params: {
             paragraph_index: paragraph.paragraph_index,
             field_category: 'Chinese field category',
             original_value: 'exact value from paragraph text',
-            meaning_to_applicant: 'meaning of the value to the target subject',
+            meaning_to_applicant:
+              'meaning derived from the nearby label, field name, sentence, or description around original_value',
             original_doc_position: 'short quote that locates the value',
           },
         ],
