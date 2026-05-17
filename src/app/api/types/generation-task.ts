@@ -21,6 +21,7 @@ export const generationTaskItemSummarySchema = z.object({
         originalPageNumber: z.number().int().positive(),
         storagePath: z.string(),
         imageUrl: z.string().nullable().optional(),
+        rotationApplied: z.number().nullable().optional(),
         filterDecision: z.string().nullable().optional(),
         filterReason: z.string().nullable().optional(),
         filterConfidence: z.number().nullable().optional(),
@@ -82,6 +83,7 @@ export const generationTaskItemDetailSchema = generationTaskItemSummarySchema.ex
         originalPageNumber: z.number().int().positive(),
         imageUrl: z.string(),
         storagePath: z.string(),
+        rotationApplied: z.number().nullable().optional(),
         crop: z
           .object({
             left: z.number(),

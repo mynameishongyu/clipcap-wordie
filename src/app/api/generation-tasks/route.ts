@@ -22,6 +22,7 @@ interface UploadedFileMetadata {
     uploaded_page_number?: number;
     original_page_number?: number;
     storage_path?: string;
+    rotation_applied?: -90 | 0 | 90 | 180;
     crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
   }>;
   parsed_pdf?: {
@@ -55,6 +56,7 @@ function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined)
         uploaded_page_number: number;
         original_page_number: number;
         storage_path: string;
+        rotation_applied?: -90 | 0 | 90 | 180;
         crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
       } =>
         typeof entry?.uploaded_page_number === 'number' &&
@@ -70,6 +72,9 @@ function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined)
       uploaded_page_number: entry.uploaded_page_number,
       original_page_number: entry.original_page_number,
       storage_path: entry.storage_path,
+      ...(typeof entry.rotation_applied === 'number'
+        ? { rotation_applied: entry.rotation_applied }
+        : {}),
       ...(entry.crop ? { crop: entry.crop } : {}),
     }))
     .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);

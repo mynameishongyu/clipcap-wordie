@@ -265,6 +265,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             original_page_number: number;
             storage_path: string;
             crop?: PdfVisionPageInput['crop'];
+            rotation_applied?: PdfVisionPageInput['rotationApplied'];
           }
         | undefined
       > = Array.from({ length: totalPageImageCount });
@@ -323,6 +324,9 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             original_page_number: originalPageNumber,
             storage_path: pageImageStoragePath,
             ...(visionPage.crop ? { crop: visionPage.crop } : {}),
+            ...(visionPage.rotationApplied
+              ? { rotation_applied: visionPage.rotationApplied }
+              : {}),
           };
         },
       );

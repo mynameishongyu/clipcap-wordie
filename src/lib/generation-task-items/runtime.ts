@@ -17,6 +17,7 @@ export type PdfPageImageAsset = {
   filter_reason?: string | null;
   filter_confidence?: number | null;
   used_for_slot_fill?: boolean;
+  rotation_applied?: -90 | 0 | 90 | 180;
   crop?: {
     left: number;
     top: number;

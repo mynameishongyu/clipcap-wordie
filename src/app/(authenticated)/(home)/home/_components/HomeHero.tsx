@@ -458,6 +458,7 @@ async function createTemplateExtractionTask(
           storage_path: page.storagePath,
           content_type: page.contentType,
           size: page.size,
+          rotation_applied: page.rotationApplied ?? 0,
         })),
       ),
     );
@@ -575,6 +576,7 @@ async function preparePdfVisionPageAssets(
         dataUrlLength: page.imageDataUrl?.length ?? null,
         dataUrlPrefix: page.imageDataUrl?.slice(0, 30) ?? null,
         crop: page.crop,
+        rotationApplied: page.rotationApplied ?? 0,
       })),
     },
   );
@@ -653,6 +655,7 @@ async function preparePdfVisionPageAssets(
         previewUrl: asset.previewUrl,
         contentType: asset.contentType,
         size: asset.size,
+        rotationApplied: asset.rotationApplied ?? 0,
       })),
       consolePreviewVariable: 'window.clipcapTemplatePdfEvidencePages',
       extractionTaskId,
@@ -887,6 +890,7 @@ export function HomeHero() {
                         : {}),
                       storagePath: asset.storagePath,
                       crop: asset.crop,
+                      rotationApplied: asset.rotationApplied ?? 0,
                     })),
                     pdfPages: task.pdf_evidence.pdf_pages,
                     matches: task.pdf_evidence.matches,

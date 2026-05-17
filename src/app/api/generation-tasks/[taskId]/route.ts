@@ -35,6 +35,7 @@ function normalizePageFilterAssets(value: unknown) {
         uploaded_page_number: number;
         original_page_number: number;
         storage_path: string;
+        rotation_applied?: number;
         filter_decision?: string | null;
         filter_reason?: string | null;
         filter_confidence?: number | null;
@@ -75,6 +76,10 @@ async function buildPageFilterPages(input: {
         originalPageNumber: asset.original_page_number,
         storagePath: asset.storage_path,
         imageUrl: data?.signedUrl ?? null,
+        rotationApplied:
+          typeof asset.rotation_applied === 'number'
+            ? asset.rotation_applied
+            : null,
         filterDecision: asset.filter_decision ?? null,
         filterReason: asset.filter_reason ?? null,
         filterConfidence:

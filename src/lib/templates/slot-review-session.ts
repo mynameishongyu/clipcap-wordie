@@ -7,6 +7,8 @@ import type { ParsedDocument } from '@/src/types/docx-preview';
 
 export const SLOT_REVIEW_SESSION_KEY = 'clipcap:slot-review-session';
 
+export type SlotReviewPdfPageRotation = -90 | 0 | 90 | 180;
+
 export interface SlotReviewPdfEvidencePayload {
   pdfFileName: string;
   extractionTaskId?: string;
@@ -16,6 +18,7 @@ export interface SlotReviewPdfEvidencePayload {
     imageUrl?: string;
     fallbackImageUrl?: string;
     storagePath?: string;
+    rotationApplied?: SlotReviewPdfPageRotation;
     crop?: {
       left: number;
       top: number;

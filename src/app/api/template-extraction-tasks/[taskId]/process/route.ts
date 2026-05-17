@@ -90,6 +90,7 @@ function normalizePdfVisionPageAssets(value: unknown) {
       const uploadedPageNumber = Number(record.uploaded_page_number);
       const originalPageNumber = Number(record.original_page_number);
       const storagePath = String(record.storage_path ?? '').trim();
+      const rotationApplied = Number(record.rotation_applied);
 
       if (
         !Number.isInteger(uploadedPageNumber) ||
@@ -105,6 +106,12 @@ function normalizePdfVisionPageAssets(value: unknown) {
         uploaded_page_number: uploadedPageNumber,
         original_page_number: originalPageNumber,
         storage_path: storagePath,
+        ...(Number.isFinite(rotationApplied)
+          ? {
+              rotation_applied:
+                rotationApplied as PdfPageImageAsset['rotation_applied'],
+            }
+          : {}),
       };
     })
     .filter((item): item is PdfPageImageAsset => Boolean(item));

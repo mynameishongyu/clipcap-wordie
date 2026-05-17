@@ -8,6 +8,7 @@ type GenerationPdfPreviewPage = {
   originalPageNumber: number;
   imageUrl: string;
   storagePath: string;
+  rotationApplied?: number | null;
   crop?: {
     left: number;
     top: number;
@@ -42,6 +43,7 @@ function normalizePdfPreviewPagesInput(value: unknown) {
         uploaded_page_number: number;
         original_page_number: number;
         storage_path: string;
+        rotation_applied?: number;
         crop?: GenerationPdfPreviewPage['crop'];
       } =>
         !!entry &&
@@ -89,6 +91,10 @@ async function createGenerationPdfPreviewPages(input: {
         originalPageNumber: asset.original_page_number,
         imageUrl: data.signedUrl,
         storagePath: asset.storage_path,
+        rotationApplied:
+          typeof asset.rotation_applied === 'number'
+            ? asset.rotation_applied
+            : null,
       };
 
       if (asset.crop) {

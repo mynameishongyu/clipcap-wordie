@@ -70,6 +70,7 @@ declare global {
       uploadedPageNumber: number;
       previewUrl: string;
       imageDataUrl?: string;
+      rotationApplied?: number;
     }>;
     clipcapSlotFillInputs?: Array<{
       fileName: string;
@@ -2363,6 +2364,7 @@ export function BatchGenerateModal({
               originalPageNumber,
               uploadedPageNumber,
               previewUrl,
+              rotationApplied: visionPage.rotationApplied ?? 0,
               ...(visionPage.imageDataUrl
                 ? { imageDataUrl: visionPage.imageDataUrl }
                 : {}),
@@ -2395,7 +2397,7 @@ export function BatchGenerateModal({
               )?.previewUrl ?? '';
 
             console.info(
-              `[Batch Generate][${file.name}][PDF Page Image] uploaded page ${uploadedPageNumber}, original PDF page ${originalPageNumber}: ${previewUrl}`,
+              `[Batch Generate][${file.name}][PDF Page Image] uploaded page ${uploadedPageNumber}, original PDF page ${originalPageNumber}, rotation=${visionPage.rotationApplied ?? 0}: ${previewUrl}`,
             );
           });
 

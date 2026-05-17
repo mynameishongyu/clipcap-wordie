@@ -1020,18 +1020,11 @@ function isPdfEvidenceMatchForItem(
 ) {
   const identity = parseSlotItemIdentity(item);
 
-  if (
+  return Boolean(
     identity &&
-    match.paragraph_result_index === identity.paragraphResultIndex &&
-    match.item_index === identity.itemIndex &&
-    match.sequence === identity.sequence
-  ) {
-    return true;
-  }
-
-  return (
-    normalizeSlotCategoryLabel(match.field_category) === item.field_category &&
-    match.original_value.trim() === item.original_value.trim()
+      match.paragraph_result_index === identity.paragraphResultIndex &&
+      match.item_index === identity.itemIndex &&
+      match.sequence === identity.sequence,
   );
 }
 

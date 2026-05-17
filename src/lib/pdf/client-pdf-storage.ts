@@ -1,6 +1,7 @@
 'use client';
 
 import type {
+  PdfVisionPageRotation,
   PdfVisionPageCrop,
   PdfVisionPageInput,
 } from '@/src/lib/pdf/client-pdf';
@@ -18,6 +19,7 @@ export interface StoredPdfVisionPageAsset {
   contentType: string;
   size: number;
   crop?: PdfVisionPageCrop;
+  rotationApplied?: PdfVisionPageRotation;
 }
 
 function sanitizeStorageFileName(fileName: string) {
@@ -232,6 +234,7 @@ export async function uploadPdfVisionPagesToSupabase(input: {
           storagePath,
           contentType,
           size: blob.size,
+          rotationApplied: visionPage.rotationApplied ?? 0,
         },
       );
 
@@ -268,6 +271,9 @@ export async function uploadPdfVisionPagesToSupabase(input: {
         contentType,
         size: blob.size,
         ...(visionPage.crop ? { crop: visionPage.crop } : {}),
+        ...(visionPage.rotationApplied
+          ? { rotationApplied: visionPage.rotationApplied }
+          : {}),
       } satisfies StoredPdfVisionPageAsset;
 
       uploadedAssets[index] = asset;

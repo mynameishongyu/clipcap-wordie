@@ -18,6 +18,7 @@ export interface PdfVisionPageInput {
   imageBlob?: Blob;
   imageDataUrl?: string;
   crop?: PdfVisionPageCrop;
+  rotationApplied?: PdfVisionPageRotation;
 }
 
 export interface PdfVisionPageCrop {
@@ -30,6 +31,8 @@ export interface PdfVisionPageCrop {
   contentRatio: number;
 }
 
+export type PdfVisionPageRotation = -90 | 0 | 90 | 180;
+
 const DEFAULT_PDF_RENDER_SCALE = 6.0;
 const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
@@ -37,11 +40,16 @@ const DEFAULT_PDF_VISION_RENDER_CONCURRENCY = 3;
 const MAX_PDF_VISION_RENDER_CONCURRENCY = 8;
 const DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY = 3;
 const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
+const DEFAULT_PDF_AUTO_ROTATE_PAGES = true;
 const PDF_AUTO_CROP_WHITE_MARGIN = true;
 const PDF_CROP_WHITE_THRESHOLD = 245;
 const PDF_CROP_CONTENT_DIFFERENCE_THRESHOLD = 18;
 const PDF_CROP_PADDING_RATIO = 0.025;
 const PDF_CROP_MIN_CONTENT_RATIO = 0.02;
+const PDF_ROTATION_ANALYSIS_MAX_DIMENSION = 420;
+const PDF_ROTATION_SIDEWAYS_ASPECT_RATIO = 1.12;
+const PDF_ROTATION_PROJECTION_RATIO = 1.18;
+const PDF_ROTATION_SIDE_STRIP_RATIO = 0.16;
 const SUPPORTED_PDF_RENDER_IMAGE_FORMATS = [
   'image/png',
   'image/jpeg',
@@ -95,11 +103,32 @@ function getPdfRenderJpegQuality() {
   return Math.min(1, Math.max(0.1, parsedValue));
 }
 
+function getPdfAutoRotatePages() {
+  const rawValue = process.env.NEXT_PUBLIC_PDF_AUTO_ROTATE_PAGES;
+
+  if (typeof rawValue !== 'string' || !rawValue.trim()) {
+    return DEFAULT_PDF_AUTO_ROTATE_PAGES;
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (['0', 'false', 'off', 'no'].includes(normalizedValue)) {
+    return false;
+  }
+
+  if (['1', 'true', 'on', 'yes'].includes(normalizedValue)) {
+    return true;
+  }
+
+  return DEFAULT_PDF_AUTO_ROTATE_PAGES;
+}
+
 export function getPdfRenderConfig() {
   return {
     scale: getPdfRenderScale(),
     imageFormat: getPdfRenderImageFormat(),
     imageQuality: getPdfRenderJpegQuality(),
+    autoRotatePages: getPdfAutoRotatePages(),
   };
 }
 
@@ -328,19 +357,206 @@ function cropCanvas(canvas: HTMLCanvasElement, crop: PdfVisionPageCrop) {
   return croppedCanvas;
 }
 
+function calculateStandardDeviation(values: number[]) {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+    values.length;
+
+  return Math.sqrt(variance);
+}
+
+function getEdgeInkDensity(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  edge: 'left' | 'right',
+) {
+  const stripWidth = Math.max(
+    1,
+    Math.round(width * PDF_ROTATION_SIDE_STRIP_RATIO),
+  );
+  const startX = edge === 'left' ? 0 : Math.max(0, width - stripWidth);
+  let inkPixels = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = startX; x < startX + stripWidth; x += 1) {
+      const index = (y * width + x) * 4;
+
+      if (!isLikelyWhitePixel(data, index)) {
+        inkPixels += 1;
+      }
+    }
+  }
+
+  return inkPixels / Math.max(1, stripWidth * height);
+}
+
+function analyzeCanvasSidewaysRotation(
+  canvas: HTMLCanvasElement,
+  contentBounds: PdfVisionPageCrop | null,
+): PdfVisionPageRotation {
+  if (!getPdfAutoRotatePages() || !contentBounds) {
+    return 0;
+  }
+
+  if (
+    contentBounds.height / Math.max(1, contentBounds.width) <
+    PDF_ROTATION_SIDEWAYS_ASPECT_RATIO
+  ) {
+    return 0;
+  }
+
+  const analysisScale = Math.min(
+    1,
+    PDF_ROTATION_ANALYSIS_MAX_DIMENSION /
+      Math.max(contentBounds.width, contentBounds.height),
+  );
+  const analysisWidth = Math.max(1, Math.round(contentBounds.width * analysisScale));
+  const analysisHeight = Math.max(
+    1,
+    Math.round(contentBounds.height * analysisScale),
+  );
+  const analysisCanvas = document.createElement('canvas');
+  const analysisContext = analysisCanvas.getContext('2d', {
+    willReadFrequently: true,
+  });
+
+  if (!analysisContext) {
+    return 0;
+  }
+
+  analysisCanvas.width = analysisWidth;
+  analysisCanvas.height = analysisHeight;
+  analysisContext.drawImage(
+    canvas,
+    contentBounds.left,
+    contentBounds.top,
+    contentBounds.width,
+    contentBounds.height,
+    0,
+    0,
+    analysisWidth,
+    analysisHeight,
+  );
+
+  const imageData = analysisContext.getImageData(
+    0,
+    0,
+    analysisWidth,
+    analysisHeight,
+  );
+  const rowInkCounts = Array.from({ length: analysisHeight }, () => 0);
+  const columnInkCounts = Array.from({ length: analysisWidth }, () => 0);
+  const { data } = imageData;
+
+  for (let y = 0; y < analysisHeight; y += 1) {
+    for (let x = 0; x < analysisWidth; x += 1) {
+      const index = (y * analysisWidth + x) * 4;
+
+      if (isLikelyWhitePixel(data, index)) {
+        continue;
+      }
+
+      rowInkCounts[y] += 1;
+      columnInkCounts[x] += 1;
+    }
+  }
+
+  const rowProjectionScore = calculateStandardDeviation(
+    rowInkCounts.map((count) => count / analysisWidth),
+  );
+  const columnProjectionScore = calculateStandardDeviation(
+    columnInkCounts.map((count) => count / analysisHeight),
+  );
+
+  if (
+    columnProjectionScore <
+    rowProjectionScore * PDF_ROTATION_PROJECTION_RATIO
+  ) {
+    return 0;
+  }
+
+  const leftDensity = getEdgeInkDensity(
+    data,
+    analysisWidth,
+    analysisHeight,
+    'left',
+  );
+  const rightDensity = getEdgeInkDensity(
+    data,
+    analysisWidth,
+    analysisHeight,
+    'right',
+  );
+
+  return leftDensity >= rightDensity ? 90 : -90;
+}
+
+function rotateCanvas(
+  canvas: HTMLCanvasElement,
+  rotation: PdfVisionPageRotation,
+) {
+  if (rotation === 0) {
+    return canvas;
+  }
+
+  const rotatedCanvas = document.createElement('canvas');
+  const context = rotatedCanvas.getContext('2d');
+
+  if (!context) {
+    throw new Error('Failed to create rotated PDF page canvas.');
+  }
+
+  if (rotation === 90 || rotation === -90) {
+    rotatedCanvas.width = canvas.height;
+    rotatedCanvas.height = canvas.width;
+  } else {
+    rotatedCanvas.width = canvas.width;
+    rotatedCanvas.height = canvas.height;
+  }
+
+  if (rotation === 90) {
+    context.translate(rotatedCanvas.width, 0);
+    context.rotate(Math.PI / 2);
+  } else if (rotation === -90) {
+    context.translate(0, rotatedCanvas.height);
+    context.rotate(-Math.PI / 2);
+  } else {
+    context.translate(rotatedCanvas.width, rotatedCanvas.height);
+    context.rotate(Math.PI);
+  }
+
+  context.drawImage(canvas, 0, 0);
+
+  return rotatedCanvas;
+}
+
 function createPdfVisionCanvas(canvas: HTMLCanvasElement) {
-  const crop = findCanvasContentBounds(canvas);
+  const initialCrop = findCanvasContentBounds(canvas);
+  const rotationApplied = analyzeCanvasSidewaysRotation(canvas, initialCrop);
+  const orientedCanvas = rotateCanvas(canvas, rotationApplied);
+  const crop =
+    rotationApplied === 0
+      ? initialCrop
+      : findCanvasContentBounds(orientedCanvas);
 
   if (!crop) {
     return {
-      canvas,
+      canvas: orientedCanvas,
       crop: undefined,
+      rotationApplied,
     };
   }
 
   return {
-    canvas: cropCanvas(canvas, crop),
+    canvas: cropCanvas(orientedCanvas, crop),
     crop,
+    rotationApplied,
   };
 }
 
@@ -419,7 +635,18 @@ export async function renderPdfPagesForVision(
       pageNumber,
       imageBlob,
       ...(visionCanvas.crop ? { crop: visionCanvas.crop } : {}),
+      ...(visionCanvas.rotationApplied
+        ? { rotationApplied: visionCanvas.rotationApplied }
+        : {}),
     };
+    if (visionCanvas.rotationApplied) {
+      console.info('[PDF Render][AutoRotate] Rotated PDF page image.', {
+        fileName: file.name,
+        pageNumber,
+        rotationApplied: visionCanvas.rotationApplied,
+        crop: visionCanvas.crop ?? null,
+      });
+    }
     completedPageCount += 1;
     options?.onPageRendered?.({
       pageNumber,

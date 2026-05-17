@@ -79,6 +79,7 @@ function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
       storage_path: string;
       content_type?: string;
       size?: number;
+      rotation_applied?: number;
     }>;
   }
 
@@ -99,6 +100,7 @@ function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
       const storagePath = String(record.storage_path ?? '').trim();
       const contentType = String(record.content_type ?? '').trim();
       const size = Number(record.size);
+      const rotationApplied = Number(record.rotation_applied);
 
       if (
         !Number.isInteger(uploadedPageNumber) ||
@@ -116,6 +118,9 @@ function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
         storage_path: storagePath,
         ...(contentType ? { content_type: contentType } : {}),
         ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+        ...(Number.isFinite(rotationApplied)
+          ? { rotation_applied: rotationApplied }
+          : {}),
       };
     })
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
