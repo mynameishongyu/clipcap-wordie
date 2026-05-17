@@ -163,7 +163,8 @@ export async function GET(
 
     const admin = createSupabaseAdminClient();
     const { data: signedUrlData } =
-      item.source_pdf_path.includes('/staged-pdf-pages/')
+      item.source_pdf_path.includes('/staged-pdf-pages/') ||
+      item.source_pdf_path.includes('/fill-pdf-pages/')
         ? { data: null }
         : await admin.storage
             .from('generation-pdfs')
@@ -265,7 +266,8 @@ export async function DELETE(
     const storagePaths = Array.from(
       new Set(
         [
-          item.source_pdf_path?.includes('/staged-pdf-pages/')
+          item.source_pdf_path?.includes('/staged-pdf-pages/') ||
+          item.source_pdf_path?.includes('/fill-pdf-pages/')
             ? null
             : item.source_pdf_path,
           item.output_docx_path,

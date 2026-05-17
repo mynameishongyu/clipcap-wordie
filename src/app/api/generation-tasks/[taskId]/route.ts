@@ -227,7 +227,8 @@ export async function DELETE(
       new Set(
         (items ?? [])
           .flatMap((item) => [
-            item.source_pdf_path?.includes('/staged-pdf-pages/')
+            item.source_pdf_path?.includes('/staged-pdf-pages/') ||
+            item.source_pdf_path?.includes('/fill-pdf-pages/')
               ? null
               : item.source_pdf_path,
             item.output_docx_path,

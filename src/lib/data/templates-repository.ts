@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { createHash } from 'crypto';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import type {
   SavedTemplateDetail,
@@ -64,50 +65,6 @@ function normalizeLegacyTemplateSummary(
   };
 }
 
-function sanitizeStorageFileName(fileName: string) {
-  return fileName
-    .trim()
-    .replace(/[\\/:*?"<>|#%{}[\]^~`]+/g, '-')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
-}
-
-function getReferencePageImageExtension(page: SlotReviewPdfEvidencePage) {
-  const storagePath = page.storagePath?.toLowerCase() ?? '';
-
-  if (storagePath.endsWith('.jpg') || storagePath.endsWith('.jpeg')) {
-    return 'jpg';
-  }
-
-  if (storagePath.endsWith('.webp')) {
-    return 'webp';
-  }
-
-  const dataUrlMatch = page.imageDataUrl?.match(
-    /^data:image\/([^;]+);base64,/i,
-  );
-
-  if (dataUrlMatch?.[1]) {
-    return dataUrlMatch[1].replace('jpeg', 'jpg');
-  }
-
-  return 'png';
-}
-
-function getContentTypeForReferencePageExtension(extension: string) {
-  if (extension === 'jpg' || extension === 'jpeg') {
-    return 'image/jpeg';
-  }
-
-  if (extension === 'webp') {
-    return 'image/webp';
-  }
-
-  return 'image/png';
-}
-
 function decodeDataUrlImage(dataUrl: string) {
   const match = dataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/i);
 
@@ -125,11 +82,10 @@ async function persistReferencePdfPageForTemplate(input: {
   supabase: SupabaseClient;
   user: User;
   templateId: string;
-  templateName: string;
   page: SlotReviewPdfEvidencePage;
 }) {
   const currentPath = input.page.storagePath?.trim() ?? '';
-  const stablePrefix = `${input.user.id}/template-reference-pages/template/${input.templateId}/`;
+  const stablePrefix = `${input.user.id}/template-reference-pages/original/${input.templateId}/`;
 
   if (currentPath.startsWith(stablePrefix)) {
     return input.page;
@@ -139,16 +95,13 @@ async function persistReferencePdfPageForTemplate(input: {
     return input.page;
   }
 
-  const extension = getReferencePageImageExtension(input.page);
-  const safeTemplateName =
-    sanitizeStorageFileName(input.templateName) || 'template';
-  const targetPath =
-    `${stablePrefix}${String(input.page.pageNumber).padStart(4, '0')}-` +
-    `${crypto.randomUUID()}-${safeTemplateName}.${extension}`;
+  const targetPath = `${stablePrefix}page-${input.page.pageNumber}.png`;
   const storage = input.supabase.storage.from('generation-pdfs');
 
   try {
     if (currentPath) {
+      await storage.remove([targetPath]);
+
       const { error: copyError } = await storage.copy(currentPath, targetPath);
 
       if (copyError) {
@@ -201,11 +154,114 @@ async function persistReferencePdfPageForTemplate(input: {
   }
 }
 
+function buildTemplateAnnotationSignatureByPage(
+  payload: SlotReviewSessionPayload | null | undefined,
+) {
+  const matchesByPage = new Map<
+    number,
+    Array<{
+      slotKey: string;
+      bbox: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      };
+    }>
+  >();
+
+  for (const match of payload?.pdfEvidence?.matches ?? []) {
+    if (!match.bbox || !Number.isInteger(match.page_number)) {
+      continue;
+    }
+
+    const slotKey = `${match.paragraph_result_index}-${match.item_index}-${match.sequence}`;
+    const pageMatches = matchesByPage.get(match.page_number) ?? [];
+
+    pageMatches.push({
+      slotKey,
+      bbox: {
+        x: Number(match.bbox.x.toFixed(6)),
+        y: Number(match.bbox.y.toFixed(6)),
+        width: Number(match.bbox.width.toFixed(6)),
+        height: Number(match.bbox.height.toFixed(6)),
+      },
+    });
+    matchesByPage.set(match.page_number, pageMatches);
+  }
+
+  return new Map(
+    [...matchesByPage.entries()].map(([pageNumber, pageMatches]) => [
+      pageNumber,
+      createHash('sha256')
+        .update(
+          JSON.stringify(
+            pageMatches.sort((left, right) =>
+              left.slotKey.localeCompare(right.slotKey),
+            ),
+          ),
+        )
+        .digest('hex'),
+    ]),
+  );
+}
+
+function getChangedAnnotatedReferencePageNumbers(params: {
+  previousPayload: SlotReviewSessionPayload | null | undefined;
+  nextPayload: SlotReviewSessionPayload;
+}) {
+  const previousSignatures = buildTemplateAnnotationSignatureByPage(
+    params.previousPayload,
+  );
+  const nextSignatures = buildTemplateAnnotationSignatureByPage(
+    params.nextPayload,
+  );
+  const pageNumbers = new Set([
+    ...previousSignatures.keys(),
+    ...nextSignatures.keys(),
+  ]);
+
+  return [...pageNumbers].filter(
+    (pageNumber) =>
+      previousSignatures.get(pageNumber) !== nextSignatures.get(pageNumber),
+  );
+}
+
+async function cleanupChangedTemplateAnnotatedReferencePages(input: {
+  supabase: SupabaseClient;
+  user: User;
+  templateId: string;
+  pageNumbers: number[];
+}) {
+  if (input.pageNumbers.length === 0) {
+    return;
+  }
+
+  const pathsToRemove = input.pageNumbers.map(
+    (pageNumber) =>
+      `${input.user.id}/template-reference-pages/annotated/${input.templateId}/page-${pageNumber}.png`,
+  );
+
+  const { error } = await input.supabase.storage
+    .from('generation-pdfs')
+    .remove(Array.from(new Set(pathsToRemove)));
+
+  if (error) {
+    console.warn(
+      '[Templates] Failed to clean up changed annotated reference pages.',
+      {
+        templateId: input.templateId,
+        pageNumbers: input.pageNumbers,
+        error,
+      },
+    );
+  }
+}
+
 async function persistTemplateReferencePdfPages(input: {
   supabase: SupabaseClient;
   user: User;
   templateId: string;
-  templateName: string;
   slotReviewPayload: SlotReviewSessionPayload;
 }) {
   const pdfEvidence = input.slotReviewPayload.pdfEvidence;
@@ -220,7 +276,6 @@ async function persistTemplateReferencePdfPages(input: {
         supabase: input.supabase,
         user: input.user,
         templateId: input.templateId,
-        templateName: input.templateName,
         page,
       }),
     ),
@@ -383,9 +438,10 @@ export async function saveUserTemplate(
 
   let templateId = input.templateId?.trim() || crypto.randomUUID();
   const nextTimestamp = new Date().toISOString();
+  let existingTemplate: SavedTemplateDetail | null = null;
 
   if (input.templateId) {
-    const existingTemplate = await getUserTemplateById(
+    existingTemplate = await getUserTemplateById(
       supabase,
       user,
       input.templateId,
@@ -400,7 +456,6 @@ export async function saveUserTemplate(
     supabase,
     user,
     templateId,
-    templateName: normalizedTemplateName,
     slotReviewPayload: {
       ...input.slotReviewPayload,
       templateId,
@@ -413,6 +468,15 @@ export async function saveUserTemplate(
     templateId,
     templateName: normalizedTemplateName,
   };
+  const changedAnnotatedReferencePageNumbers =
+    getChangedAnnotatedReferencePageNumbers({
+      previousPayload:
+        (existingTemplate?.slot_review_payload as
+          | SlotReviewSessionPayload
+          | null
+          | undefined) ?? null,
+      nextPayload: payloadToSave,
+    });
 
   const { data, error } = await supabase
     .from('templates')
@@ -446,6 +510,13 @@ export async function saveUserTemplate(
 
     throw error;
   }
+
+  await cleanupChangedTemplateAnnotatedReferencePages({
+    supabase,
+    user,
+    templateId,
+    pageNumbers: changedAnnotatedReferencePageNumbers,
+  });
 
   return data;
 }

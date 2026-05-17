@@ -1,6 +1,5 @@
 import { after, NextResponse } from 'next/server';
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
-import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import {
@@ -201,10 +200,43 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   };
 }
 
+function bufferToImageDataUrl(buffer: Buffer, mimeType: string) {
+  return `data:${mimeType};base64,${buffer.toString('base64')}`;
+}
+
+function buildReferenceAnnotationStoragePath(params: {
+  ownerId: string;
+  taskItemId: string;
+  templateId?: string | null;
+  pageNumber: number;
+}) {
+  if (!params.templateId) {
+    return `${params.ownerId}/template-reference-pages/annotated/task/${params.taskItemId}/page-${params.pageNumber}.png`;
+  }
+
+  return `${params.ownerId}/template-reference-pages/annotated/${params.templateId}/page-${params.pageNumber}.png`;
+}
+
+async function createReferenceAnnotationSignedUrl(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  storagePath: string;
+}) {
+  const { data, error } = await params.admin.storage
+    .from('generation-pdfs')
+    .createSignedUrl(params.storagePath, 60 * 60 * 24);
+
+  if (error || !data?.signedUrl) {
+    throw error ?? new Error(`Missing signed URL for ${params.storagePath}`);
+  }
+
+  return data.signedUrl;
+}
+
 async function loadReferenceExamplePagesWithBbox(params: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
   taskItemId: string;
   ownerId: string;
+  templateId?: string | null;
   slots: GenerationSlotSchemaItem[];
 }) {
   const pageAssetsByKey = new Map<
@@ -270,6 +302,85 @@ async function loadReferenceExamplePagesWithBbox(params: {
     [...pageAssetsByKey.values()]
       .sort((left, right) => left.pageNumber - right.pageNumber)
       .map(async (asset) => {
+        const annotatedStoragePath = buildReferenceAnnotationStoragePath({
+          ownerId: params.ownerId,
+          taskItemId: params.taskItemId,
+          templateId: params.templateId,
+          pageNumber: asset.pageNumber,
+        });
+        let cachedAnnotatedImageDataUrl: string | undefined;
+        let cachedAnnotatedPreviewUrl: string | undefined;
+
+        if (params.templateId) {
+          const { data: cachedBlob } = await params.admin.storage
+            .from('generation-pdfs')
+            .download(annotatedStoragePath);
+
+          if (cachedBlob) {
+            const cachedBuffer = Buffer.from(await cachedBlob.arrayBuffer());
+            const cachedMimeType =
+              cachedBlob.type ||
+              getMimeTypeFromStoragePath(annotatedStoragePath) ||
+              'image/png';
+
+            cachedAnnotatedImageDataUrl = bufferToImageDataUrl(
+              cachedBuffer,
+              cachedMimeType,
+            );
+
+            try {
+              cachedAnnotatedPreviewUrl =
+                await createReferenceAnnotationSignedUrl({
+                  admin: params.admin,
+                  storagePath: annotatedStoragePath,
+                });
+            } catch (error) {
+              console.warn(
+                '[PDF Fill][ReferenceExample] Failed to sign cached annotated reference page image',
+                {
+                  pageNumber: asset.pageNumber,
+                  annotatedStoragePath,
+                  error,
+                },
+              );
+            }
+
+            console.info(
+              '[PDF Fill][ReferenceExample] Reusing cached annotated reference page image',
+              {
+                pageNumber: asset.pageNumber,
+                annotatedStoragePath,
+                slotCount: asset.slotBoxes.length,
+              },
+            );
+
+            return {
+              page: {
+                page_number: asset.pageNumber,
+                original_page_number: asset.pageNumber,
+                image_data_url: cachedAnnotatedImageDataUrl,
+                annotated_image_data_url: cachedAnnotatedImageDataUrl,
+                ...(cachedAnnotatedPreviewUrl
+                  ? { annotated_preview_url: cachedAnnotatedPreviewUrl }
+                  : {}),
+                annotated_storage_path: annotatedStoragePath,
+                annotated_slots: asset.slotBoxes.map((slotBox) => ({
+                  slot_key: slotBox.slotKey,
+                  slot_name: slotBox.slotName,
+                  slot_source: slotBox.slotSource,
+                  example_annotation_label: slotBox.slotKey,
+                  example_box_2d: normalizedBboxToGeminiBox2d(slotBox.bbox),
+                  example_evidence_text: slotBox.exampleEvidenceText,
+                  example_slot_value: slotBox.exampleSlotValue,
+                })),
+                example_pdf_file_name: asset.examplePdfFileName,
+              } satisfies ReferencePdfVisionPageInput,
+              skippedSlotCount: 0,
+              downloadFailure: null,
+            };
+          }
+        }
+
         const { data: fileBlob, error } = await params.admin.storage
           .from('generation-pdfs')
           .download(asset.storagePath);
@@ -302,10 +413,10 @@ async function loadReferenceExamplePagesWithBbox(params: {
         const buffer = Buffer.from(await fileBlob.arrayBuffer());
         const mimeType =
           fileBlob.type || getMimeTypeFromStoragePath(asset.storagePath);
-        const imageDataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;
+        const imageDataUrl = bufferToImageDataUrl(buffer, mimeType);
         let annotatedImageDataUrl: string | undefined;
         let annotatedPreviewUrl: string | undefined;
-        let annotatedStoragePath: string | undefined;
+        let uploadedAnnotatedStoragePath: string | undefined;
 
         try {
           const annotatedImage = await buildAnnotatedReferencePageDataUrl({
@@ -313,37 +424,37 @@ async function loadReferenceExamplePagesWithBbox(params: {
             slotBoxes: asset.slotBoxes,
           });
           annotatedImageDataUrl = annotatedImage.dataUrl;
-          annotatedStoragePath =
-            `${params.ownerId}/slot-fill-reference-annotations/${params.taskItemId}/` +
-            `${randomUUID()}-example-page-${asset.pageNumber}.png`;
+          uploadedAnnotatedStoragePath = annotatedStoragePath;
 
           const { error: uploadError } = await params.admin.storage
             .from('generation-pdfs')
-            .upload(annotatedStoragePath, annotatedImage.buffer, {
+            .upload(uploadedAnnotatedStoragePath, annotatedImage.buffer, {
               contentType: 'image/png',
-              upsert: false,
+              upsert: true,
             });
 
           if (uploadError) {
             throw uploadError;
           }
 
-          const { data: signedUrlData, error: signedUrlError } =
-            await params.admin.storage
-              .from('generation-pdfs')
-              .createSignedUrl(annotatedStoragePath, 60 * 60 * 24);
+          annotatedPreviewUrl = await createReferenceAnnotationSignedUrl({
+            admin: params.admin,
+            storagePath: uploadedAnnotatedStoragePath,
+          });
 
-          if (signedUrlError || !signedUrlData?.signedUrl) {
-            throw (
-              signedUrlError ??
-              new Error(`Missing signed URL for ${annotatedStoragePath}`)
+          if (params.templateId) {
+            console.info(
+              '[PDF Fill][ReferenceExample] Cached annotated reference page image',
+              {
+                pageNumber: asset.pageNumber,
+                annotatedStoragePath: uploadedAnnotatedStoragePath,
+                slotCount: asset.slotBoxes.length,
+              },
             );
           }
-
-          annotatedPreviewUrl = signedUrlData.signedUrl;
         } catch (error) {
           annotatedPreviewUrl = undefined;
-          annotatedStoragePath = undefined;
+          uploadedAnnotatedStoragePath = undefined;
           console.warn(
             '[PDF Fill][ReferenceExample] Failed to annotate reference page image',
             {
@@ -365,8 +476,8 @@ async function loadReferenceExamplePagesWithBbox(params: {
             ...(annotatedPreviewUrl
               ? { annotated_preview_url: annotatedPreviewUrl }
               : {}),
-            ...(annotatedStoragePath
-              ? { annotated_storage_path: annotatedStoragePath }
+            ...(uploadedAnnotatedStoragePath
+              ? { annotated_storage_path: uploadedAnnotatedStoragePath }
               : {}),
             annotated_slots: asset.slotBoxes.map((slotBox) => ({
               slot_key: slotBox.slotKey,
@@ -540,6 +651,7 @@ async function runGenerationTaskItemSlotFill(params: {
       admin,
       taskItemId: params.item.id,
       ownerId: params.item.owner_id,
+      templateId: params.item.template_id,
       slots: slotSchema,
     });
 

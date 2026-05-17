@@ -2,6 +2,10 @@ import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
 import { getOptionalEnv, getVisionLlmModel } from '@/src/lib/llm/env';
 import {
+  callGeminiFileApiChatCompletion,
+  summarizeGeminiFileApiRequestForTrace,
+} from '@/src/lib/llm/gemini-file-api';
+import {
   buildChatCompletionBody,
   buildChatCompletionHeaders,
   getLlmRuntimeConfig,
@@ -2526,43 +2530,72 @@ async function alignReferencePagesToVisionPages(input: {
         ],
       });
 
-      await input.onTrace?.({
-        message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
-          {
-            route: '/api/generation-task-items/[taskItemId]/slot-fill',
-            config_scope: 'VISION_LLM',
-            model: llmConfig.model,
-            provider: visionTraceConfig.provider,
-            request_label: 'reference page alignment',
-            request_body: summarizeChatCompletionBodyForTrace(requestBody),
-            image_url_note:
-              'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
-          },
-        )}`,
-      });
-
-      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
-        method: 'POST',
-        headers: buildChatCompletionHeaders(llmConfig),
-        dispatcher: llmFetchDispatcher,
-        signal: controller.signal,
-        body: JSON.stringify(requestBody),
-      } as UndiciFetchInit);
-
-      if (!upstream.ok) {
-        const details = await upstream.text();
-        throw new Error(
-          `PDF reference page alignment request failed (${upstream.status}): ${details}`,
-        );
-      }
-
-      const payload = (await upstream.json()) as {
+      let payload: {
         choices?: Array<{
           message?: {
             content?: string;
           };
         }>;
       };
+
+      if (llmConfig.provider === 'gemini') {
+        const geminiResult = await callGeminiFileApiChatCompletion({
+          config: llmConfig,
+          body: requestBody,
+          requestLabel: 'reference page alignment',
+          dispatcher: llmFetchDispatcher,
+          signal: controller.signal,
+          onTrace: input.onTrace,
+        });
+
+        await input.onTrace?.({
+          message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
+            {
+              route: '/api/generation-task-items/[taskItemId]/slot-fill',
+              config_scope: 'VISION_LLM',
+              model: llmConfig.model,
+              provider: visionTraceConfig.provider,
+              request_label: 'reference page alignment',
+              request_mode: 'gemini_file_api_generate_content',
+              ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+            },
+          )}`,
+        });
+
+        payload = geminiResult.payload;
+      } else {
+        await input.onTrace?.({
+          message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
+            {
+              route: '/api/generation-task-items/[taskItemId]/slot-fill',
+              config_scope: 'VISION_LLM',
+              model: llmConfig.model,
+              provider: visionTraceConfig.provider,
+              request_label: 'reference page alignment',
+              request_body: summarizeChatCompletionBodyForTrace(requestBody),
+              image_url_note:
+                'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
+            },
+          )}`,
+        });
+
+        const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+          method: 'POST',
+          headers: buildChatCompletionHeaders(llmConfig),
+          dispatcher: llmFetchDispatcher,
+          signal: controller.signal,
+          body: JSON.stringify(requestBody),
+        } as UndiciFetchInit);
+
+        if (!upstream.ok) {
+          const details = await upstream.text();
+          throw new Error(
+            `PDF reference page alignment request failed (${upstream.status}): ${details}`,
+          );
+        }
+
+        payload = (await upstream.json()) as typeof payload;
+      }
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -2976,43 +3009,72 @@ async function extractSlotsFromVisionPageBatch(input: {
         ],
       });
 
-      await input.onTrace?.({
-        message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
-          {
-            route: '/api/generation-task-items/[taskItemId]/slot-fill',
-            config_scope: 'VISION_LLM',
-            model: llmConfig.model,
-            provider: visionTraceConfig.provider,
-            request_label: requestLabel,
-            request_body: summarizeChatCompletionBodyForTrace(requestBody),
-            image_url_note:
-              'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
-          },
-        )}`,
-      });
-
-      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
-        method: 'POST',
-        headers: buildChatCompletionHeaders(llmConfig),
-        dispatcher: llmFetchDispatcher,
-        signal: controller.signal,
-        body: JSON.stringify(requestBody),
-      } as UndiciFetchInit);
-
-      if (!upstream.ok) {
-        const details = await upstream.text();
-        throw new Error(
-          `PDF direct vision fill request failed (${upstream.status}): ${details}`,
-        );
-      }
-
-      const payload = (await upstream.json()) as {
+      let payload: {
         choices?: Array<{
           message?: {
             content?: string;
           };
         }>;
       };
+
+      if (llmConfig.provider === 'gemini') {
+        const geminiResult = await callGeminiFileApiChatCompletion({
+          config: llmConfig,
+          body: requestBody,
+          requestLabel,
+          dispatcher: llmFetchDispatcher,
+          signal: controller.signal,
+          onTrace: input.onTrace,
+        });
+
+        await input.onTrace?.({
+          message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
+            {
+              route: '/api/generation-task-items/[taskItemId]/slot-fill',
+              config_scope: 'VISION_LLM',
+              model: llmConfig.model,
+              provider: visionTraceConfig.provider,
+              request_label: requestLabel,
+              request_mode: 'gemini_file_api_generate_content',
+              ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+            },
+          )}`,
+        });
+
+        payload = geminiResult.payload;
+      } else {
+        await input.onTrace?.({
+          message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
+            {
+              route: '/api/generation-task-items/[taskItemId]/slot-fill',
+              config_scope: 'VISION_LLM',
+              model: llmConfig.model,
+              provider: visionTraceConfig.provider,
+              request_label: requestLabel,
+              request_body: summarizeChatCompletionBodyForTrace(requestBody),
+              image_url_note:
+                'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
+            },
+          )}`,
+        });
+
+        const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+          method: 'POST',
+          headers: buildChatCompletionHeaders(llmConfig),
+          dispatcher: llmFetchDispatcher,
+          signal: controller.signal,
+          body: JSON.stringify(requestBody),
+        } as UndiciFetchInit);
+
+        if (!upstream.ok) {
+          const details = await upstream.text();
+          throw new Error(
+            `PDF direct vision fill request failed (${upstream.status}): ${details}`,
+          );
+        }
+
+        payload = (await upstream.json()) as typeof payload;
+      }
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {

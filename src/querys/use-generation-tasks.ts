@@ -258,7 +258,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
       const totalPageImageCount = item.pageVisionPages.length;
       const uploadConcurrency = getPdfVisionUploadConcurrency();
       const pdfAssetId = crypto.randomUUID();
-      const pdfPageFolderPath = `${user.id}/staged-pdf-pages/${pdfAssetId}`;
+      const pdfPageFolderPath = `${user.id}/fill-pdf-pages/${pdfAssetId}`;
       const pageImageAssets: Array<
         | {
             uploaded_page_number: number;

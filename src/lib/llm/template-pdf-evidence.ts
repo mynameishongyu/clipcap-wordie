@@ -6,6 +6,10 @@ import type {
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import {
+  callGeminiFileApiChatCompletion,
+  summarizeGeminiFileApiRequestForTrace,
+} from '@/src/lib/llm/gemini-file-api';
+import {
   buildChatCompletionHeaders,
   buildChatCompletionBody,
   getLlmRuntimeConfig,
@@ -1217,43 +1221,72 @@ async function locateSlotsInPageBatch(input: {
       ],
     });
 
-    await input.onTrace?.({
-      message:
-        `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
-        JSON.stringify({
-          route: '/api/template-extraction-tasks/[taskId]/process',
-          config_scope: 'VISION_LLM',
-          model: llmConfig.model,
-          provider: traceConfig.provider,
-          request_label: requestLabel,
-          request_body: summarizeChatCompletionBodyForTrace(requestBody),
-          image_url_note:
-            'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request uses the full data:image/... base64 URL.',
-        }),
-    });
-
-    const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
-      method: 'POST',
-      headers: buildChatCompletionHeaders(llmConfig),
-      dispatcher: visionLocateFetchDispatcher,
-      signal: controller.signal,
-      body: JSON.stringify(requestBody),
-    } as UndiciFetchInit);
-
-    if (!upstream.ok) {
-      const details = await upstream.text();
-      throw new Error(
-        `Vision location request failed (${upstream.status}): ${details}`,
-      );
-    }
-
-    const payload = (await upstream.json()) as {
+    let payload: {
       choices?: Array<{
         message?: {
           content?: string;
         };
       }>;
     };
+
+    if (llmConfig.provider === 'gemini') {
+      const geminiResult = await callGeminiFileApiChatCompletion({
+        config: llmConfig,
+        body: requestBody,
+        requestLabel,
+        dispatcher: visionLocateFetchDispatcher,
+        signal: controller.signal,
+        onTrace: input.onTrace,
+      });
+
+      await input.onTrace?.({
+        message:
+          `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+          JSON.stringify({
+            route: '/api/template-extraction-tasks/[taskId]/process',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: traceConfig.provider,
+            request_label: requestLabel,
+            request_mode: 'gemini_file_api_generate_content',
+            ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+          }),
+      });
+
+      payload = geminiResult.payload;
+    } else {
+      await input.onTrace?.({
+        message:
+          `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+          JSON.stringify({
+            route: '/api/template-extraction-tasks/[taskId]/process',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: traceConfig.provider,
+            request_label: requestLabel,
+            request_body: summarizeChatCompletionBodyForTrace(requestBody),
+            image_url_note:
+              'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request uses the full data:image/... base64 URL.',
+          }),
+      });
+
+      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+        method: 'POST',
+        headers: buildChatCompletionHeaders(llmConfig),
+        dispatcher: visionLocateFetchDispatcher,
+        signal: controller.signal,
+        body: JSON.stringify(requestBody),
+      } as UndiciFetchInit);
+
+      if (!upstream.ok) {
+        const details = await upstream.text();
+        throw new Error(
+          `Vision location request failed (${upstream.status}): ${details}`,
+        );
+      }
+
+      payload = (await upstream.json()) as typeof payload;
+    }
     const rawContent = payload?.choices?.[0]?.message?.content;
 
     if (typeof rawContent !== 'string' || !rawContent.trim()) {

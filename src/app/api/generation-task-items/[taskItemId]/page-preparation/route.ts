@@ -17,6 +17,10 @@ import {
 } from '@/src/lib/generation-task-items/runtime';
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import {
+  callGeminiFileApiChatCompletion,
+  summarizeGeminiFileApiRequestForTrace,
+} from '@/src/lib/llm/gemini-file-api';
+import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
@@ -426,41 +430,69 @@ async function classifyVisionPagesForSlotFill(params: {
         )}`,
       });
 
-      const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${llmConfig.apiKey}`,
-        },
-        dispatcher: llmFetchDispatcher,
-        signal: controller.signal,
-        body: JSON.stringify(
-          buildChatCompletionBody(llmConfig, {
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
-              },
-              {
-                role: 'user',
-                content,
-              },
-            ],
-          }),
-        ),
+      const requestBody = buildChatCompletionBody(llmConfig, {
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
+          },
+          {
+            role: 'user',
+            content,
+          },
+        ],
       });
-
-      if (!upstream.ok) {
-        const details = await upstream.text();
-        throw new Error(
-          `Vision page filter request failed (${upstream.status}): ${details}`,
-        );
-      }
-
-      const payload = (await upstream.json()) as {
+      let payload: {
         choices?: Array<{ message?: { content?: string } }>;
       };
+
+      if (llmConfig.provider === 'gemini') {
+        const geminiResult = await callGeminiFileApiChatCompletion({
+          config: llmConfig,
+          body: requestBody,
+          requestLabel: `page filter batch ${batchIndex + 1}/${batches.length}`,
+          dispatcher: llmFetchDispatcher,
+          signal: controller.signal,
+          onTrace: params.onTrace,
+        });
+
+        await params.onTrace?.({
+          message: `[PDF Fill][PageFilterGeminiFileApiRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
+            {
+              route: '/api/generation-task-items/[taskItemId]/page-preparation',
+              config_scope: 'VISION_LLM',
+              model: traceConfig.model,
+              provider: traceConfig.provider,
+              request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
+              request_mode: 'gemini_file_api_generate_content',
+              ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+            },
+          )}`,
+        });
+
+        payload = geminiResult.payload;
+      } else {
+        const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${llmConfig.apiKey}`,
+          },
+          dispatcher: llmFetchDispatcher,
+          signal: controller.signal,
+          body: JSON.stringify(requestBody),
+        });
+
+        if (!upstream.ok) {
+          const details = await upstream.text();
+          throw new Error(
+            `Vision page filter request failed (${upstream.status}): ${details}`,
+          );
+        }
+
+        payload = (await upstream.json()) as typeof payload;
+      }
       const rawContent = payload.choices?.[0]?.message?.content ?? '';
       const batchResults = parsePageFilterJson(rawContent);
 
