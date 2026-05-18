@@ -1687,14 +1687,6 @@ export default function GenerationReviewPage() {
                   {items.length} 个
                 </Badge>
               </Group>
-              <Button
-                loading={reviewMutation.isPending}
-                radius="xl"
-                size="xs"
-                onClick={handleSaveReview}
-              >
-                提交核查
-              </Button>
               <Divider />
               {items.length > 0 ? (
                 <ScrollArea offsetScrollbars scrollbarSize={8} style={{ flex: 1, minHeight: 0 }} type="always">
