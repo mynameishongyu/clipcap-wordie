@@ -1083,6 +1083,9 @@ export function BatchGenerateModal({
         const directVisionRequestBodyMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionRequestBody\]\[([^\]]+)\] (.+)$/,
         );
+        const directVisionTimingMatch = traceLine.match(
+          /^\[PDF Fill\]\[DirectVisionTiming\]\[([^\]]+)\] (.+)$/,
+        );
         const directVisionRawMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionRaw\]\[([^\]]+)\] (.+)$/,
         );
@@ -1601,6 +1604,47 @@ export function BatchGenerateModal({
               2,
             ),
           );
+          return;
+        }
+
+        if (directVisionTimingMatch) {
+          const label = directVisionTimingMatch[1] ?? 'Full';
+          const parsedTiming = parseTraceJson<Record<string, unknown>>(
+            directVisionTimingMatch[2] ?? '{}',
+            `direct vision timing ${label}`,
+          );
+
+          if (!parsedTiming) {
+            return;
+          }
+
+          const totalDurationMs = parsedTiming.total_duration_ms;
+          const modelRequestDurationMs =
+            parsedTiming.model_request_duration_ms;
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION 槽位回填总耗时（${label}）：${
+              typeof totalDurationMs === 'number'
+                ? formatDurationMs(totalDurationMs)
+                : '未记录'
+            }`,
+            parsedTiming,
+          );
+
+          if (typeof modelRequestDurationMs === 'number') {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] Direct VISION 槽位回填耗时摘要（${label}）`,
+              [
+                `模型请求链路：${formatDurationMs(modelRequestDurationMs)}`,
+                `Direct Vision 总耗时：${
+                  typeof totalDurationMs === 'number'
+                    ? formatDurationMs(totalDurationMs)
+                    : '未记录'
+                }`,
+              ].join('\n'),
+            );
+          }
+
           return;
         }
 

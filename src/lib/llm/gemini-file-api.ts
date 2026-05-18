@@ -36,6 +36,13 @@ export interface UploadedGeminiFile {
   displayName: string;
 }
 
+export interface GeminiFileApiTimingSummary {
+  uploadDurationMs: number;
+  generateContentDurationMs: number | null;
+  cleanupDurationMs: number | null;
+  totalDurationMs: number;
+}
+
 const DEFAULT_GEMINI_FILE_PIPELINE_CONCURRENCY = 2;
 const MAX_GEMINI_FILE_PIPELINE_CONCURRENCY = 20;
 
@@ -463,6 +470,7 @@ export async function callGeminiFileApiChatCompletion(params: {
 }) {
   const imageParts = collectImageParts(params.body);
   const requestLabel = params.requestLabel ?? 'gemini file api vision request';
+  const callStartedAt = Date.now();
   let uploadedFiles: UploadedGeminiFile[] = [];
   let requestBody: ReturnType<typeof buildGeminiNativeRequestBody> | null = null;
   let responsePayload:
@@ -475,6 +483,9 @@ export async function callGeminiFileApiChatCompletion(params: {
       }
     | null = null;
   let cleanupResults: Awaited<ReturnType<typeof cleanupGeminiFiles>> = [];
+  let uploadDurationMs = 0;
+  let generateContentDurationMs: number | null = null;
+  let cleanupDurationMs: number | null = null;
 
   try {
     const uploadStartedAt = Date.now();
@@ -497,7 +508,7 @@ export async function callGeminiFileApiChatCompletion(params: {
           signal: params.signal,
         }),
     );
-    const uploadDurationMs = Date.now() - uploadStartedAt;
+    uploadDurationMs = Date.now() - uploadStartedAt;
     await params.onTrace?.({
       message: `[Gemini File API][UploadComplete] ${JSON.stringify({
         request_label: requestLabel,
@@ -532,6 +543,7 @@ export async function callGeminiFileApiChatCompletion(params: {
       })}`,
     });
     const { generateBaseUrl } = resolveGeminiApiOrigins(params.config);
+    const generateContentStartedAt = Date.now();
     const upstream = await undiciFetch(
       `${generateBaseUrl}/models/${encodeURIComponent(
         normalizeGeminiModelForPath(params.config.model),
@@ -562,6 +574,7 @@ export async function callGeminiFileApiChatCompletion(params: {
         };
       }>;
     };
+    generateContentDurationMs = Date.now() - generateContentStartedAt;
     await params.onTrace?.({
       message: `[Gemini File API][GenerateContentComplete] ${JSON.stringify({
         request_label: requestLabel,
@@ -570,6 +583,10 @@ export async function callGeminiFileApiChatCompletion(params: {
           responsePayload.candidates?.[0]?.content?.parts
             ?.map((part) => part.text ?? '')
             .join('').length ?? 0,
+        generate_content_duration_ms: generateContentDurationMs,
+        generate_content_duration_seconds: Number(
+          (generateContentDurationMs / 1000).toFixed(2),
+        ),
       })}`,
     });
   } finally {
@@ -579,6 +596,7 @@ export async function callGeminiFileApiChatCompletion(params: {
       params.cleanupUploadedFiles !== false || !responsePayload;
 
     if (shouldCleanupUploadedFiles) {
+      const cleanupStartedAt = Date.now();
       await params.onTrace?.({
         message: `[Gemini File API][CleanupStart] ${JSON.stringify({
           request_label: requestLabel,
@@ -590,9 +608,14 @@ export async function callGeminiFileApiChatCompletion(params: {
         files: uploadedFiles,
         dispatcher: params.dispatcher,
       });
+      cleanupDurationMs = Date.now() - cleanupStartedAt;
       await params.onTrace?.({
         message: `[Gemini File API][CleanupComplete] ${JSON.stringify({
           request_label: requestLabel,
+          cleanup_duration_ms: cleanupDurationMs,
+          cleanup_duration_seconds: Number(
+            (cleanupDurationMs / 1000).toFixed(2),
+          ),
           cleanup_results: summarizeCleanupResults(cleanupResults),
         })}`,
       });
@@ -626,6 +649,12 @@ export async function callGeminiFileApiChatCompletion(params: {
     uploadedFiles,
     cleanupResults,
     responsePayload,
+    timings: {
+      uploadDurationMs,
+      generateContentDurationMs,
+      cleanupDurationMs,
+      totalDurationMs: Date.now() - callStartedAt,
+    } satisfies GeminiFileApiTimingSummary,
   };
 }
 

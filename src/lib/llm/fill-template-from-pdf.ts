@@ -2579,8 +2579,11 @@ async function alignReferencePagesToVisionPages(input: {
           };
         }>;
       };
+      let modelRequestDurationMs: number | null = null;
+      let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
+        requestMode = 'gemini_file_api_generate_content';
         const geminiResult = await callGeminiFileApiChatCompletion({
           config: llmConfig,
           body: requestBody,
@@ -3084,8 +3087,11 @@ async function extractSlotsFromVisionPageBatch(input: {
           };
         }>;
       };
+      let modelRequestDurationMs: number | null = null;
+      let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
+        requestMode = 'gemini_file_api_generate_content';
         const geminiResult = await callGeminiFileApiChatCompletion({
           config: llmConfig,
           body: requestBody,
@@ -3109,6 +3115,7 @@ async function extractSlotsFromVisionPageBatch(input: {
           )}`,
         });
 
+        modelRequestDurationMs = geminiResult.timings.totalDurationMs;
         payload = geminiResult.payload;
       } else {
         await input.onTrace?.({
@@ -3126,6 +3133,7 @@ async function extractSlotsFromVisionPageBatch(input: {
           )}`,
         });
 
+        const upstreamStartedAt = Date.now();
         const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
           method: 'POST',
           headers: buildChatCompletionHeaders(llmConfig),
@@ -3142,6 +3150,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         }
 
         payload = (await upstream.json()) as typeof payload;
+        modelRequestDurationMs = Date.now() - upstreamStartedAt;
       }
       const rawContent = payload?.choices?.[0]?.message?.content;
 
@@ -3249,6 +3258,47 @@ async function extractSlotsFromVisionPageBatch(input: {
         )}.`;
       console.info(completedMessage);
       await input.onTrace?.({ message: completedMessage });
+      await input.onTrace?.({
+        message: `[PDF Fill][DirectVisionTiming][${requestLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: visionTraceConfig.provider,
+            request_label: requestLabel,
+            request_mode: requestMode,
+            attempt,
+            llm_concurrency_env_name: 'PDF_FILL_VISION_PAGES_LLM_CONCURRENCY',
+            llm_concurrency: llmConcurrency,
+            page_numbers: pageNumbers,
+            slot_count: input.slots.length,
+            filled_slot_count: result.extracted_items.filter((item) =>
+              hasFilledValue(item.original_value),
+            ).length,
+            uploaded_pdf_page_count: pageSizeSummary.length,
+            reference_example_page_count: referenceImageSummaries.length,
+            image_payload: {
+              request_image_total_bytes: requestImageTotalBytes,
+              request_image_total_size: formatBytes(requestImageTotalBytes),
+              uploaded_pdf_image_total_bytes: totalImageBytes,
+              uploaded_pdf_image_total_size: formatBytes(totalImageBytes),
+              reference_example_image_total_bytes: referenceImageTotalBytes,
+              reference_example_image_total_size: formatBytes(
+                referenceImageTotalBytes,
+              ),
+            },
+            model_request_duration_ms: modelRequestDurationMs,
+            model_request_duration_seconds:
+              typeof modelRequestDurationMs === 'number'
+                ? Number((modelRequestDurationMs / 1000).toFixed(2))
+                : null,
+            total_duration_ms: requestElapsedMs,
+            total_duration_seconds: Number(
+              (requestElapsedMs / 1000).toFixed(2),
+            ),
+          },
+        )}`,
+      });
 
       return result;
     } catch (error) {
@@ -3316,24 +3366,17 @@ export async function fillSlotsFromVisionPages(params: {
   const llmConcurrency = getDirectVisionPagesLlmConcurrency();
   const referenceExamplePages = params.referenceExamplePages ?? [];
   const referenceExamplePageCount = referenceExamplePages.length;
-  const alignmentsByReferencePageNumber =
-    await alignReferencePagesToVisionPages({
-      documentName: params.pdfFileName,
-      referenceExamplePages,
+  const slotFillJobs: DirectVisionSlotFillJob[] = [
+    {
+      slots: params.slots,
       visionPages: validVisionPages,
-      onTrace: params.onTrace,
-      processStartedAtMs: params.processStartedAtMs,
-      processHardTimeoutMs: params.processHardTimeoutMs,
-    });
-  const slotFillJobs = buildDirectVisionSlotFillJobs({
-    slots: params.slots,
-    visionPages: validVisionPages,
-    referenceExamplePages,
-    alignmentsByReferencePageNumber,
-  });
+      referenceExamplePages,
+      requestLabel: 'visual slot fill batch 1/1',
+    },
+  ];
   const startedMessage =
     `[PDF Fill][DirectVision] Direct visual slot fill started for ${params.pdfFileName} ` +
-    `(vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, aligned reference pages: ${alignmentsByReferencePageNumber.size}, jobs: ${slotFillJobs.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
+    `(mode: single_prompt, vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, jobs: ${slotFillJobs.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
   console.info(startedMessage);
   await params.onTrace?.({ message: startedMessage });
 
