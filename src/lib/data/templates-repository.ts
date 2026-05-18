@@ -312,6 +312,8 @@ async function cleanupTemplateExtractionPages(input: {
   }
 
   const temporaryPrefixes = [
+    `${input.user.id}/template-extraction-pages-temp/task/${extractionTaskId}/`,
+    `${input.user.id}/template-extraction-pages-temp/${extractionTaskId}/`,
     `${input.user.id}/template-extraction-pages/task/${extractionTaskId}/`,
     `${input.user.id}/template-extraction-pages/${extractionTaskId}/`,
   ];
