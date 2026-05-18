@@ -81,7 +81,7 @@ declare global {
         slot_definitions: Array<{
           slot_key: string;
           slot_name: string;
-          slot_meaning: string;
+          slot_source?: string;
         }>;
         content: string;
       };
@@ -1953,7 +1953,7 @@ export function BatchGenerateModal({
             slot_definitions: Array<{
               slot_key: string;
               slot_name: string;
-              slot_meaning: string;
+              slot_source?: string;
             }>;
             content: string;
           };

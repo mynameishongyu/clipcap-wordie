@@ -777,8 +777,6 @@ function buildSlotDefinitionForPrompt(
     slot_name: slot.field_category,
     slot_source:
       slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
-    slot_meaning:
-      slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
     reference_example_pdf_evidence: shouldIncludeReferenceEvidence
       ? buildSlotReferencePromptData(slot)
       : null,
