@@ -357,6 +357,7 @@ export async function callGeminiFileApiChatCompletion(params: {
   let cleanupResults: Awaited<ReturnType<typeof cleanupGeminiFiles>> = [];
 
   try {
+    const uploadStartedAt = Date.now();
     await params.onTrace?.({
       message: `[Gemini File API][UploadStart] ${JSON.stringify({
         request_label: requestLabel,
@@ -376,10 +377,13 @@ export async function callGeminiFileApiChatCompletion(params: {
           signal: params.signal,
         }),
     );
+    const uploadDurationMs = Date.now() - uploadStartedAt;
     await params.onTrace?.({
       message: `[Gemini File API][UploadComplete] ${JSON.stringify({
         request_label: requestLabel,
         uploaded_file_count: uploadedFiles.length,
+        upload_duration_ms: uploadDurationMs,
+        upload_duration_seconds: Number((uploadDurationMs / 1000).toFixed(2)),
         uploaded_files: uploadedFiles.map((file) => ({
           name: file.name ?? null,
           uri: file.uri,

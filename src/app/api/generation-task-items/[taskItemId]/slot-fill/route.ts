@@ -130,6 +130,46 @@ type ReferenceSlotBox = {
   exampleSlotValue: string;
 };
 
+function getReferenceBboxGroupKey(bbox: ReferenceSlotBox['bbox']) {
+  return [bbox.x, bbox.y, bbox.width, bbox.height]
+    .map((value) => Number(value).toFixed(6))
+    .join(':');
+}
+
+function groupReferenceSlotBoxesByBbox(slotBoxes: ReferenceSlotBox[]) {
+  const groups = new Map<
+    string,
+    {
+      bbox: ReferenceSlotBox['bbox'];
+      slotBoxes: ReferenceSlotBox[];
+    }
+  >();
+
+  for (const slotBox of slotBoxes) {
+    const key = getReferenceBboxGroupKey(slotBox.bbox);
+    const group =
+      groups.get(key) ??
+      ({
+        bbox: slotBox.bbox,
+        slotBoxes: [],
+      } satisfies {
+        bbox: ReferenceSlotBox['bbox'];
+        slotBoxes: ReferenceSlotBox[];
+      });
+
+    group.slotBoxes.push(slotBox);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()];
+}
+
+function countDuplicateReferenceBboxGroups(slotBoxes: ReferenceSlotBox[]) {
+  return groupReferenceSlotBoxesByBbox(slotBoxes).filter(
+    (group) => group.slotBoxes.length > 1,
+  ).length;
+}
+
 async function buildAnnotatedReferencePageDataUrl(params: {
   imageBuffer: Buffer;
   slotBoxes: ReferenceSlotBox[];
@@ -151,16 +191,17 @@ async function buildAnnotatedReferencePageDataUrl(params: {
   context.font = `${labelFontSize}px ${getSlotReferenceLabelFontFamily()}`;
   context.textBaseline = 'top';
 
-  params.slotBoxes.forEach((slotBox) => {
-    const left = Math.max(0, Math.min(width, slotBox.bbox.x * width));
-    const top = Math.max(0, Math.min(height, slotBox.bbox.y * height));
+  groupReferenceSlotBoxesByBbox(params.slotBoxes).forEach((bboxGroup) => {
+    const { bbox } = bboxGroup;
+    const left = Math.max(0, Math.min(width, bbox.x * width));
+    const top = Math.max(0, Math.min(height, bbox.y * height));
     const boxWidth = Math.max(
       1,
-      Math.min(width - left, slotBox.bbox.width * width),
+      Math.min(width - left, bbox.width * width),
     );
     const boxHeight = Math.max(
       1,
-      Math.min(height - top, slotBox.bbox.height * height),
+      Math.min(height - top, bbox.height * height),
     );
 
     context.fillStyle = 'rgba(255, 153, 0, 0.08)';
@@ -169,10 +210,13 @@ async function buildAnnotatedReferencePageDataUrl(params: {
     context.lineWidth = lineWidth;
     context.strokeRect(left, top, boxWidth, boxHeight);
 
-    const label = slotBox.slotKey;
-    const measured = context.measureText(label);
-    const labelWidth = Math.ceil(measured.width) + labelPaddingX * 2;
-    const labelHeight = labelFontSize + labelPaddingY * 2;
+    const labels = bboxGroup.slotBoxes.map((slotBox) => slotBox.slotKey);
+    const measuredWidth = Math.max(
+      ...labels.map((label) => context.measureText(label).width),
+    );
+    const labelLineHeight = Math.ceil(labelFontSize * 1.14);
+    const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
+    const labelHeight = labels.length * labelLineHeight + labelPaddingY * 2;
     const labelLeft = Math.max(
       0,
       Math.min(width - labelWidth, left - lineWidth),
@@ -185,11 +229,13 @@ async function buildAnnotatedReferencePageDataUrl(params: {
     context.fillStyle = 'rgba(255, 153, 0, 0.92)';
     context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
     context.fillStyle = '#111111';
-    context.fillText(
-      label,
-      labelLeft + labelPaddingX,
-      labelTop + labelPaddingY,
-    );
+    labels.forEach((label, labelIndex) => {
+      context.fillText(
+        label,
+        labelLeft + labelPaddingX,
+        labelTop + labelPaddingY + labelIndex * labelLineHeight,
+      );
+    });
   });
 
   const annotatedBuffer = canvas.toBuffer('image/png');
@@ -308,10 +354,13 @@ async function loadReferenceExamplePagesWithBbox(params: {
           templateId: params.templateId,
           pageNumber: asset.pageNumber,
         });
+        const duplicateBboxGroupCount = countDuplicateReferenceBboxGroups(
+          asset.slotBoxes,
+        );
         let cachedAnnotatedImageDataUrl: string | undefined;
         let cachedAnnotatedPreviewUrl: string | undefined;
 
-        if (params.templateId) {
+        if (params.templateId && duplicateBboxGroupCount === 0) {
           const { data: cachedBlob } = await params.admin.storage
             .from('generation-pdfs')
             .download(annotatedStoragePath);
@@ -351,6 +400,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
                 pageNumber: asset.pageNumber,
                 annotatedStoragePath,
                 slotCount: asset.slotBoxes.length,
+                duplicateBboxGroupCount,
               },
             );
 
@@ -379,6 +429,16 @@ async function loadReferenceExamplePagesWithBbox(params: {
               downloadFailure: null,
             };
           }
+        } else if (params.templateId && duplicateBboxGroupCount > 0) {
+          console.info(
+            '[PDF Fill][ReferenceExample] Regenerating annotated reference page image because multiple slot keys share bbox',
+            {
+              pageNumber: asset.pageNumber,
+              annotatedStoragePath,
+              slotCount: asset.slotBoxes.length,
+              duplicateBboxGroupCount,
+            },
+          );
         }
 
         const { data: fileBlob, error } = await params.admin.storage
@@ -449,6 +509,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
                 pageNumber: asset.pageNumber,
                 annotatedStoragePath: uploadedAnnotatedStoragePath,
                 slotCount: asset.slotBoxes.length,
+                duplicateBboxGroupCount,
               },
             );
           }
