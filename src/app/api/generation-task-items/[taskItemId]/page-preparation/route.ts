@@ -273,14 +273,16 @@ function buildPageFilterPromptPayload(input: {
       'A candidate page that has a title or content like contract signing page / acknowledgement page / confirmation page, plus real handwriting signatures, red seals/stamps, signing date, ID number, borrower/guarantor/bank representative fields, or confirmation text, must be classified as keep. If it visually resembles a contract tail page but contains these filled signature or stamp values, use keep. If uncertain, use review, never drop.',
     page_numbers: input.pageNumbers,
     output_schema: {
-      pages: input.pageNumbers.map((pageNumber) => ({
-        page_number: pageNumber,
-        decision: 'keep | drop | review',
-        page_type:
-          'id_card | agreement | signature_page | table | system_screenshot | vehicle_info | terms_page | dense_terms_sparse_handwriting | blank | other',
-        reason: 'short reason in Chinese',
-        confidence: 0.9,
-      })),
+      pages: [
+        {
+          page_number: 'one of page_numbers',
+          decision: 'keep | drop | review',
+          page_type:
+            'id_card | agreement | signature_page | table | system_screenshot | vehicle_info | terms_page | dense_terms_sparse_handwriting | blank | other',
+          reason: 'short reason in Chinese',
+          confidence: 0.9,
+        },
+      ],
     },
     strict_requirements: [
       'Return compact JSON only.',

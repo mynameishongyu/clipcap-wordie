@@ -95,6 +95,13 @@ export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
   }>;
 }
 
+function hasUsableVisionPageImage(page: PdfVisionPageInput) {
+  return (
+    page.image_data_url.startsWith('data:image/') ||
+    Boolean(page.gemini_file?.uri)
+  );
+}
+
 interface ModelMatch {
   value?: string;
   snippet?: string;
@@ -3294,9 +3301,7 @@ export async function fillSlotsFromVisionPages(params: {
   }) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
-  const validVisionPages = params.visionPages.filter((page) =>
-    page.image_data_url.startsWith('data:image/'),
-  );
+  const validVisionPages = params.visionPages.filter(hasUsableVisionPageImage);
 
   if (validVisionPages.length === 0) {
     throw new Error('当前任务缺少可用于视觉回填的新 PDF 页面图片。');
