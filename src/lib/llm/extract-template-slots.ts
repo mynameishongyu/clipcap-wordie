@@ -60,7 +60,6 @@ ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}
   "extraction_result": [
     {
       "paragraph_index": 0,
-      "paragraph_title": "段落标题",
       "items": [
         {
           "sequence": 1,
@@ -404,7 +403,6 @@ async function requestTextLlmJson(input: {
   paragraphIndex: number;
   paragraphDisplayIndex: number;
   totalParagraphs: number;
-  paragraphTitle: string;
   paragraphCharCount: number;
   concurrency: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
@@ -470,7 +468,6 @@ async function requestTextLlmJson(input: {
             source_paragraph_index: input.paragraphIndex,
             paragraph_display_index: input.paragraphDisplayIndex,
             total_paragraphs: input.totalParagraphs,
-            paragraph_title: input.paragraphTitle,
             paragraph_char_count: input.paragraphCharCount,
             attempt: attempt + 1,
             max_attempts: maxRetries + 1,
@@ -521,7 +518,6 @@ async function requestTextLlmJson(input: {
                     paragraphIndex: input.paragraphIndex,
                     paragraphDisplayIndex: input.paragraphDisplayIndex,
                     totalParagraphs: input.totalParagraphs,
-                    paragraphTitle: input.paragraphTitle,
                     retryDelayMs,
                   },
                 ),
@@ -557,7 +553,6 @@ async function requestTextLlmJson(input: {
             source_paragraph_index: input.paragraphIndex,
             paragraph_display_index: input.paragraphDisplayIndex,
             total_paragraphs: input.totalParagraphs,
-            paragraph_title: input.paragraphTitle,
             raw_response: rawContent,
           }),
       });
@@ -587,7 +582,6 @@ async function requestTextLlmJson(input: {
               paragraphIndex: input.paragraphIndex,
               paragraphDisplayIndex: input.paragraphDisplayIndex,
               totalParagraphs: input.totalParagraphs,
-              paragraphTitle: input.paragraphTitle,
             }),
           ),
       });
@@ -697,7 +691,6 @@ async function extractSlotsForParagraph(params: {
       ? `额外抽取要求：在基础抽取内容之外，还需要额外抽取以下内容：${params.prompt}`
       : '额外抽取要求：无，按基础抽取内容执行。',
     `当前段落序号：${params.paragraph.paragraph_index}`,
-    `当前段落标题：${params.paragraph.paragraph_title}`,
     '请只从下面这个段落中抽取槽位。',
     MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE,
     params.paragraph.paragraph_text,
@@ -709,7 +702,6 @@ async function extractSlotsForParagraph(params: {
     paragraphIndex: params.paragraph.paragraph_index,
     paragraphDisplayIndex: params.paragraphDisplayIndex,
     totalParagraphs: params.totalParagraphs,
-    paragraphTitle: params.paragraph.paragraph_title,
     paragraphCharCount: countMeaningfulCharacters(
       params.paragraph.paragraph_text,
     ),
@@ -778,7 +770,6 @@ async function extractSlotsForParagraphBatch(params: {
     strict_requirement: `Process each paragraph independently. Return JSON only. Return extraction_result as an array with one entry per paragraph that has extracted items. Copy paragraph_index exactly from the input paragraph. ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}`,
     paragraphs: params.paragraphs.map((paragraph) => ({
       paragraph_index: paragraph.paragraph_index,
-      paragraph_title: paragraph.paragraph_title,
       paragraph_text: paragraph.paragraph_text,
     })),
     output_schema: {
@@ -787,7 +778,6 @@ async function extractSlotsForParagraphBatch(params: {
       },
       extraction_result: params.paragraphs.map((paragraph) => ({
         paragraph_index: paragraph.paragraph_index,
-        paragraph_title: paragraph.paragraph_title,
         items: [
           {
             sequence: 1,
@@ -808,10 +798,6 @@ async function extractSlotsForParagraphBatch(params: {
     paragraphIndex: params.paragraphs[0]?.paragraph_index ?? 0,
     paragraphDisplayIndex: params.firstParagraphDisplayIndex,
     totalParagraphs: params.totalParagraphs,
-    paragraphTitle:
-      params.paragraphs.length === 1
-        ? (params.paragraphs[0]?.paragraph_title ?? '')
-        : `${params.paragraphs.length} paragraph batch`,
     paragraphCharCount: params.paragraphs.reduce(
       (sum, paragraph) =>
         sum + countMeaningfulCharacters(paragraph.paragraph_text),

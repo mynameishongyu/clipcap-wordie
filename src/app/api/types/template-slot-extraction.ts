@@ -11,7 +11,7 @@ export const extractionItemSchema = z.object({
 
 export const extractionParagraphSchema = z.object({
   paragraph_index: z.number().int().nonnegative().optional(),
-  paragraph_title: z.string(),
+  paragraph_title: z.string().optional().default(''),
   items: z.array(extractionItemSchema),
 });
 

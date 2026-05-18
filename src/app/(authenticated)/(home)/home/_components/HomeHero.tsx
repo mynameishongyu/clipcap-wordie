@@ -271,7 +271,6 @@ function formatTextLlmPromptPayload(payload: Record<string, unknown>) {
     `paragraph: ${String(paragraphDisplayNumber ?? '?')}/${String(
       payload.total_paragraphs ?? '?',
     )}`,
-    `paragraph_title: ${String(payload.paragraph_title ?? '')}`,
   ].join('\n');
   const messageText = messages
     .map((message, index) => {
