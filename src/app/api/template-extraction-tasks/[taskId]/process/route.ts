@@ -5,12 +5,16 @@ import {
   logEvent,
 } from '@/src/lib/logging/log-event';
 import {
+  collectGeminiFilesFromVisionPages,
   loadVisionPagesFromStoredAssets,
   type PdfPageImageAsset,
+  uploadStoredPageImagesToGeminiFileApi,
 } from '@/src/lib/generation-task-items/runtime';
+import { cleanupGeminiUploadedFiles } from '@/src/lib/llm/gemini-file-api';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
 import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
+import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
@@ -120,11 +124,27 @@ function normalizePdfVisionPageAssets(value: unknown) {
 async function resolvePdfVisionPages(input: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
   sourcePdfVisionPages: unknown;
+  taskId: string;
+  pdfFileName: string | null;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const storedAssets = normalizePdfVisionPageAssets(input.sourcePdfVisionPages);
 
   if (storedAssets.length > 0) {
+    const llmConfig = getLlmRuntimeConfig('vision');
+
+    if (llmConfig.provider === 'gemini') {
+      return uploadStoredPageImagesToGeminiFileApi({
+        admin: input.admin,
+        pageImageAssets: storedAssets,
+        config: llmConfig,
+        requestLabel: `template pdf evidence ${input.taskId} ${
+          input.pdfFileName ?? 'unknown-pdf'
+        }`,
+        onTrace: input.onTrace,
+      });
+    }
+
     await input.onTrace?.({
       message: `[Template PDF Evidence] Downloading ${storedAssets.length} page image(s) from Supabase Storage.`,
     });
@@ -136,6 +156,54 @@ async function resolvePdfVisionPages(input: {
   }
 
   return normalizePdfVisionPages(input.sourcePdfVisionPages);
+}
+
+async function cleanupTemplatePdfEvidenceGeminiFiles(input: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskId: string;
+  visionPages: PdfVisionPageInput[];
+}) {
+  const files = collectGeminiFilesFromVisionPages(input.visionPages);
+
+  if (files.length === 0) {
+    return;
+  }
+
+  const llmConfig = getLlmRuntimeConfig('vision');
+
+  if (llmConfig.provider !== 'gemini') {
+    return;
+  }
+
+  await appendProcessingTrace(
+    input.admin,
+    input.taskId,
+    `[Gemini File API][TemplatePdfEvidenceCleanupStart] ${JSON.stringify({
+      uploaded_file_count: files.length,
+    })}`,
+  );
+  const cleanupResults = await cleanupGeminiUploadedFiles({
+    config: llmConfig,
+    files,
+  });
+  await appendProcessingTrace(
+    input.admin,
+    input.taskId,
+    `[Gemini File API][TemplatePdfEvidenceCleanupComplete] ${JSON.stringify({
+      cleanup_results: cleanupResults.map((result) =>
+        result.status === 'fulfilled'
+          ? result.value
+          : {
+              deleted: false,
+              reason: 'cleanup_rejected',
+              error:
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : String(result.reason),
+            },
+      ),
+    })}`,
+  );
 }
 
 export async function POST(
@@ -313,22 +381,36 @@ export async function POST(
     const pdfVisionPages = await resolvePdfVisionPages({
       admin: routeAdmin,
       sourcePdfVisionPages: task.source_pdf_vision_pages,
+      taskId: task.id,
+      pdfFileName: task.source_pdf_name,
       onTrace: async (entry) => {
         await appendProcessingTrace(routeAdmin, task.id, entry.message);
       },
     });
     const pdfMappingStartedAt = Date.now();
-    const pdfEvidence =
-      task.source_pdf_name && pdfVisionPages.length > 0
-        ? await buildTemplatePdfEvidence({
-            pdfFileName: task.source_pdf_name,
-            extractionResult: result.extraction_result,
-            visionPages: pdfVisionPages,
-            onTrace: async (entry) => {
-              await appendProcessingTrace(routeAdmin, task.id, entry.message);
-            },
-          })
-        : null;
+    let pdfEvidence = null as Awaited<
+      ReturnType<typeof buildTemplatePdfEvidence>
+    > | null;
+
+    try {
+      pdfEvidence =
+        task.source_pdf_name && pdfVisionPages.length > 0
+          ? await buildTemplatePdfEvidence({
+              pdfFileName: task.source_pdf_name,
+              extractionResult: result.extraction_result,
+              visionPages: pdfVisionPages,
+              onTrace: async (entry) => {
+                await appendProcessingTrace(routeAdmin, task.id, entry.message);
+              },
+            })
+          : null;
+    } finally {
+      await cleanupTemplatePdfEvidenceGeminiFiles({
+        admin: routeAdmin,
+        taskId: task.id,
+        visionPages: pdfVisionPages,
+      });
+    }
     const pdfMappingFinishedAt = Date.now();
     await appendProcessingTrace(
       routeAdmin,

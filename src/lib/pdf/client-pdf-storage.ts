@@ -7,8 +7,8 @@ import type {
 } from '@/src/lib/pdf/client-pdf';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
-const DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY = 3;
-const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
+const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
+const MAX_PDF_STORAGE_UPLOAD_CONCURRENCY = 8;
 
 export interface StoredPdfVisionPageAsset {
   pageNumber: number;
@@ -139,17 +139,17 @@ function getPdfVisionPageImageExtension(
   return 'img';
 }
 
-function getPdfVisionUploadConcurrency() {
+function getPdfStorageUploadConcurrency() {
   const parsedValue = Number(
-    process.env.NEXT_PUBLIC_PDF_VISION_UPLOAD_CONCURRENCY,
+    process.env.NEXT_PUBLIC_PDF_STORAGE_UPLOAD_CONCURRENCY,
   );
 
   if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-    return DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY;
+    return DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY;
   }
 
   return Math.min(
-    MAX_PDF_VISION_UPLOAD_CONCURRENCY,
+    MAX_PDF_STORAGE_UPLOAD_CONCURRENCY,
     Math.max(1, Math.floor(parsedValue)),
   );
 }
@@ -201,7 +201,7 @@ export async function uploadPdfVisionPagesToSupabase(input: {
   const totalPageCount = input.visionPages.length;
   const uploadedAssets: Array<StoredPdfVisionPageAsset | undefined> =
     Array.from({ length: totalPageCount });
-  const uploadConcurrency = getPdfVisionUploadConcurrency();
+  const uploadConcurrency = getPdfStorageUploadConcurrency();
 
   input.onLog?.('[Template Extract][PDF Evidence][Storage] Upload started.', {
     pdfFileName: input.pdfFileName,

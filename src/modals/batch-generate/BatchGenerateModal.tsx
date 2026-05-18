@@ -383,6 +383,41 @@ function formatReferenceImageAttachmentList(
   return lines.length > 0 ? lines.join('\n').trimEnd() : null;
 }
 
+function formatPageFilterDropExampleAttachmentList(
+  rawDropExamples: unknown,
+): string | null {
+  if (!Array.isArray(rawDropExamples) || rawDropExamples.length === 0) {
+    return null;
+  }
+
+  const lines = rawDropExamples.flatMap((example, index) => {
+    if (!example || typeof example !== 'object') {
+      return [];
+    }
+
+    const dropExample = example as {
+      file_name?: unknown;
+      image_size?: unknown;
+    };
+    const fileName =
+      typeof dropExample.file_name === 'string'
+        ? dropExample.file_name
+        : `drop-example-${index + 1}`;
+    const imageSize =
+      typeof dropExample.image_size === 'string'
+        ? `，大小 ${dropExample.image_size}`
+        : '';
+
+    return [
+      `Drop example ${index + 1}: ${fileName}`,
+      `[图片：过滤样例 ${index + 1}${imageSize}]`,
+      '',
+    ];
+  });
+
+  return lines.length > 0 ? lines.join('\n').trimEnd() : null;
+}
+
 function dataUrlToObjectUrl(dataUrl: string) {
   const [header, base64Payload] = dataUrl.split(',', 2);
 
@@ -1178,6 +1213,66 @@ export function BatchGenerateModal({
             `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM prompt (${label})`,
             parsedPrompt,
           );
+
+          const userPromptContent =
+            Array.isArray(parsedPrompt.messages) &&
+            parsedPrompt.messages.find(
+              (message) =>
+                !!message &&
+                typeof message === 'object' &&
+                (message as { role?: unknown }).role === 'user',
+            )
+              ? (
+                  parsedPrompt.messages.find(
+                    (message) =>
+                      !!message &&
+                      typeof message === 'object' &&
+                      (message as { role?: unknown }).role === 'user',
+                  ) as { content?: unknown }
+                ).content
+              : null;
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM user prompt content (${label})`,
+            {
+              route: parsedPrompt.route,
+              model: parsedPrompt.model,
+              provider: parsedPrompt.provider,
+              requestLabel: parsedPrompt.request_label,
+              imagePayload: parsedPrompt.image_payload,
+              imagePlaceholders: parsedPrompt.image_placeholders,
+              dropExamples: parsedPrompt.drop_examples,
+              prompt: userPromptContent,
+            },
+          );
+
+          const imageAttachmentList = formatVisionImageAttachmentList(
+            parsedPrompt.image_placeholders,
+          );
+
+          if (imageAttachmentList) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] PDF page filter candidate image attachments (${label})`,
+              imageAttachmentList,
+            );
+          }
+
+          const dropExampleAttachmentList =
+            formatPageFilterDropExampleAttachmentList(
+              parsedPrompt.drop_examples,
+            );
+
+          if (dropExampleAttachmentList) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] PDF page filter drop example attachments (${label})`,
+              dropExampleAttachmentList,
+            );
+          }
+
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM user prompt JSON (${label})`,
+            JSON.stringify(userPromptContent, null, 2),
+          );
           return;
         }
 
@@ -1216,6 +1311,20 @@ export function BatchGenerateModal({
           console.log(
             `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM raw result (${label})`,
             parsedResult,
+          );
+
+          const rawResponse = parsedResult.raw_response;
+
+          if (typeof rawResponse === 'string' && rawResponse.trim()) {
+            logConsoleTextChunks(
+              `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM raw model output (${label})`,
+              rawResponse,
+            );
+          }
+
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM parsed result JSON (${label})`,
+            JSON.stringify(parsedResult.parsed_results ?? parsedResult, null, 2),
           );
           return;
         }

@@ -5,6 +5,13 @@ import type {
   PdfPageInput,
   PdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
+import {
+  getGeminiFilePipelineConcurrency,
+  uploadGeminiFileBytes,
+  type GeminiFileApiDispatcher,
+  type UploadedGeminiFile,
+} from '@/src/lib/llm/gemini-file-api';
+import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 
 export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
@@ -210,7 +217,7 @@ function getMimeTypeFromStoragePath(storagePath: string) {
 export async function loadVisionPagesFromStoredAssets(params: {
   admin: AdminClient;
   pageImageAssets: PdfPageImageAsset[];
-}) {
+}): Promise<PdfVisionPageInput[]> {
   if (params.pageImageAssets.length === 0) {
     return [];
   }
@@ -240,6 +247,142 @@ export async function loadVisionPagesFromStoredAssets(params: {
       } satisfies PdfVisionPageInput;
     }),
   );
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length || 1);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await worker(items[currentIndex]!, currentIndex);
+      }
+    }),
+  );
+
+  return results;
+}
+
+export async function uploadStoredPageImagesToGeminiFileApi(params: {
+  admin: AdminClient;
+  pageImageAssets: PdfPageImageAsset[];
+  config: LlmRuntimeConfig;
+  requestLabel: string;
+  dispatcher?: GeminiFileApiDispatcher;
+  signal?: AbortSignal;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}): Promise<PdfVisionPageInput[]> {
+  if (params.pageImageAssets.length === 0) {
+    return [] as PdfVisionPageInput[];
+  }
+
+  const pipelineConcurrency = getGeminiFilePipelineConcurrency();
+  const startedAt = Date.now();
+
+  await params.onTrace?.({
+    message: `[Gemini File API][StoragePipelineStart] ${JSON.stringify({
+      request_label: params.requestLabel,
+      image_count: params.pageImageAssets.length,
+      pipeline_concurrency: pipelineConcurrency,
+    })}`,
+  });
+
+  const pages = await runWithConcurrency(
+    params.pageImageAssets,
+    pipelineConcurrency,
+    async (asset, index) => {
+      const downloadStartedAt = Date.now();
+      const { data: fileBlob, error } = await params.admin.storage
+        .from('generation-pdfs')
+        .download(asset.storage_path);
+
+      if (error || !fileBlob) {
+        const errorMessage = error?.message ?? 'Missing storage object';
+
+        throw new Error(
+          `[Gemini File API][StoragePipelineDownloadFailed] Unable to download uploaded PDF page image: storage_path=${asset.storage_path}, uploaded_page=${asset.uploaded_page_number}, original_page=${asset.original_page_number}, error=${errorMessage}`,
+          error ? { cause: error } : undefined,
+        );
+      }
+
+      const buffer = Buffer.from(await fileBlob.arrayBuffer());
+      const mimeType =
+        fileBlob.type || getMimeTypeFromStoragePath(asset.storage_path);
+      const downloadDurationMs = Date.now() - downloadStartedAt;
+      const uploadStartedAt = Date.now();
+      const geminiFile = await uploadGeminiFileBytes({
+        config: params.config,
+        buffer,
+        mimeType,
+        displayName: `${params.requestLabel}-page-${asset.uploaded_page_number}`,
+        dispatcher: params.dispatcher,
+        signal: params.signal,
+      });
+      const uploadDurationMs = Date.now() - uploadStartedAt;
+
+      await params.onTrace?.({
+        message: `[Gemini File API][StoragePipelinePageComplete] ${JSON.stringify({
+          request_label: params.requestLabel,
+          sequence_index: index + 1,
+          uploaded_page_number: asset.uploaded_page_number,
+          original_page_number: asset.original_page_number,
+          storage_path: asset.storage_path,
+          mime_type: mimeType,
+          image_size_bytes: buffer.byteLength,
+          gemini_file_name: geminiFile.name ?? null,
+          gemini_file_uri: geminiFile.uri,
+          download_duration_ms: downloadDurationMs,
+          upload_duration_ms: uploadDurationMs,
+        })}`,
+      });
+
+      return {
+        page_number: asset.uploaded_page_number,
+        image_data_url: '',
+        original_page_number: asset.original_page_number,
+        gemini_file: geminiFile,
+      } satisfies PdfVisionPageInput;
+    },
+  );
+
+  const durationMs = Date.now() - startedAt;
+
+  await params.onTrace?.({
+    message: `[Gemini File API][StoragePipelineComplete] ${JSON.stringify({
+      request_label: params.requestLabel,
+      image_count: pages.length,
+      duration_ms: durationMs,
+      duration_seconds: Number((durationMs / 1000).toFixed(2)),
+    })}`,
+  });
+
+  return pages;
+}
+
+export function collectGeminiFilesFromVisionPages(
+  pages: PdfVisionPageInput[],
+) {
+  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+
+  pages.forEach((page) => {
+    const file = page.gemini_file;
+
+    if (!file?.uri) {
+      return;
+    }
+
+    filesByNameOrUri.set(file.name ?? file.uri, file);
+  });
+
+  return Array.from(filesByNameOrUri.values());
 }
 
 export async function recalculateTaskSummary(admin: AdminClient, taskId: string) {

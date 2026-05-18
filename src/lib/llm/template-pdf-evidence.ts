@@ -55,6 +55,10 @@ interface VisionLocateModelResponse {
 
 type VisionMessageContentPart =
   | { type: 'image_url'; image_url: { url: string } }
+  | {
+      type: 'gemini_file';
+      gemini_file: NonNullable<PdfVisionPageInput['gemini_file']>;
+    }
   | { type: 'text'; text: string };
 
 const visionLocateFetchDispatcher = new Agent({
@@ -179,6 +183,19 @@ function summarizeVisionMessageContentForTrace(
   return content.map((part) => {
     if (part.type === 'text') {
       return part;
+    }
+
+    if (part.type === 'gemini_file') {
+      return {
+        type: 'gemini_file',
+        gemini_file: {
+          uri: part.gemini_file.uri,
+          name: part.gemini_file.name ?? null,
+          mime_type: part.gemini_file.mimeType,
+          size_bytes: part.gemini_file.sizeBytes,
+          display_name: part.gemini_file.displayName,
+        },
+      };
     }
 
     return {
@@ -1127,12 +1144,14 @@ async function locateSlotsInPageBatch(input: {
 
   const pageNumbers = input.pageBatch.map((page) => page.page_number);
   const pageSizeSummary = input.pageBatch.map((page) => {
-    const imageBytes = estimateDataUrlBytes(page.image_data_url);
+    const imageBytes =
+      page.gemini_file?.sizeBytes ?? estimateDataUrlBytes(page.image_data_url);
 
     return {
       label: `Page ${page.page_number}`,
       page_number: page.page_number,
-      has_image_data_url: true,
+      has_image_data_url: !page.gemini_file,
+      has_gemini_file: Boolean(page.gemini_file),
       image_bytes: imageBytes,
       image_size: formatBytes(imageBytes),
     };
@@ -1200,12 +1219,19 @@ async function locateSlotsInPageBatch(input: {
         type: 'text',
         text: `Page ${page.page_number}`,
       });
-      content.push({
-        type: 'image_url',
-        image_url: {
-          url: page.image_data_url,
-        },
-      });
+      if (page.gemini_file) {
+        content.push({
+          type: 'gemini_file',
+          gemini_file: page.gemini_file,
+        });
+      } else {
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: page.image_data_url,
+          },
+        });
+      }
     });
 
     const requestBody = buildChatCompletionBody(llmConfig, {

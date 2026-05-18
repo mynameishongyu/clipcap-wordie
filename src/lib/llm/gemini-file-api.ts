@@ -3,6 +3,7 @@ import { getOptionalEnv } from '@/src/lib/llm/env';
 import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
+export type GeminiFileApiDispatcher = UndiciFetchInit['dispatcher'];
 
 export type GeminiFileApiMessagePart =
   | { type: 'text'; text: string }
@@ -35,20 +36,20 @@ export interface UploadedGeminiFile {
   displayName: string;
 }
 
-const DEFAULT_GEMINI_FILE_UPLOAD_CONCURRENCY = 1;
-const MAX_GEMINI_FILE_UPLOAD_CONCURRENCY = 20;
+const DEFAULT_GEMINI_FILE_PIPELINE_CONCURRENCY = 2;
+const MAX_GEMINI_FILE_PIPELINE_CONCURRENCY = 20;
 
-function getGeminiFileUploadConcurrency() {
-  const rawValue = getOptionalEnv('NEXT_PUBLIC_PDF_VISION_UPLOAD_CONCURRENCY');
+export function getGeminiFilePipelineConcurrency() {
+  const rawValue = getOptionalEnv('PDF_GEMINI_FILE_PIPELINE_CONCURRENCY');
   const parsedValue = rawValue
     ? Number(rawValue)
-    : DEFAULT_GEMINI_FILE_UPLOAD_CONCURRENCY;
+    : DEFAULT_GEMINI_FILE_PIPELINE_CONCURRENCY;
 
   if (!Number.isInteger(parsedValue) || parsedValue < 1) {
-    return DEFAULT_GEMINI_FILE_UPLOAD_CONCURRENCY;
+    return DEFAULT_GEMINI_FILE_PIPELINE_CONCURRENCY;
   }
 
-  return Math.min(MAX_GEMINI_FILE_UPLOAD_CONCURRENCY, parsedValue);
+  return Math.min(MAX_GEMINI_FILE_PIPELINE_CONCURRENCY, parsedValue);
 }
 
 async function runWithConcurrency<T, R>(
@@ -100,14 +101,14 @@ function parseDataUrl(dataUrl: string) {
   };
 }
 
-async function uploadGeminiFile(params: {
+async function uploadGeminiFileBuffer(params: {
   config: LlmRuntimeConfig;
-  dataUrl: string;
+  buffer: Buffer;
+  mimeType: string;
   displayName: string;
   dispatcher?: UndiciFetchInit['dispatcher'];
   signal?: AbortSignal;
 }) {
-  const { mimeType, buffer } = parseDataUrl(params.dataUrl);
   const { uploadBaseUrl } = resolveGeminiApiOrigins(params.config);
   const startUpload = await undiciFetch(`${uploadBaseUrl}/files`, {
     method: 'POST',
@@ -115,8 +116,8 @@ async function uploadGeminiFile(params: {
       'x-goog-api-key': params.config.apiKey,
       'X-Goog-Upload-Protocol': 'resumable',
       'X-Goog-Upload-Command': 'start',
-      'X-Goog-Upload-Header-Content-Length': String(buffer.byteLength),
-      'X-Goog-Upload-Header-Content-Type': mimeType,
+      'X-Goog-Upload-Header-Content-Length': String(params.buffer.byteLength),
+      'X-Goog-Upload-Header-Content-Type': params.mimeType,
       'Content-Type': 'application/json',
     },
     dispatcher: params.dispatcher,
@@ -146,13 +147,13 @@ async function uploadGeminiFile(params: {
   const finishUpload = await undiciFetch(uploadUrl, {
     method: 'POST',
     headers: {
-      'Content-Length': String(buffer.byteLength),
+      'Content-Length': String(params.buffer.byteLength),
       'X-Goog-Upload-Offset': '0',
       'X-Goog-Upload-Command': 'upload, finalize',
     },
     dispatcher: params.dispatcher,
     signal: params.signal,
-    body: buffer,
+    body: params.buffer,
   } as UndiciFetchInit);
 
   if (!finishUpload.ok) {
@@ -182,10 +183,42 @@ async function uploadGeminiFile(params: {
   return {
     uri,
     name: file.name,
-    mimeType: file.mimeType ?? file.mime_type ?? mimeType,
-    sizeBytes: Number(file.sizeBytes ?? file.size_bytes ?? buffer.byteLength),
+    mimeType: file.mimeType ?? file.mime_type ?? params.mimeType,
+    sizeBytes: Number(
+      file.sizeBytes ?? file.size_bytes ?? params.buffer.byteLength,
+    ),
     displayName: params.displayName,
   } satisfies UploadedGeminiFile;
+}
+
+export async function uploadGeminiFileBytes(params: {
+  config: LlmRuntimeConfig;
+  buffer: Buffer;
+  mimeType: string;
+  displayName: string;
+  dispatcher?: UndiciFetchInit['dispatcher'];
+  signal?: AbortSignal;
+}) {
+  return uploadGeminiFileBuffer(params);
+}
+
+async function uploadGeminiFile(params: {
+  config: LlmRuntimeConfig;
+  dataUrl: string;
+  displayName: string;
+  dispatcher?: UndiciFetchInit['dispatcher'];
+  signal?: AbortSignal;
+}) {
+  const { mimeType, buffer } = parseDataUrl(params.dataUrl);
+
+  return uploadGeminiFileBuffer({
+    config: params.config,
+    buffer,
+    mimeType,
+    displayName: params.displayName,
+    dispatcher: params.dispatcher,
+    signal: params.signal,
+  });
 }
 
 async function deleteGeminiFile(params: {
@@ -273,16 +306,16 @@ export async function uploadGeminiFilesToFileApi(params: {
   const uploadStartedAt = Date.now();
 
   await params.onTrace?.({
-    message: `[Gemini File API][UploadStart] ${JSON.stringify({
-      request_label: requestLabel,
-      image_count: params.images.length,
-      upload_concurrency: getGeminiFileUploadConcurrency(),
-    })}`,
-  });
+      message: `[Gemini File API][UploadStart] ${JSON.stringify({
+        request_label: requestLabel,
+        image_count: params.images.length,
+        pipeline_concurrency: getGeminiFilePipelineConcurrency(),
+      })}`,
+    });
 
   const uploadedFiles = await runWithConcurrency(
     params.images,
-    getGeminiFileUploadConcurrency(),
+    getGeminiFilePipelineConcurrency(),
     async (image) =>
       uploadGeminiFile({
         config: params.config,
@@ -449,12 +482,12 @@ export async function callGeminiFileApiChatCompletion(params: {
       message: `[Gemini File API][UploadStart] ${JSON.stringify({
         request_label: requestLabel,
         image_count: imageParts.length,
-        upload_concurrency: getGeminiFileUploadConcurrency(),
+        pipeline_concurrency: getGeminiFilePipelineConcurrency(),
       })}`,
     });
     uploadedFiles = await runWithConcurrency(
       imageParts,
-      getGeminiFileUploadConcurrency(),
+      getGeminiFilePipelineConcurrency(),
       async (imagePart) =>
         uploadGeminiFile({
           config: params.config,
@@ -629,7 +662,7 @@ export function summarizeGeminiFileApiRequestForTrace(params: {
       size_bytes: file.sizeBytes,
       display_name: file.displayName,
     })),
-    upload_concurrency: getGeminiFileUploadConcurrency(),
+    pipeline_concurrency: getGeminiFilePipelineConcurrency(),
     cleanup_results: params.cleanupResults
       ? summarizeCleanupResults(params.cleanupResults)
       : [],

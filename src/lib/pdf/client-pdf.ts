@@ -38,8 +38,8 @@ const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
 const DEFAULT_PDF_VISION_RENDER_CONCURRENCY = 3;
 const MAX_PDF_VISION_RENDER_CONCURRENCY = 8;
-const DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY = 3;
-const MAX_PDF_VISION_UPLOAD_CONCURRENCY = 8;
+const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
+const MAX_PDF_STORAGE_UPLOAD_CONCURRENCY = 8;
 const DEFAULT_PDF_AUTO_ROTATE_PAGES = true;
 const PDF_AUTO_CROP_WHITE_MARGIN = true;
 const PDF_CROP_WHITE_THRESHOLD = 245;
@@ -147,17 +147,17 @@ export function getPdfVisionRenderConcurrency() {
   );
 }
 
-export function getPdfVisionUploadConcurrency() {
+export function getPdfStorageUploadConcurrency() {
   const parsedValue = Number(
-    process.env.NEXT_PUBLIC_PDF_VISION_UPLOAD_CONCURRENCY,
+    process.env.NEXT_PUBLIC_PDF_STORAGE_UPLOAD_CONCURRENCY,
   );
 
   if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-    return DEFAULT_PDF_VISION_UPLOAD_CONCURRENCY;
+    return DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY;
   }
 
   return Math.min(
-    MAX_PDF_VISION_UPLOAD_CONCURRENCY,
+    MAX_PDF_STORAGE_UPLOAD_CONCURRENCY,
     Math.max(1, Math.floor(parsedValue)),
   );
 }

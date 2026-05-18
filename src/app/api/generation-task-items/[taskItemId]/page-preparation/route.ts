@@ -14,18 +14,21 @@ import {
   normalizeSelectedOriginalPageNumbers,
   normalizeVisionPages,
   recalculateTaskSummary,
+  uploadStoredPageImagesToGeminiFileApi,
 } from '@/src/lib/generation-task-items/runtime';
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import {
   callGeminiFileApiChatCompletion,
   cleanupGeminiUploadedFiles,
   summarizeGeminiFileApiRequestForTrace,
+  type UploadedGeminiFile,
 } from '@/src/lib/llm/gemini-file-api';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
+import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
@@ -71,6 +74,21 @@ type PageFilterGeminiFileReference = {
   uploaded_at: string;
   request_label: string;
 };
+
+function toPageFilterGeminiFileReference(
+  file: UploadedGeminiFile,
+  requestLabel: string,
+): PageFilterGeminiFileReference {
+  return {
+    uri: file.uri,
+    name: file.name ?? null,
+    mime_type: file.mimeType,
+    size_bytes: file.sizeBytes,
+    display_name: file.displayName,
+    uploaded_at: new Date().toISOString(),
+    request_label: requestLabel,
+  };
+}
 
 function getPageFilterBatchSize() {
   const rawValue = getOptionalEnv('PDF_FILL_PAGE_FILTER_PAGES_PER_REQUEST');
@@ -280,7 +298,7 @@ function buildPageFilterPromptPayload(input: {
 
 async function classifyVisionPagesForSlotFill(params: {
   documentName: string;
-  visionPages: Awaited<ReturnType<typeof loadVisionPagesFromStoredAssets>>;
+  visionPages: PdfVisionPageInput[];
   dropExamples: PageFilterDropExample[];
   onTrace?: (trace: { message: string }) => Promise<void> | void;
 }) {
@@ -337,6 +355,10 @@ async function classifyVisionPagesForSlotFill(params: {
       const content: Array<
         | { type: 'text'; text: string }
         | { type: 'image_url'; image_url: { url: string } }
+        | {
+            type: 'gemini_file';
+            gemini_file: NonNullable<PdfVisionPageInput['gemini_file']>;
+          }
       > = [
         {
           type: 'text',
@@ -360,10 +382,17 @@ async function classifyVisionPagesForSlotFill(params: {
           type: 'text',
           text: `Uploaded PDF page ${page.page_number}`,
         });
-        content.push({
-          type: 'image_url',
-          image_url: { url: page.image_data_url },
-        });
+        if (page.gemini_file) {
+          content.push({
+            type: 'gemini_file',
+            gemini_file: page.gemini_file,
+          });
+        } else {
+          content.push({
+            type: 'image_url',
+            image_url: { url: page.image_data_url },
+          });
+        }
       });
 
       const dropExampleImageSummaries = params.dropExamples.map(
@@ -380,12 +409,15 @@ async function classifyVisionPagesForSlotFill(params: {
         },
       );
       const candidateImageSummaries = batch.map((page) => {
-        const imageBytes = estimateDataUrlBytes(page.image_data_url);
+        const imageBytes =
+          page.gemini_file?.sizeBytes ??
+          estimateDataUrlBytes(page.image_data_url);
 
         return {
           label: `Uploaded PDF page ${page.page_number}`,
           page_number: page.page_number,
-          has_image_data_url: Boolean(page.image_data_url),
+          has_image_data_url: !page.gemini_file && Boolean(page.image_data_url),
+          has_gemini_file: Boolean(page.gemini_file),
           image_bytes: imageBytes,
           image_size: formatBytes(imageBytes),
         };
@@ -480,27 +512,21 @@ async function classifyVisionPagesForSlotFill(params: {
           0,
           params.dropExamples.length,
         );
-        const candidateFiles = geminiResult.uploadedFiles.slice(
+        const uploadedCandidateFiles = geminiResult.uploadedFiles.slice(
           params.dropExamples.length,
         );
-        const uploadedAt = new Date().toISOString();
 
         batch.forEach((page, index) => {
-          const file = candidateFiles[index];
+          const file = page.gemini_file ?? uploadedCandidateFiles[index];
 
           if (!file?.uri) {
             return;
           }
 
-          geminiFilesByPageNumber.set(page.page_number, {
-            uri: file.uri,
-            name: file.name ?? null,
-            mime_type: file.mimeType,
-            size_bytes: file.sizeBytes,
-            display_name: file.displayName,
-            uploaded_at: uploadedAt,
-            request_label: requestLabel,
-          });
+          geminiFilesByPageNumber.set(
+            page.page_number,
+            toPageFilterGeminiFileReference(file, requestLabel),
+          );
         });
 
         if (dropExampleFiles.length > 0) {
@@ -543,7 +569,14 @@ async function classifyVisionPagesForSlotFill(params: {
               provider: traceConfig.provider,
               request_label: requestLabel,
               request_mode: 'gemini_file_api_generate_content',
-              candidate_gemini_file_count: candidateFiles.length,
+              candidate_gemini_file_count:
+                batch.filter((page) => page.gemini_file).length +
+                uploadedCandidateFiles.length,
+              reused_candidate_gemini_file_count: batch.filter(
+                (page) => page.gemini_file,
+              ).length,
+              uploaded_candidate_gemini_file_count:
+                uploadedCandidateFiles.length,
               retained_for_slot_fill_cleanup_later: true,
               ...summarizeGeminiFileApiRequestForTrace(geminiResult),
             },
@@ -714,19 +747,53 @@ async function runGenerationTaskItemPagePreparation(params: {
 
     let nextPageImageAssets = pageImageAssets;
     let pageFilterErrorMessage: string | null = null;
+    let geminiFileByPageNumberFromPipeline = new Map<
+      number,
+      PageFilterGeminiFileReference
+    >();
 
     if (pageImageAssets.length > 0) {
       try {
-        const precomputedVisionPagesForFilter = precomputedVisionPages.map(
-          (page) => ({
+        const llmConfig = getLlmRuntimeConfig('vision');
+        const precomputedVisionPagesForFilter: PdfVisionPageInput[] =
+          precomputedVisionPages.map((page) => ({
             page_number: page.page_number,
             image_data_url: page.image_data_url,
             original_page_number: page.original_page_number ?? page.page_number,
-          }),
+          }));
+        const pipelineVisionPages =
+          precomputedVisionPages.length === 0 && llmConfig.provider === 'gemini'
+            ? await uploadStoredPageImagesToGeminiFileApi({
+                admin,
+                pageImageAssets,
+                config: llmConfig,
+                requestLabel: `page filter ${params.item.id}`,
+                dispatcher: llmFetchDispatcher,
+                onTrace: async ({ message }) => {
+                  await appendProcessingTrace(admin, params.item.id, message);
+                },
+              })
+            : [];
+        geminiFileByPageNumberFromPipeline = new Map(
+          pipelineVisionPages.flatMap((page) =>
+            page.gemini_file
+              ? [
+                  [
+                    page.page_number,
+                    toPageFilterGeminiFileReference(
+                      page.gemini_file,
+                      `page filter ${params.item.id}`,
+                    ),
+                  ] as const,
+                ]
+              : [],
+          ),
         );
         const visionPagesForFilter =
           precomputedVisionPages.length > 0
             ? precomputedVisionPagesForFilter
+            : pipelineVisionPages.length > 0
+              ? pipelineVisionPages
             : await loadVisionPagesFromStoredAssets({
                 admin,
                 pageImageAssets,
@@ -756,7 +823,12 @@ async function runGenerationTaskItemPagePreparation(params: {
             gemini_file:
               pageFilterResult.geminiFilesByPageNumber.get(
                 asset.uploaded_page_number,
-              ) ?? asset.gemini_file ?? null,
+              ) ??
+              geminiFileByPageNumberFromPipeline.get(
+                asset.uploaded_page_number,
+              ) ??
+              asset.gemini_file ??
+              null,
             filter_decision: normalizedDecision,
             filter_reason:
               decision?.reason ??
@@ -769,6 +841,12 @@ async function runGenerationTaskItemPagePreparation(params: {
         pageFilterErrorMessage = getErrorMessage(filterError);
         nextPageImageAssets = pageImageAssets.map((asset) => ({
           ...asset,
+          gemini_file:
+            geminiFileByPageNumberFromPipeline.get(
+              asset.uploaded_page_number,
+            ) ??
+            asset.gemini_file ??
+            null,
           filter_decision: 'review',
           filter_reason:
             'Visual page filtering failed; keeping this page for manual confirmation.',
