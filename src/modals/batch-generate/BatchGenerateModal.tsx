@@ -1089,6 +1089,9 @@ export function BatchGenerateModal({
         const directVisionRawMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionRaw\]\[([^\]]+)\] (.+)$/,
         );
+        const referenceUploadMatch = traceLine.match(
+          /^\[Gemini File API\]\[(ReferenceUploadStart|ReferenceUploadItem|ReferenceUploadComplete)\] (.+)$/,
+        );
         const referenceAlignmentPromptMatch = traceLine.match(
           /^\[PDF Fill\]\[ReferenceAlignmentPrompt\] (.+)$/,
         );
@@ -1798,6 +1801,42 @@ export function BatchGenerateModal({
           return;
         }
 
+        if (referenceUploadMatch) {
+          const eventName = referenceUploadMatch[1] ?? 'ReferenceUpload';
+          const parsedUpload = parseTraceJson<Record<string, unknown>>(
+            referenceUploadMatch[2] ?? '{}',
+            `reference gemini upload ${eventName}`,
+          );
+
+          if (!parsedUpload) {
+            return;
+          }
+
+          if (eventName === 'ReferenceUploadComplete') {
+            const uploadDurationMs = parsedUpload.upload_duration_ms;
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}] 参考图片上传 Gemini File API 完成：${
+                typeof uploadDurationMs === 'number'
+                  ? formatDurationMs(uploadDurationMs)
+                  : '未记录'
+              }`,
+              parsedUpload,
+            );
+          } else if (eventName === 'ReferenceUploadItem') {
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}] 参考图片已上传 Gemini File API`,
+              parsedUpload,
+            );
+          } else {
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}] 开始上传参考图片到 Gemini File API`,
+              parsedUpload,
+            );
+          }
+
+          return;
+        }
+
         if (slotFillOutputMatch) {
           const parsedOutput = parseTraceJson<Record<string, unknown>>(
             slotFillOutputMatch[1] ?? '{}',
@@ -2149,62 +2188,6 @@ export function BatchGenerateModal({
             },
           );
 
-          const currentFileReferenceEntries =
-            window.clipcapSlotFillReferenceImages.filter(
-              (entry) =>
-                entry.fileName === item.source_pdf_name &&
-                entry.taskItemId === item.id,
-            );
-
-          console.info(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill reference example images stored in window.clipcapSlotFillReferenceImages. Run window.open(window.clipcapSlotFillReferenceImages[0].previewUrl) to inspect the annotated example image.`,
-            currentFileReferenceEntries,
-          );
-
-          const referencePagesByKey = new Map<
-            string,
-            {
-              referencePageNumber: number;
-              originalReferencePageNumber?: number;
-              examplePdfFileName?: string | null;
-              previewUrl: string;
-              storagePath?: string | null;
-              slotKeys: string[];
-            }
-          >();
-
-          currentFileReferenceEntries.forEach((entry) => {
-            const pageKey = `${entry.referencePageNumber}:${entry.previewUrl}`;
-            const existingPage = referencePagesByKey.get(pageKey);
-
-            if (existingPage) {
-              existingPage.slotKeys.push(entry.slotKey);
-              return;
-            }
-
-            referencePagesByKey.set(pageKey, {
-              referencePageNumber: entry.referencePageNumber,
-              originalReferencePageNumber: entry.originalReferencePageNumber,
-              examplePdfFileName: entry.examplePdfFileName,
-              previewUrl: entry.previewUrl,
-              storagePath: entry.storagePath,
-              slotKeys: [entry.slotKey],
-            });
-          });
-
-          [...referencePagesByKey.values()].forEach((page) => {
-            console.info(
-              `[Batch Generate][${item.source_pdf_name}][PDF Fill][ReferenceExampleImage] ` +
-                `reference_page=${page.referencePageNumber}, original_page=${
-                  page.originalReferencePageNumber ?? page.referencePageNumber
-                }, example_pdf=${page.examplePdfFileName ?? 'none'}, storage_path=${
-                  page.storagePath ?? 'none'
-                }, slot_keys=${page.slotKeys.join(',')}, signed_url=${
-                  page.previewUrl
-                }`,
-            );
-            console.info(page.previewUrl);
-          });
           return;
         }
 

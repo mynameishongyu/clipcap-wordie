@@ -259,6 +259,14 @@ function bufferToImageDataUrl(buffer: Buffer, mimeType: string) {
   return `data:${mimeType};base64,${buffer.toString('base64')}`;
 }
 
+function estimateDataUrlBytes(dataUrl: string) {
+  const commaIndex = dataUrl.indexOf(',');
+  const base64 = commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
 function buildReferenceAnnotationStoragePath(params: {
   ownerId: string;
   taskItemId: string;
@@ -973,6 +981,28 @@ async function uploadSharedReferenceGeminiCache(params: {
   }
 
   const requestLabel = `shared reference pages for task ${params.taskId}`;
+  const uploadStartedAt = Date.now();
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][ReferenceUploadStart] ${JSON.stringify({
+      request_label: requestLabel,
+      task_id: params.taskId,
+      template_id: params.templateId,
+      reference_page_count: params.pages.length,
+      pipeline_concurrency: getGeminiFilePipelineConcurrency(),
+      reference_pages: params.pages.map((page) => ({
+        page_number: page.page_number,
+        original_page_number: page.original_page_number ?? page.page_number,
+        annotated_storage_path: page.annotated_storage_path ?? null,
+        annotated_preview_url: page.annotated_preview_url ?? null,
+        image_bytes: estimateDataUrlBytes(
+          page.annotated_image_data_url ?? page.image_data_url,
+        ),
+        slot_keys: page.annotated_slots?.map((slot) => slot.slot_key) ?? [],
+      })),
+    })}`,
+  );
   const uploadedFiles = await uploadGeminiFilesToFileApi({
     config: llmConfig,
     requestLabel,
@@ -984,6 +1014,46 @@ async function uploadSharedReferenceGeminiCache(params: {
       await appendProcessingTrace(params.admin, params.taskItemId, message);
     },
   });
+  const uploadDurationMs = Date.now() - uploadStartedAt;
+
+  for (const [index, page] of params.pages.entries()) {
+    const file = uploadedFiles[index];
+
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][ReferenceUploadItem] ${JSON.stringify({
+        request_label: requestLabel,
+        task_id: params.taskId,
+        template_id: params.templateId,
+        page_number: page.page_number,
+        original_page_number: page.original_page_number ?? page.page_number,
+        annotated_storage_path: page.annotated_storage_path ?? null,
+        annotated_preview_url: page.annotated_preview_url ?? null,
+        slot_keys: page.annotated_slots?.map((slot) => slot.slot_key) ?? [],
+        file_uri: file?.uri ?? null,
+        file_name: file?.name ?? null,
+        mime_type: file?.mimeType ?? null,
+        size_bytes: file?.sizeBytes ?? null,
+        display_name: file?.displayName ?? null,
+      })}`,
+    );
+  }
+
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][ReferenceUploadComplete] ${JSON.stringify({
+      request_label: requestLabel,
+      task_id: params.taskId,
+      template_id: params.templateId,
+      reference_page_count: params.pages.length,
+      uploaded_file_count: uploadedFiles.length,
+      upload_duration_ms: uploadDurationMs,
+      upload_duration_seconds: Number((uploadDurationMs / 1000).toFixed(2)),
+    })}`,
+  );
+
   try {
     const cache: SharedReferenceGeminiCache = {
       task_id: params.taskId,

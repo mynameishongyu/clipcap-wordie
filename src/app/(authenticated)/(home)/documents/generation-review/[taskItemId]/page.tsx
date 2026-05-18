@@ -65,13 +65,6 @@ interface GenerationPdfPreviewPage {
   storagePath: string;
 }
 
-interface PdfBboxOverlay {
-  slotKey: string;
-  label: string;
-  bbox: [number, number, number, number];
-  isActive: boolean;
-}
-
 interface TextDecoration {
   itemId: string;
   start: number;
@@ -416,79 +409,15 @@ function sharpenCanvas(canvas: HTMLCanvasElement, strength: number) {
   }
 }
 
-function hasVisibleInkInBbox(
-  context: CanvasRenderingContext2D,
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-) {
-  const sampleLeft = Math.max(0, Math.floor(left));
-  const sampleTop = Math.max(0, Math.floor(top));
-  const sampleWidth = Math.max(1, Math.floor(width));
-  const sampleHeight = Math.max(1, Math.floor(height));
-
-  try {
-    const imageData = context.getImageData(
-      sampleLeft,
-      sampleTop,
-      sampleWidth,
-      sampleHeight,
-    );
-    const stride = Math.max(
-      1,
-      Math.floor(Math.sqrt((sampleWidth * sampleHeight) / 2500)),
-    );
-    let sampled = 0;
-    let strongInkPixels = 0;
-    let contrastPixels = 0;
-
-    for (let y = 0; y < sampleHeight; y += stride) {
-      for (let x = 0; x < sampleWidth; x += stride) {
-        const offset = (y * sampleWidth + x) * 4;
-        const red = imageData.data[offset] ?? 255;
-        const green = imageData.data[offset + 1] ?? 255;
-        const blue = imageData.data[offset + 2] ?? 255;
-        const maxChannel = Math.max(red, green, blue);
-        const minChannel = Math.min(red, green, blue);
-
-        sampled += 1;
-
-        if (minChannel < 185) {
-          strongInkPixels += 1;
-        }
-
-        if (maxChannel - minChannel > 35 && minChannel < 230) {
-          contrastPixels += 1;
-        }
-      }
-    }
-
-    if (sampled === 0) {
-      return true;
-    }
-
-    return (
-      strongInkPixels / sampled >= 0.003 ||
-      contrastPixels / sampled >= 0.01
-    );
-  } catch {
-    // Signed URLs can be cross-origin; keep overlays when validation cannot run.
-    return true;
-  }
-}
-
 function PdfPreviewPageCanvas({
   alt,
   displayWidth,
   imageUrl,
-  overlays,
   pageNumber,
 }: {
   alt: string;
   displayWidth: number;
   imageUrl: string;
-  overlays: PdfBboxOverlay[];
   pageNumber: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -542,45 +471,6 @@ function PdfPreviewPageCanvas({
         canvasHeight,
       );
       sharpenCanvas(canvasRef.current, PDF_PREVIEW_SHARPEN_STRENGTH);
-      overlays.forEach((overlay) => {
-        const [y0, x0, y1, x1] = overlay.bbox;
-        const left = Math.max(0, Math.min(canvasWidth, (x0 / 1000) * canvasWidth));
-        const top = Math.max(0, Math.min(canvasHeight, (y0 / 1000) * canvasHeight));
-        const right = Math.max(0, Math.min(canvasWidth, (x1 / 1000) * canvasWidth));
-        const bottom = Math.max(0, Math.min(canvasHeight, (y1 / 1000) * canvasHeight));
-        const width = Math.max(2, right - left);
-        const height = Math.max(2, bottom - top);
-        const color = overlay.isActive ? '#ff9f1a' : '#12b886';
-        const label = overlay.label || overlay.slotKey;
-
-        if (!hasVisibleInkInBbox(context, left, top, width, height)) {
-          return;
-        }
-
-        context.save();
-        context.lineWidth = overlay.isActive ? 4 * ratio : 2.5 * ratio;
-        context.strokeStyle = color;
-        context.fillStyle = overlay.isActive
-          ? 'rgba(255, 159, 26, 0.16)'
-          : 'rgba(18, 184, 134, 0.12)';
-        context.fillRect(left, top, width, height);
-        context.strokeRect(left, top, width, height);
-        context.font = `${Math.max(12, 12 * ratio)}px Arial, sans-serif`;
-        context.textBaseline = 'top';
-
-        const labelPaddingX = 5 * ratio;
-        const labelPaddingY = 3 * ratio;
-        const labelWidth = context.measureText(label).width + labelPaddingX * 2;
-        const labelHeight = 18 * ratio;
-        const labelLeft = Math.max(0, Math.min(canvasWidth - labelWidth, left));
-        const labelTop = Math.max(0, top - labelHeight - 2 * ratio);
-
-        context.fillStyle = color;
-        context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
-        context.fillStyle = '#111';
-        context.fillText(label, labelLeft + labelPaddingX, labelTop + labelPaddingY);
-        context.restore();
-      });
     };
 
     image.src = imageUrl;
@@ -588,7 +478,7 @@ function PdfPreviewPageCanvas({
     return () => {
       isDisposed = true;
     };
-  }, [displayWidth, imageUrl, overlays, pageNumber]);
+  }, [displayWidth, imageUrl, pageNumber]);
 
   return (
     <canvas
@@ -1436,45 +1326,6 @@ export default function GenerationReviewPage() {
       activeFilledItem?.evidence_page_numbers ?? [],
       uploadedPageNumberMapping,
     ).find((pageNumber) => validPdfPreviewPageNumbers.has(pageNumber)) ?? null;
-  const pdfBboxOverlaysByPageNumber = useMemo(() => {
-    const next = new Map<number, PdfBboxOverlay[]>();
-
-    items.forEach((slotItem) => {
-      const bbox = normalizeModelPdfBbox(slotItem.new_pdf_bbox);
-
-      if (!bbox) {
-        return;
-      }
-
-      const pageNumbers = resolveUploadedPageNumbers(
-        slotItem.evidence_page_numbers ?? [],
-        uploadedPageNumberMapping,
-      );
-
-      pageNumbers.forEach((pageNumber) => {
-        if (!validPdfPreviewPageNumbers.has(pageNumber)) {
-          return;
-        }
-
-        const overlays = next.get(pageNumber) ?? [];
-
-        overlays.push({
-          slotKey: slotItem.slot_key,
-          label: slotItem.field_category || slotItem.slot_key,
-          bbox,
-          isActive: slotItem.slot_key === activeFilledSlotKey,
-        });
-        next.set(pageNumber, overlays);
-      });
-    });
-
-    return next;
-  }, [
-    activeFilledSlotKey,
-    items,
-    uploadedPageNumberMapping,
-    validPdfPreviewPageNumbers,
-  ]);
   const updatePdfZoom = (updater: (currentZoom: number) => number) => {
     setPdfZoom((currentZoom) => clampPdfZoom(updater(currentZoom)));
   };
@@ -1804,7 +1655,6 @@ export default function GenerationReviewPage() {
                             alt={`${item.source_pdf_name} 上传第 ${page.pageNumber} 页`}
                             displayWidth={zoomedPageWidth}
                             imageUrl={page.imageUrl}
-                            overlays={pdfBboxOverlaysByPageNumber.get(page.pageNumber) ?? []}
                             pageNumber={page.pageNumber}
                           />
                         </Box>
