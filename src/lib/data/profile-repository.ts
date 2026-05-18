@@ -13,7 +13,6 @@ export interface ProfileRecord {
 }
 
 export interface UpdateProfileRegistrationInput {
-  email: string;
   displayName: string;
   organizationName: string;
   useCase: string;
@@ -62,6 +61,13 @@ function normalizeProfileRecord(record: PartialProfileRecord): ProfileRecord {
     use_case: record.use_case ?? null,
     registration_status: record.registration_status ?? 'pending',
     onboarded_at: record.onboarded_at ?? null,
+  };
+}
+
+function profileWithAuthEmail(profile: ProfileRecord, user: User): ProfileRecord {
+  return {
+    ...profile,
+    email: user.email ?? profile.email ?? null,
   };
 }
 
@@ -143,7 +149,8 @@ export async function getCurrentProfile(
   supabase: SupabaseClient,
   user: User,
 ) {
-  return ensureProfileRecord(supabase, user);
+  const profile = await ensureProfileRecord(supabase, user);
+  return profileWithAuthEmail(profile, user);
 }
 
 /**
@@ -156,27 +163,9 @@ export async function updateProfileRegistration(
 ) {
   await ensureProfileRecord(supabase, user);
 
-  const normalizedEmail = input.email.trim().toLowerCase();
-
-  const { data: existingProfile, error: existingProfileError } = await supabase
-    .from('profiles')
-    .select('id')
-    .eq('email', normalizedEmail)
-    .neq('id', user.id)
-    .maybeSingle<{ id: string }>();
-
-  if (existingProfileError) {
-    throw existingProfileError;
-  }
-
-  if (existingProfile) {
-    throw new Error('该邮箱已经注册过了，请直接使用原来的账号继续。');
-  }
-
   const { data, error } = await supabase
     .from('profiles')
     .update({
-      email: normalizedEmail,
       display_name: input.displayName,
       organization_name: input.organizationName,
       use_case: input.useCase,
@@ -197,5 +186,5 @@ export async function updateProfileRegistration(
     throw error;
   }
 
-  return normalizeProfileRecord(data as PartialProfileRecord);
+  return profileWithAuthEmail(normalizeProfileRecord(data as PartialProfileRecord), user);
 }

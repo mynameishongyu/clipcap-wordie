@@ -4,7 +4,6 @@ import { useMutation } from '@tanstack/react-query';
 import { logClientRequestError } from '@/src/lib/network/client-request-error';
 
 interface CompleteProfileRegistrationInput {
-  email: string;
   displayName: string;
   organizationName: string;
   useCase: string;
@@ -48,7 +47,9 @@ export function useCompleteProfileRegistration() {
           method: 'PATCH',
           error,
           extra: {
-            email: input.email,
+            hasDisplayName: Boolean(input.displayName.trim()),
+            hasOrganizationName: Boolean(input.organizationName.trim()),
+            hasUseCase: Boolean(input.useCase.trim()),
           },
         });
         throw error;

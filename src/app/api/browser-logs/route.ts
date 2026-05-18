@@ -26,6 +26,37 @@ type BrowserRunLogRequestBody = {
 const MAX_LOG_ENTRIES_PER_REQUEST = 500;
 const MAX_SESSION_ID_LENGTH = 100;
 
+function formatBrowserLogStorageTimestamp(date: Date) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const partMap = new Map(parts.map((part) => [part.type, part.value]));
+
+  return `${partMap.get('year')}-${partMap.get('month')}-${partMap.get(
+    'day',
+  )}_${partMap.get('hour')}-${partMap.get('minute')}-${partMap.get('second')}`;
+}
+
+function createBrowserLogStorageFileName(params: {
+  final: boolean;
+  sequence: number;
+}) {
+  const prefix = params.final ? 'final' : 'part';
+  const sequenceText = String(params.sequence).padStart(5, '0');
+  const randomSuffix = crypto.randomUUID().slice(0, 8);
+
+  return `${formatBrowserLogStorageTimestamp(
+    new Date(),
+  )}_${prefix}-${sequenceText}_${randomSuffix}.jsonl`;
+}
+
 function createUnauthorizedResponse() {
   return NextResponse.json(
     {
@@ -121,11 +152,12 @@ export async function POST(request: Request) {
       typeof body.sequence === 'number' && Number.isInteger(body.sequence)
         ? body.sequence
         : 0;
-    const suffix = body.final ? 'final' : 'part';
     const storageScope = taskId ? taskId : 'global';
-    const storagePath = `${user.id}/browser-logs/${storageScope}/${sessionId}/${suffix}-${String(
+    const storageFileName = createBrowserLogStorageFileName({
+      final: Boolean(body.final),
       sequence,
-    ).padStart(5, '0')}-${Date.now()}.jsonl`;
+    });
+    const storagePath = `${user.id}/browser-logs/${storageScope}/${sessionId}/${storageFileName}`;
     const jsonl = entries
       .map((entry) =>
         JSON.stringify({

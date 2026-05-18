@@ -79,14 +79,12 @@ export async function PATCH(request: Request) {
     actorEmail = user.email ?? null;
 
     const body = (await request.json()) as Partial<{
-      email: string;
       displayName: string;
       organizationName: string;
       useCase: string;
     }>;
 
     if (
-      !body.email?.trim() ||
       !body.displayName?.trim() ||
       !body.organizationName?.trim() ||
       !body.useCase?.trim()
@@ -94,14 +92,13 @@ export async function PATCH(request: Request) {
       return NextResponse.json(
         {
           code: 'INVALID_PROFILE_REGISTRATION',
-          message: '请完整填写联系邮箱、姓名、公司或团队，以及使用场景。',
+          message: '请完整填写姓名、公司或团队，以及使用场景。',
         },
         { status: 400 },
       );
     }
 
     const profile = await updateProfileRegistration(supabase, user, {
-      email: body.email.trim(),
       displayName: body.displayName.trim(),
       organizationName: body.organizationName.trim(),
       useCase: body.useCase.trim(),

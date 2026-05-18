@@ -68,7 +68,6 @@ export function BrowserLogProvider({ children }: BrowserLogProviderProps) {
       email: user.email ?? null,
       role: user.role ?? null,
       registrationStatus,
-      profileEmail: profile?.email ?? null,
       displayName: profile?.displayName ?? null,
     });
   }, [isAuthenticated, profile, registrationStatus, user]);

@@ -60,7 +60,6 @@ export function CompleteRegistrationModal({
   const isRegistrationFormVisible = isAuthenticated && registrationStatus !== 'completed';
   const isProfileSubmitDisabled =
     !displayName.trim() ||
-    !email.trim() ||
     !organizationName.trim() ||
     !useCase ||
     completeProfileRegistrationMutation.isPending;
@@ -75,7 +74,7 @@ export function CompleteRegistrationModal({
 
   const subtitleText = useMemo(() => {
     if (isRegistrationFormVisible) {
-      return '填写姓名、联系邮箱和使用场景后，我们会把资料保存到 Supabase 的 profiles 表里。';
+      return '填写姓名、公司或团队和使用场景后，我们会把资料保存到 Supabase 的 profiles 表里。';
     }
 
     return '输入邮箱后，我们会发送一封登录链接邮件。收到邮件后点击链接即可进入系统。';
@@ -171,7 +170,6 @@ export function CompleteRegistrationModal({
 
     try {
       const payload = await completeProfileRegistrationMutation.mutateAsync({
-        email: email.trim().toLowerCase(),
         displayName: displayName.trim(),
         organizationName: organizationName.trim(),
         useCase: useCase!,
@@ -224,14 +222,6 @@ export function CompleteRegistrationModal({
             placeholder="请输入你的姓名"
             value={displayName}
             onChange={(event) => setDisplayName(event.currentTarget.value)}
-          />
-
-          <TextInput
-            label="联系邮箱"
-            placeholder="请输入常用邮箱"
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.currentTarget.value)}
           />
 
           <TextInput
