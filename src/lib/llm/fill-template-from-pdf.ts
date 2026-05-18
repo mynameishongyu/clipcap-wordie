@@ -3,6 +3,7 @@ import { Agent, fetch as undiciFetch } from 'undici';
 import { getOptionalEnv, getVisionLlmModel } from '@/src/lib/llm/env';
 import {
   callGeminiFileApiChatCompletion,
+  type UploadedGeminiFile,
   summarizeGeminiFileApiRequestForTrace,
 } from '@/src/lib/llm/gemini-file-api';
 import {
@@ -75,6 +76,7 @@ export interface PdfVisionPageInput {
   page_number: number;
   image_data_url: string;
   original_page_number?: number;
+  gemini_file?: UploadedGeminiFile;
 }
 
 export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
@@ -128,6 +130,10 @@ interface DirectVisionSlotFillJob {
 
 type VisionMessageContentPart =
   | { type: 'image_url'; image_url: { url: string } }
+  | {
+      type: 'gemini_file';
+      gemini_file: NonNullable<PdfVisionPageInput['gemini_file']>;
+    }
   | { type: 'text'; text: string };
 
 const generationExtractedItemSchema = z.object({
@@ -452,6 +458,19 @@ function summarizeVisionMessageContentForTrace(
   return content.map((part) => {
     if (part.type === 'text') {
       return part;
+    }
+
+    if (part.type === 'gemini_file') {
+      return {
+        type: 'gemini_file',
+        gemini_file: {
+          uri: part.gemini_file.uri,
+          name: part.gemini_file.name ?? null,
+          mime_type: part.gemini_file.mimeType,
+          size_bytes: part.gemini_file.sizeBytes,
+          display_name: part.gemini_file.displayName,
+        },
+      };
     }
 
     return {
@@ -2298,9 +2317,9 @@ function getReferenceImageSummaries(
   referenceExamplePages: ReferencePdfVisionPageInput[],
 ) {
   return referenceExamplePages.map((page) => {
-    const imageBytes = estimateDataUrlBytes(
-      page.annotated_image_data_url ?? page.image_data_url,
-    );
+    const imageBytes =
+      page.gemini_file?.sizeBytes ??
+      estimateDataUrlBytes(page.annotated_image_data_url ?? page.image_data_url);
 
     return {
       label: `Annotated reference example PDF page ${page.page_number}`,
@@ -2310,8 +2329,10 @@ function getReferenceImageSummaries(
       annotated_preview_url: page.annotated_preview_url ?? null,
       annotated_storage_path: page.annotated_storage_path ?? null,
       uses_annotated_image: Boolean(page.annotated_image_data_url),
+      has_gemini_file: Boolean(page.gemini_file),
       has_image_data_url: Boolean(
-        page.annotated_image_data_url ?? page.image_data_url,
+        !page.gemini_file &&
+          (page.annotated_image_data_url ?? page.image_data_url),
       ),
       image_bytes: imageBytes,
       image_size: formatBytes(imageBytes),
@@ -2325,7 +2346,9 @@ function getReferenceImageSummaries(
 function getVisionPageSizeSummary(visionPages: PdfVisionPageInput[]) {
   return visionPages.map((page) => ({
     pageNumber: page.page_number,
-    bytes: estimateDataUrlBytes(page.image_data_url),
+    bytes:
+      page.gemini_file?.sizeBytes ?? estimateDataUrlBytes(page.image_data_url),
+    usesGeminiFile: Boolean(page.gemini_file),
   }));
 }
 
@@ -2458,7 +2481,8 @@ async function alignReferencePagesToVisionPages(input: {
           image_placeholders: pageSizeSummary.map((page) => ({
             label: `New PDF uploaded page ${page.pageNumber}`,
             page_number: page.pageNumber,
-            has_image_data_url: true,
+            has_image_data_url: !page.usesGeminiFile,
+            has_gemini_file: page.usesGeminiFile,
             image_bytes: page.bytes,
             image_size: formatBytes(page.bytes),
           })),
@@ -2479,10 +2503,7 @@ async function alignReferencePagesToVisionPages(input: {
       console.info(startedMessage);
       await input.onTrace?.({ message: startedMessage });
 
-      const content: Array<
-        | { type: 'image_url'; image_url: { url: string } }
-        | { type: 'text'; text: string }
-      > = [
+      const content: VisionMessageContentPart[] = [
         {
           type: 'text',
           text: JSON.stringify(promptPayload),
@@ -2494,12 +2515,19 @@ async function alignReferencePagesToVisionPages(input: {
           type: 'text',
           text: `Annotated reference example PDF page ${page.page_number}`,
         });
-        content.push({
-          type: 'image_url',
-          image_url: {
-            url: page.annotated_image_data_url ?? page.image_data_url,
-          },
-        });
+        if (page.gemini_file) {
+          content.push({
+            type: 'gemini_file',
+            gemini_file: page.gemini_file,
+          });
+        } else {
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: page.annotated_image_data_url ?? page.image_data_url,
+            },
+          });
+        }
       });
 
       input.visionPages.forEach((page) => {
@@ -2507,12 +2535,19 @@ async function alignReferencePagesToVisionPages(input: {
           type: 'text',
           text: `New PDF uploaded page ${page.page_number}`,
         });
-        content.push({
-          type: 'image_url',
-          image_url: {
-            url: page.image_data_url,
-          },
-        });
+        if (page.gemini_file) {
+          content.push({
+            type: 'gemini_file',
+            gemini_file: page.gemini_file,
+          });
+        } else {
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: page.image_data_url,
+            },
+          });
+        }
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');
@@ -2798,7 +2833,10 @@ async function extractSlotsFromVisionPageBatch(input: {
       const uploadedPageNumberSet = new Set(allUploadedPageNumbers);
       const pageSizeSummary = input.visionPages.map((page) => ({
         pageNumber: page.page_number,
-        bytes: estimateDataUrlBytes(page.image_data_url),
+        bytes:
+          page.gemini_file?.sizeBytes ??
+          estimateDataUrlBytes(page.image_data_url),
+        usesGeminiFile: Boolean(page.gemini_file),
       }));
       const totalImageBytes = pageSizeSummary.reduce(
         (sum, entry) => sum + entry.bytes,
@@ -2813,9 +2851,11 @@ async function extractSlotsFromVisionPageBatch(input: {
       );
       const referenceImageSummaries = input.referenceExamplePages.map(
         (page) => {
-          const imageBytes = estimateDataUrlBytes(
-            page.annotated_image_data_url ?? page.image_data_url,
-          );
+          const imageBytes =
+            page.gemini_file?.sizeBytes ??
+            estimateDataUrlBytes(
+              page.annotated_image_data_url ?? page.image_data_url,
+            );
 
           return {
             label: `Annotated reference example PDF page ${page.page_number}`,
@@ -2825,8 +2865,10 @@ async function extractSlotsFromVisionPageBatch(input: {
             annotated_preview_url: page.annotated_preview_url ?? null,
             annotated_storage_path: page.annotated_storage_path ?? null,
             uses_annotated_image: Boolean(page.annotated_image_data_url),
+            has_gemini_file: Boolean(page.gemini_file),
             has_image_data_url: Boolean(
-              page.annotated_image_data_url ?? page.image_data_url,
+              !page.gemini_file &&
+                (page.annotated_image_data_url ?? page.image_data_url),
             ),
             image_bytes: imageBytes,
             image_size: formatBytes(imageBytes),
@@ -2894,7 +2936,8 @@ async function extractSlotsFromVisionPageBatch(input: {
             image_placeholders: pageSizeSummary.map((page) => ({
               label: `New PDF uploaded page ${page.pageNumber}`,
               page_number: page.pageNumber,
-              has_image_data_url: true,
+              has_image_data_url: !page.usesGeminiFile,
+              has_gemini_file: page.usesGeminiFile,
               image_bytes: page.bytes,
               image_size: formatBytes(page.bytes),
             })),
@@ -2940,6 +2983,10 @@ async function extractSlotsFromVisionPageBatch(input: {
 
       const content: Array<
         | { type: 'image_url'; image_url: { url: string } }
+        | {
+            type: 'gemini_file';
+            gemini_file: NonNullable<PdfVisionPageInput['gemini_file']>;
+          }
         | { type: 'text'; text: string }
       > = [
         {
@@ -2973,12 +3020,19 @@ async function extractSlotsFromVisionPageBatch(input: {
                 : ''
             }. Orange boxes show the reviewed template slot source positions and labels. Use these as layout/source clues; do not extract final values from this example image.${annotatedSlotsText}`,
         });
-        content.push({
-          type: 'image_url',
-          image_url: {
-            url: page.annotated_image_data_url ?? page.image_data_url,
-          },
-        });
+        if (page.gemini_file) {
+          content.push({
+            type: 'gemini_file',
+            gemini_file: page.gemini_file,
+          });
+        } else {
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: page.annotated_image_data_url ?? page.image_data_url,
+            },
+          });
+        }
       });
 
       input.visionPages.forEach((page) => {
@@ -2986,12 +3040,19 @@ async function extractSlotsFromVisionPageBatch(input: {
           type: 'text',
           text: `New PDF uploaded page ${page.page_number}`,
         });
-        content.push({
-          type: 'image_url',
-          image_url: {
-            url: page.image_data_url,
-          },
-        });
+        if (page.gemini_file) {
+          content.push({
+            type: 'gemini_file',
+            gemini_file: page.gemini_file,
+          });
+        } else {
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: page.image_data_url,
+            },
+          });
+        }
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');

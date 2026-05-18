@@ -5,9 +5,16 @@ import { join } from 'path';
 import {
   fillSlotsFromVisionPages,
   type GenerationSlotSchemaItem,
+  type PdfVisionPageInput,
   normalizedBboxToGeminiBox2d,
   type ReferencePdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
+import {
+  cleanupGeminiUploadedFiles,
+  uploadGeminiFilesToFileApi,
+  type UploadedGeminiFile,
+} from '@/src/lib/llm/gemini-file-api';
+import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
 import {
   appendProcessingTrace,
   buildFallbackReviewPayload,
@@ -600,7 +607,9 @@ async function appendVisionPageImageDebugTraces(params: {
             asset?.original_page_number ??
             page.page_number,
           storage_path: asset?.storage_path ?? null,
+          source: page.gemini_file ? 'gemini_file' : 'supabase_download',
           has_data_url: Boolean(page.image_data_url),
+          has_gemini_file: Boolean(page.gemini_file),
         };
       }),
     )}`,
@@ -608,21 +617,6 @@ async function appendVisionPageImageDebugTraces(params: {
 
   for (const page of params.visionPages) {
     const asset = assetsByUploadedPageNumber.get(page.page_number);
-    let signedUrl: string | null = null;
-    let signedUrlErrorMessage: string | null = null;
-
-    if (asset?.storage_path) {
-      const { data, error } = await params.admin.storage
-        .from('generation-pdfs')
-        .createSignedUrl(asset.storage_path, 60 * 60 * 24);
-
-      if (error || !data?.signedUrl) {
-        signedUrlErrorMessage =
-          error?.message ?? `Missing signed URL for ${asset.storage_path}`;
-      } else {
-        signedUrl = data.signedUrl;
-      }
-    }
 
     await appendProcessingTrace(
       params.admin,
@@ -631,11 +625,662 @@ async function appendVisionPageImageDebugTraces(params: {
         page.original_page_number ??
         asset?.original_page_number ??
         page.page_number
-      }, storage_path=${asset?.storage_path ?? 'none'}, signed_url=${
-        signedUrl ?? 'none'
-      }, signed_url_error=${signedUrlErrorMessage ?? 'none'}`,
+      }, source=${page.gemini_file ? 'gemini_file' : 'supabase_download'}, storage_path=${
+        asset?.storage_path ?? 'none'
+      }`,
     );
   }
+}
+
+function normalizeCachedGeminiFile(value: unknown): UploadedGeminiFile | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const uri = typeof record.uri === 'string' ? record.uri.trim() : '';
+  const mimeType =
+    typeof record.mime_type === 'string'
+      ? record.mime_type
+      : typeof record.mimeType === 'string'
+        ? record.mimeType
+        : '';
+
+  if (!uri || !mimeType) {
+    return null;
+  }
+
+  return {
+    uri,
+    name: typeof record.name === 'string' ? record.name : undefined,
+    mimeType,
+    sizeBytes:
+      typeof record.size_bytes === 'number'
+        ? record.size_bytes
+        : typeof record.sizeBytes === 'number'
+          ? record.sizeBytes
+          : 0,
+    displayName:
+      typeof record.display_name === 'string'
+        ? record.display_name
+        : typeof record.displayName === 'string'
+          ? record.displayName
+          : 'cached-page-filter-image',
+  };
+}
+
+function buildVisionPagesFromCachedGeminiFiles(
+  pageImageAssets: ReturnType<typeof normalizePdfPageImageAssets>,
+): PdfVisionPageInput[] {
+  return pageImageAssets.flatMap((asset) => {
+    const geminiFile = normalizeCachedGeminiFile(asset.gemini_file);
+
+    if (!geminiFile) {
+      return [];
+    }
+
+    return [
+      {
+        page_number: asset.uploaded_page_number,
+        image_data_url: '',
+        original_page_number: asset.original_page_number,
+        gemini_file: geminiFile,
+      },
+    ];
+  });
+}
+
+function collectCachedGeminiFilesForCleanup(
+  pageImageAssets: ReturnType<typeof normalizePdfPageImageAssets>,
+) {
+  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+
+  pageImageAssets.forEach((asset) => {
+    const geminiFile = normalizeCachedGeminiFile(asset.gemini_file);
+
+    if (!geminiFile) {
+      return;
+    }
+
+    filesByNameOrUri.set(geminiFile.name ?? geminiFile.uri, geminiFile);
+  });
+
+  return Array.from(filesByNameOrUri.values());
+}
+
+type SharedReferenceGeminiFileEntry = {
+  page_number: number;
+  original_page_number?: number | null;
+  annotated_storage_path?: string | null;
+  annotated_preview_url?: string | null;
+  file: {
+    uri: string;
+    name?: string | null;
+    mime_type: string;
+    size_bytes?: number | null;
+    display_name?: string | null;
+  };
+};
+
+type SharedReferenceGeminiCache = {
+  task_id: string;
+  template_id?: string | null;
+  created_at: string;
+  files: SharedReferenceGeminiFileEntry[];
+};
+
+function normalizeSharedReferenceGeminiCache(
+  value: unknown,
+): SharedReferenceGeminiCache | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const filesValue = record.files;
+
+  if (!Array.isArray(filesValue)) {
+    return null;
+  }
+
+  const files = filesValue.flatMap((entry): SharedReferenceGeminiFileEntry[] => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const entryRecord = entry as Record<string, unknown>;
+    const pageNumber = Number(entryRecord.page_number);
+    const file = normalizeCachedGeminiFile(entryRecord.file);
+
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || !file) {
+      return [];
+    }
+
+    return [
+      {
+        page_number: pageNumber,
+        original_page_number:
+          typeof entryRecord.original_page_number === 'number'
+            ? entryRecord.original_page_number
+            : null,
+        annotated_storage_path:
+          typeof entryRecord.annotated_storage_path === 'string'
+            ? entryRecord.annotated_storage_path
+            : null,
+        annotated_preview_url:
+          typeof entryRecord.annotated_preview_url === 'string'
+            ? entryRecord.annotated_preview_url
+            : null,
+        file: {
+          uri: file.uri,
+          name: file.name ?? null,
+          mime_type: file.mimeType,
+          size_bytes: file.sizeBytes,
+          display_name: file.displayName,
+        },
+      },
+    ];
+  });
+
+  if (files.length === 0) {
+    return null;
+  }
+
+  return {
+    task_id: typeof record.task_id === 'string' ? record.task_id : '',
+    template_id:
+      typeof record.template_id === 'string' ? record.template_id : null,
+    created_at:
+      typeof record.created_at === 'string'
+        ? record.created_at
+        : new Date().toISOString(),
+    files,
+  };
+}
+
+function attachSharedReferenceGeminiFiles(
+  pages: ReferencePdfVisionPageInput[],
+  cache: SharedReferenceGeminiCache | null,
+) {
+  if (!cache) {
+    return pages;
+  }
+
+  const fileByPageNumber = new Map(
+    cache.files.map((entry) => [entry.page_number, entry]),
+  );
+  const fileByStoragePath = new Map(
+    cache.files.flatMap((entry) =>
+      entry.annotated_storage_path
+        ? [[entry.annotated_storage_path, entry] as const]
+        : [],
+    ),
+  );
+
+  return pages.map((page) => {
+    const entry =
+      (page.annotated_storage_path
+        ? fileByStoragePath.get(page.annotated_storage_path)
+        : null) ?? fileByPageNumber.get(page.page_number);
+
+    if (!entry) {
+      return page;
+    }
+
+    const geminiFile = normalizeCachedGeminiFile(entry.file);
+
+    if (!geminiFile) {
+      return page;
+    }
+
+    return {
+      ...page,
+      gemini_file: geminiFile,
+    };
+  });
+}
+
+async function loadSharedReferenceGeminiCache(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskId: string;
+}) {
+  const { data, error } = await params.admin
+    .from('generation_task_items')
+    .select('id, llm_input')
+    .eq('task_id', params.taskId);
+
+  if (error || !data) {
+    return null;
+  }
+
+  for (const item of data as Array<{ llm_input?: unknown }>) {
+    const llmInput =
+      item.llm_input && typeof item.llm_input === 'object'
+        ? (item.llm_input as Record<string, unknown>)
+        : null;
+    const cache = normalizeSharedReferenceGeminiCache(
+      llmInput?.reference_gemini_files,
+    );
+
+    if (cache) {
+      return cache;
+    }
+  }
+
+  return null;
+}
+
+function sharedReferenceCacheCoversPages(
+  cache: SharedReferenceGeminiCache | null,
+  pages: ReferencePdfVisionPageInput[],
+) {
+  if (!cache || pages.length === 0) {
+    return false;
+  }
+
+  const cachePageNumbers = new Set(cache.files.map((file) => file.page_number));
+  const cacheStoragePaths = new Set(
+    cache.files.flatMap((file) =>
+      file.annotated_storage_path ? [file.annotated_storage_path] : [],
+    ),
+  );
+
+  return pages.every((page) =>
+    page.annotated_storage_path
+      ? cacheStoragePaths.has(page.annotated_storage_path) ||
+        cachePageNumbers.has(page.page_number)
+      : cachePageNumbers.has(page.page_number),
+  );
+}
+
+async function persistSharedReferenceGeminiCache(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskId: string;
+  cache: SharedReferenceGeminiCache;
+}) {
+  const { data, error } = await params.admin
+    .from('generation_task_items')
+    .select('id, llm_input')
+    .eq('task_id', params.taskId);
+
+  if (error || !data) {
+    throw error ?? new Error('Failed to load generation task items.');
+  }
+
+  const updateResults = await Promise.all(
+    (data as Array<{ id: string; llm_input?: unknown }>).map((item) => {
+      const llmInput =
+        item.llm_input && typeof item.llm_input === 'object'
+          ? (item.llm_input as Record<string, unknown>)
+          : {};
+
+      return params.admin
+        .from('generation_task_items')
+        .update({
+          llm_input: {
+            ...llmInput,
+            reference_gemini_files: params.cache,
+          },
+        })
+        .eq('id', item.id);
+    }),
+  );
+  const updateError = updateResults.find((result) => result.error)?.error;
+
+  if (updateError) {
+    throw updateError;
+  }
+}
+
+async function uploadSharedReferenceGeminiCache(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskItemId: string;
+  taskId: string;
+  templateId: string | null;
+  pages: ReferencePdfVisionPageInput[];
+}) {
+  const llmConfig = getLlmRuntimeConfig('vision');
+
+  if (llmConfig.provider !== 'gemini' || params.pages.length === 0) {
+    return null;
+  }
+
+  const requestLabel = `shared reference pages for task ${params.taskId}`;
+  const uploadedFiles = await uploadGeminiFilesToFileApi({
+    config: llmConfig,
+    requestLabel,
+    images: params.pages.map((page) => ({
+      dataUrl: page.annotated_image_data_url ?? page.image_data_url,
+      displayName: `reference-page-${page.page_number}`,
+    })),
+    onTrace: async ({ message }) => {
+      await appendProcessingTrace(params.admin, params.taskItemId, message);
+    },
+  });
+  try {
+    const cache: SharedReferenceGeminiCache = {
+      task_id: params.taskId,
+      template_id: params.templateId,
+      created_at: new Date().toISOString(),
+      files: params.pages.flatMap((page, index) => {
+        const file = uploadedFiles[index];
+
+        if (!file) {
+          return [];
+        }
+
+        return [
+          {
+            page_number: page.page_number,
+            original_page_number:
+              page.original_page_number ?? page.page_number,
+            annotated_storage_path: page.annotated_storage_path ?? null,
+            annotated_preview_url: page.annotated_preview_url ?? null,
+            file: {
+              uri: file.uri,
+              name: file.name ?? null,
+              mime_type: file.mimeType,
+              size_bytes: file.sizeBytes,
+              display_name: file.displayName,
+            },
+          },
+        ];
+      }),
+    };
+
+    await persistSharedReferenceGeminiCache({
+      admin: params.admin,
+      taskId: params.taskId,
+      cache,
+    });
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCacheSaved] ${JSON.stringify({
+        task_id: params.taskId,
+        template_id: params.templateId,
+        reference_page_count: cache.files.length,
+      })}`,
+    );
+
+    return cache;
+  } catch (error) {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCachePersistFailed] ${JSON.stringify({
+        task_id: params.taskId,
+        uploaded_file_count: uploadedFiles.length,
+        error_message: getErrorMessage(error),
+      })}`,
+    );
+    await cleanupGeminiUploadedFiles({
+      config: llmConfig,
+      files: uploadedFiles,
+    });
+    throw error;
+  }
+}
+
+async function getSharedReferencePagesForSlotFill(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskItemId: string;
+  taskId: string;
+  templateId: string | null;
+  pages: ReferencePdfVisionPageInput[];
+}) {
+  const llmConfig = getLlmRuntimeConfig('vision');
+
+  if (llmConfig.provider !== 'gemini' || params.pages.length === 0) {
+    return params.pages;
+  }
+
+  let cache = await loadSharedReferenceGeminiCache({
+    admin: params.admin,
+    taskId: params.taskId,
+  });
+
+  if (!sharedReferenceCacheCoversPages(cache, params.pages)) {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCacheMiss] ${JSON.stringify({
+        task_id: params.taskId,
+        template_id: params.templateId,
+        reference_page_count: params.pages.length,
+        existing_cache_page_count: cache?.files.length ?? 0,
+      })}`,
+    );
+
+    try {
+      cache = await uploadSharedReferenceGeminiCache(params);
+    } catch (error) {
+      await appendProcessingTrace(
+        params.admin,
+        params.taskItemId,
+        `[Gemini File API][SharedReferenceCacheFallback] ${JSON.stringify({
+          task_id: params.taskId,
+          error_message: getErrorMessage(error),
+          fallback: 'reference_pages_will_use_image_url_upload_per_call',
+        })}`,
+      );
+      cache = null;
+    }
+  } else {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCacheHit] ${JSON.stringify({
+        task_id: params.taskId,
+        template_id: params.templateId,
+        reference_page_count: params.pages.length,
+        cached_reference_page_count: cache?.files.length ?? 0,
+      })}`,
+    );
+  }
+
+  return attachSharedReferenceGeminiFiles(params.pages, cache);
+}
+
+const FINAL_TASK_ITEM_STATUSES = new Set([
+  'review_pending',
+  'reviewed',
+  'succeeded',
+  'failed',
+  'cancelled',
+  'completed',
+]);
+
+async function cleanupSharedReferenceGeminiCacheIfTaskFinished(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskItemId: string;
+  taskId: string;
+}) {
+  const llmConfig = getLlmRuntimeConfig('vision');
+
+  if (llmConfig.provider !== 'gemini') {
+    return;
+  }
+
+  const { data, error } = await params.admin
+    .from('generation_task_items')
+    .select('id, status, llm_input')
+    .eq('task_id', params.taskId);
+
+  if (error || !data) {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCleanupCheckFailed] ${JSON.stringify({
+        task_id: params.taskId,
+        error_message: error?.message ?? 'Failed to load task items.',
+      })}`,
+    );
+    return;
+  }
+
+  const rows = data as Array<{
+    id: string;
+    status?: string | null;
+    llm_input?: unknown;
+  }>;
+  const activeRows = rows.filter(
+    (row) => !FINAL_TASK_ITEM_STATUSES.has(row.status ?? ''),
+  );
+
+  if (activeRows.length > 0) {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCleanupDeferred] ${JSON.stringify({
+        task_id: params.taskId,
+        active_item_count: activeRows.length,
+        active_items: activeRows.map((row) => ({
+          id: row.id,
+          status: row.status ?? null,
+        })),
+      })}`,
+    );
+    return;
+  }
+
+  const cache =
+    rows
+      .map((row) => {
+        const llmInput =
+          row.llm_input && typeof row.llm_input === 'object'
+            ? (row.llm_input as Record<string, unknown>)
+            : null;
+
+        return normalizeSharedReferenceGeminiCache(
+          llmInput?.reference_gemini_files,
+        );
+      })
+      .find(Boolean) ?? null;
+
+  if (!cache) {
+    return;
+  }
+
+  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+  cache.files.forEach((entry) => {
+    const file = normalizeCachedGeminiFile(entry.file);
+
+    if (file) {
+      filesByNameOrUri.set(file.name ?? file.uri, file);
+    }
+  });
+  const files = Array.from(filesByNameOrUri.values());
+
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][SharedReferenceCleanupStart] ${JSON.stringify({
+      task_id: params.taskId,
+      uploaded_file_count: files.length,
+      reason: 'all_generation_task_items_finished',
+    })}`,
+  );
+  const cleanupResults = await cleanupGeminiUploadedFiles({
+    config: llmConfig,
+    files,
+  });
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][SharedReferenceCleanupComplete] ${JSON.stringify({
+      task_id: params.taskId,
+      cleanup_results: cleanupResults.map((result) =>
+        result.status === 'fulfilled'
+          ? result.value
+          : {
+              deleted: false,
+              reason: 'cleanup_rejected',
+              error:
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : String(result.reason),
+            },
+      ),
+    })}`,
+  );
+
+  const updateResults = await Promise.all(
+    rows.map((row) => {
+      const llmInput =
+        row.llm_input && typeof row.llm_input === 'object'
+          ? (row.llm_input as Record<string, unknown>)
+          : {};
+      const { reference_gemini_files: _referenceGeminiFiles, ...nextLlmInput } =
+        llmInput;
+
+      return params.admin
+        .from('generation_task_items')
+        .update({ llm_input: nextLlmInput })
+        .eq('id', row.id);
+    }),
+  );
+  const updateError = updateResults.find((result) => result.error)?.error;
+
+  if (updateError) {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini File API][SharedReferenceCacheClearFailed] ${JSON.stringify({
+        task_id: params.taskId,
+        error_message: updateError.message,
+      })}`,
+    );
+  }
+}
+
+async function cleanupCachedGeminiFilesForTaskItem(params: {
+  admin: ReturnType<typeof createSupabaseAdminClient>;
+  taskItemId: string;
+  pageImageAssets: ReturnType<typeof normalizePdfPageImageAssets>;
+}) {
+  const files = collectCachedGeminiFilesForCleanup(params.pageImageAssets);
+
+  if (files.length === 0) {
+    return;
+  }
+
+  const llmConfig = getLlmRuntimeConfig('vision');
+
+  if (llmConfig.provider !== 'gemini') {
+    return;
+  }
+
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][TaskCleanupStart] ${JSON.stringify({
+      uploaded_file_count: files.length,
+      reason: 'slot_fill_finished_or_fallback',
+    })}`,
+  );
+  const cleanupResults = await cleanupGeminiUploadedFiles({
+    config: llmConfig,
+    files,
+  });
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][TaskCleanupComplete] ${JSON.stringify({
+      cleanup_results: cleanupResults.map((result) =>
+        result.status === 'fulfilled'
+          ? result.value
+          : {
+              deleted: false,
+              reason: 'cleanup_rejected',
+              error:
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : String(result.reason),
+            },
+      ),
+    })}`,
+  );
 }
 
 async function runGenerationTaskItemSlotFill(params: {
@@ -696,13 +1341,38 @@ async function runGenerationTaskItemSlotFill(params: {
       })}`,
     );
 
+    const llmConfig = getLlmRuntimeConfig('vision');
+    const cachedGeminiVisionPages =
+      llmConfig.provider === 'gemini'
+        ? buildVisionPagesFromCachedGeminiFiles(pageImageAssets)
+        : [];
+    const canReuseCachedGeminiFiles =
+      cachedGeminiVisionPages.length === pageImageAssets.length &&
+      pageImageAssets.length > 0;
     const visionPages =
       precomputedVisionPages.length > 0
         ? precomputedVisionPages
-        : await loadVisionPagesFromStoredAssets({
-            admin,
-            pageImageAssets,
-          });
+        : canReuseCachedGeminiFiles
+          ? cachedGeminiVisionPages
+          : await loadVisionPagesFromStoredAssets({
+              admin,
+              pageImageAssets,
+            });
+
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[Gemini File API][SlotFillReuse] ${JSON.stringify({
+        provider: llmConfig.provider,
+        reused_cached_page_file_count: canReuseCachedGeminiFiles
+          ? cachedGeminiVisionPages.length
+          : 0,
+        fallback_to_supabase_download:
+          precomputedVisionPages.length === 0 && !canReuseCachedGeminiFiles,
+        cached_page_file_count: cachedGeminiVisionPages.length,
+        required_page_count: pageImageAssets.length,
+      })}`,
+    );
 
     if (visionPages.length === 0) {
       throw new Error('当前任务没有可读取的新 PDF 页面图片。');
@@ -715,6 +1385,14 @@ async function runGenerationTaskItemSlotFill(params: {
       templateId: params.item.template_id,
       slots: slotSchema,
     });
+    const referencePagesForSlotFill =
+      await getSharedReferencePagesForSlotFill({
+        admin,
+        taskItemId: params.item.id,
+        taskId: params.item.task_id,
+        templateId: params.item.template_id,
+        pages: referenceExamplePages.pages,
+      });
 
     await admin
       .from('generation_task_items')
@@ -770,7 +1448,7 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[PDF Fill][ReferenceExample] Using ${referenceExamplePages.pages.length} example PDF page image(s) with bbox for slot fill; skipped ${referenceExamplePages.skippedSlotsWithoutBbox} slot(s) without bbox, ${referenceExamplePages.skippedSlotsWithoutPageImage} slot(s) without readable stored example page image, and ${referenceExamplePages.skippedReferencePageDownloads.length} missing reference page object(s).`,
+      `[PDF Fill][ReferenceExample] Using ${referencePagesForSlotFill.length} example PDF page image(s) with bbox for slot fill; skipped ${referenceExamplePages.skippedSlotsWithoutBbox} slot(s) without bbox, ${referenceExamplePages.skippedSlotsWithoutPageImage} slot(s) without readable stored example page image, and ${referenceExamplePages.skippedReferencePageDownloads.length} missing reference page object(s).`,
     );
     await appendProcessingTrace(
       admin,
@@ -779,12 +1457,15 @@ async function runGenerationTaskItemSlotFill(params: {
         document_name: params.item.source_pdf_name,
         skipped_reference_page_downloads:
           referenceExamplePages.skippedReferencePageDownloads,
-        pages: referenceExamplePages.pages.map((page) => ({
+        pages: referencePagesForSlotFill.map((page) => ({
           example_pdf_file_name: page.example_pdf_file_name ?? null,
           page_number: page.page_number,
           original_page_number: page.original_page_number ?? page.page_number,
           annotated_preview_url: page.annotated_preview_url ?? null,
           annotated_storage_path: page.annotated_storage_path ?? null,
+          has_gemini_file: Boolean(page.gemini_file),
+          gemini_file_name: page.gemini_file?.name ?? null,
+          gemini_file_uri: page.gemini_file?.uri ?? null,
           annotated_slots: page.annotated_slots ?? [],
         })),
       })}`,
@@ -809,7 +1490,7 @@ async function runGenerationTaskItemSlotFill(params: {
       sourcePdfName: params.item.source_pdf_name,
       slotCount: slotSchema.length,
       visionPageCount: visionPages.length,
-      referenceExamplePageCount: referenceExamplePages.pages.length,
+      referenceExamplePageCount: referencePagesForSlotFill.length,
     });
 
     let lastLoggedCompletedSlots = -1;
@@ -817,7 +1498,7 @@ async function runGenerationTaskItemSlotFill(params: {
       pdfFileName: params.item.source_pdf_name,
       slots: slotSchema,
       visionPages,
-      referenceExamplePages: referenceExamplePages.pages,
+      referenceExamplePages: referencePagesForSlotFill,
       processStartedAtMs,
       processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
       onTrace: async ({ message }) => {
@@ -1006,6 +1687,17 @@ async function runGenerationTaskItemSlotFill(params: {
             storage_path: asset.storage_path,
           })),
       }),
+    });
+  } finally {
+    await cleanupCachedGeminiFilesForTaskItem({
+      admin,
+      taskItemId: params.item.id,
+      pageImageAssets: allPageImageAssets,
+    });
+    await cleanupSharedReferenceGeminiCacheIfTaskFinished({
+      admin,
+      taskItemId: params.item.id,
+      taskId: params.item.task_id,
     });
   }
 }

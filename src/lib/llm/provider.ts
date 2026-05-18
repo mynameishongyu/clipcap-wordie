@@ -367,6 +367,17 @@ export function buildChatCompletionBody(
         | Array<
             | { type: 'text'; text: string }
             | { type: 'image_url'; image_url: { url: string } }
+            | {
+                type: 'gemini_file';
+                gemini_file: {
+                  uri: string;
+                  name?: string | null;
+                  mime_type?: string | null;
+                  mimeType?: string | null;
+                  size_bytes?: number | null;
+                  display_name?: string | null;
+                };
+              }
           >;
     }>;
   },

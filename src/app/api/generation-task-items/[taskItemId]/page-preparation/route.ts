@@ -18,6 +18,7 @@ import {
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import {
   callGeminiFileApiChatCompletion,
+  cleanupGeminiUploadedFiles,
   summarizeGeminiFileApiRequestForTrace,
 } from '@/src/lib/llm/gemini-file-api';
 import {
@@ -59,6 +60,16 @@ type PageFilterDecision = {
 type PageFilterDropExample = {
   file_name: string;
   image_data_url: string;
+};
+
+type PageFilterGeminiFileReference = {
+  uri: string;
+  name?: string | null;
+  mime_type: string;
+  size_bytes?: number | null;
+  display_name?: string | null;
+  uploaded_at: string;
+  request_label: string;
 };
 
 function getPageFilterBatchSize() {
@@ -274,7 +285,10 @@ async function classifyVisionPagesForSlotFill(params: {
   onTrace?: (trace: { message: string }) => Promise<void> | void;
 }) {
   if (params.visionPages.length === 0) {
-    return [];
+    return {
+      decisions: [] as PageFilterDecision[],
+      geminiFilesByPageNumber: new Map<number, PageFilterGeminiFileReference>(),
+    };
   }
 
   const batchSize = getPageFilterBatchSize();
@@ -285,6 +299,10 @@ async function classifyVisionPagesForSlotFill(params: {
   }
 
   const results: PageFilterDecision[] = [];
+  const geminiFilesByPageNumber = new Map<
+    number,
+    PageFilterGeminiFileReference
+  >();
   const llmConfig = getLlmRuntimeConfig('vision');
   const traceConfig = getLlmRuntimeTraceConfig('vision');
 
@@ -448,14 +466,73 @@ async function classifyVisionPagesForSlotFill(params: {
       };
 
       if (llmConfig.provider === 'gemini') {
+        const requestLabel = `page filter batch ${batchIndex + 1}/${batches.length}`;
         const geminiResult = await callGeminiFileApiChatCompletion({
           config: llmConfig,
           body: requestBody,
-          requestLabel: `page filter batch ${batchIndex + 1}/${batches.length}`,
+          requestLabel,
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
+          cleanupUploadedFiles: false,
           onTrace: params.onTrace,
         });
+        const dropExampleFiles = geminiResult.uploadedFiles.slice(
+          0,
+          params.dropExamples.length,
+        );
+        const candidateFiles = geminiResult.uploadedFiles.slice(
+          params.dropExamples.length,
+        );
+        const uploadedAt = new Date().toISOString();
+
+        batch.forEach((page, index) => {
+          const file = candidateFiles[index];
+
+          if (!file?.uri) {
+            return;
+          }
+
+          geminiFilesByPageNumber.set(page.page_number, {
+            uri: file.uri,
+            name: file.name ?? null,
+            mime_type: file.mimeType,
+            size_bytes: file.sizeBytes,
+            display_name: file.displayName,
+            uploaded_at: uploadedAt,
+            request_label: requestLabel,
+          });
+        });
+
+        if (dropExampleFiles.length > 0) {
+          await params.onTrace?.({
+            message: `[Gemini File API][DropExampleCleanupStart] ${JSON.stringify({
+              request_label: requestLabel,
+              uploaded_file_count: dropExampleFiles.length,
+            })}`,
+          });
+          const dropExampleCleanupResults = await cleanupGeminiUploadedFiles({
+            config: llmConfig,
+            files: dropExampleFiles,
+            dispatcher: llmFetchDispatcher,
+          });
+          await params.onTrace?.({
+            message: `[Gemini File API][DropExampleCleanupComplete] ${JSON.stringify({
+              request_label: requestLabel,
+              cleanup_results: dropExampleCleanupResults.map((result) =>
+                result.status === 'fulfilled'
+                  ? result.value
+                  : {
+                      deleted: false,
+                      reason: 'cleanup_rejected',
+                      error:
+                        result.reason instanceof Error
+                          ? result.reason.message
+                          : String(result.reason),
+                    },
+              ),
+            })}`,
+          });
+        }
 
         await params.onTrace?.({
           message: `[PDF Fill][PageFilterGeminiFileApiRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
@@ -464,8 +541,10 @@ async function classifyVisionPagesForSlotFill(params: {
               config_scope: 'VISION_LLM',
               model: traceConfig.model,
               provider: traceConfig.provider,
-              request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
+              request_label: requestLabel,
               request_mode: 'gemini_file_api_generate_content',
+              candidate_gemini_file_count: candidateFiles.length,
+              retained_for_slot_fill_cleanup_later: true,
               ...summarizeGeminiFileApiRequestForTrace(geminiResult),
             },
           )}`,
@@ -523,7 +602,7 @@ async function classifyVisionPagesForSlotFill(params: {
     results.map((page) => [page.page_number, page]),
   );
 
-  return params.visionPages.map((page) => {
+  const decisions = params.visionPages.map((page) => {
     const decision = decisionByPage.get(page.page_number);
 
     return (
@@ -535,6 +614,11 @@ async function classifyVisionPagesForSlotFill(params: {
       }
     );
   });
+
+  return {
+    decisions,
+    geminiFilesByPageNumber,
+  };
 }
 
 async function runGenerationTaskItemPagePreparation(params: {
@@ -647,7 +731,7 @@ async function runGenerationTaskItemPagePreparation(params: {
                 admin,
                 pageImageAssets,
               });
-        const pageFilterDecisions = await classifyVisionPagesForSlotFill({
+        const pageFilterResult = await classifyVisionPagesForSlotFill({
           documentName: params.item.source_pdf_name,
           visionPages: visionPagesForFilter,
           dropExamples: pageFilterDropExamples,
@@ -655,6 +739,7 @@ async function runGenerationTaskItemPagePreparation(params: {
             await appendProcessingTrace(admin, params.item.id, message);
           },
         });
+        const pageFilterDecisions = pageFilterResult.decisions;
         const decisionByPageNumber = new Map(
           pageFilterDecisions.map((decision) => [
             decision.page_number,
@@ -668,6 +753,10 @@ async function runGenerationTaskItemPagePreparation(params: {
 
           return {
             ...asset,
+            gemini_file:
+              pageFilterResult.geminiFilesByPageNumber.get(
+                asset.uploaded_page_number,
+              ) ?? asset.gemini_file ?? null,
             filter_decision: normalizedDecision,
             filter_reason:
               decision?.reason ??

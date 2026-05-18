@@ -6,7 +6,18 @@ type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 
 export type GeminiFileApiMessagePart =
   | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string } };
+  | { type: 'image_url'; image_url: { url: string } }
+  | {
+      type: 'gemini_file';
+      gemini_file: {
+        uri: string;
+        name?: string | null;
+        mime_type?: string | null;
+        mimeType?: string | null;
+        size_bytes?: number | null;
+        display_name?: string | null;
+      };
+    };
 
 export interface GeminiFileApiChatCompletionBody {
   model: string;
@@ -16,7 +27,7 @@ export interface GeminiFileApiChatCompletionBody {
   }>;
 }
 
-interface UploadedGeminiFile {
+export interface UploadedGeminiFile {
   uri: string;
   name?: string;
   mimeType: string;
@@ -239,6 +250,69 @@ async function cleanupGeminiFiles(params: {
   );
 }
 
+export async function cleanupGeminiUploadedFiles(params: {
+  config: LlmRuntimeConfig;
+  files: UploadedGeminiFile[];
+  dispatcher?: UndiciFetchInit['dispatcher'];
+}) {
+  return cleanupGeminiFiles(params);
+}
+
+export async function uploadGeminiFilesToFileApi(params: {
+  config: LlmRuntimeConfig;
+  images: Array<{
+    dataUrl: string;
+    displayName: string;
+  }>;
+  requestLabel?: string;
+  dispatcher?: UndiciFetchInit['dispatcher'];
+  signal?: AbortSignal;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  const requestLabel = params.requestLabel ?? 'gemini file api upload';
+  const uploadStartedAt = Date.now();
+
+  await params.onTrace?.({
+    message: `[Gemini File API][UploadStart] ${JSON.stringify({
+      request_label: requestLabel,
+      image_count: params.images.length,
+      upload_concurrency: getGeminiFileUploadConcurrency(),
+    })}`,
+  });
+
+  const uploadedFiles = await runWithConcurrency(
+    params.images,
+    getGeminiFileUploadConcurrency(),
+    async (image) =>
+      uploadGeminiFile({
+        config: params.config,
+        dataUrl: image.dataUrl,
+        displayName: image.displayName,
+        dispatcher: params.dispatcher,
+        signal: params.signal,
+      }),
+  );
+  const uploadDurationMs = Date.now() - uploadStartedAt;
+
+  await params.onTrace?.({
+    message: `[Gemini File API][UploadComplete] ${JSON.stringify({
+      request_label: requestLabel,
+      uploaded_file_count: uploadedFiles.length,
+      upload_duration_ms: uploadDurationMs,
+      upload_duration_seconds: Number((uploadDurationMs / 1000).toFixed(2)),
+      uploaded_files: uploadedFiles.map((file) => ({
+        name: file.name ?? null,
+        uri: file.uri,
+        mime_type: file.mimeType,
+        size_bytes: file.sizeBytes,
+        display_name: file.displayName,
+      })),
+    })}`,
+  });
+
+  return uploadedFiles;
+}
+
 function collectImageParts(body: GeminiFileApiChatCompletionBody) {
   const imageParts: Array<{
     messageIndex: number;
@@ -300,6 +374,18 @@ function buildGeminiNativeRequestBody(params: {
                 return { text: part.text };
               }
 
+              if (part.type === 'gemini_file') {
+                return {
+                  file_data: {
+                    mime_type:
+                      part.gemini_file.mime_type ??
+                      part.gemini_file.mimeType ??
+                      'application/octet-stream',
+                    file_uri: part.gemini_file.uri,
+                  },
+                };
+              }
+
               const uploadedFile = params.uploadedFilesByPart.get(
                 `${messageIndex}:${partIndex}`,
               );
@@ -339,6 +425,7 @@ export async function callGeminiFileApiChatCompletion(params: {
   requestLabel?: string;
   dispatcher?: UndiciFetchInit['dispatcher'];
   signal?: AbortSignal;
+  cleanupUploadedFiles?: boolean;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const imageParts = collectImageParts(params.body);
@@ -455,23 +542,36 @@ export async function callGeminiFileApiChatCompletion(params: {
   } finally {
     // Gemini File API storage is quota-limited. Each call owns these uploads,
     // so clean them up once generateContent has consumed the file_uri values.
-    await params.onTrace?.({
-      message: `[Gemini File API][CleanupStart] ${JSON.stringify({
-        request_label: requestLabel,
-        uploaded_file_count: uploadedFiles.length,
-      })}`,
-    });
-    cleanupResults = await cleanupGeminiFiles({
-      config: params.config,
-      files: uploadedFiles,
-      dispatcher: params.dispatcher,
-    });
-    await params.onTrace?.({
-      message: `[Gemini File API][CleanupComplete] ${JSON.stringify({
-        request_label: requestLabel,
-        cleanup_results: summarizeCleanupResults(cleanupResults),
-      })}`,
-    });
+    const shouldCleanupUploadedFiles =
+      params.cleanupUploadedFiles !== false || !responsePayload;
+
+    if (shouldCleanupUploadedFiles) {
+      await params.onTrace?.({
+        message: `[Gemini File API][CleanupStart] ${JSON.stringify({
+          request_label: requestLabel,
+          uploaded_file_count: uploadedFiles.length,
+        })}`,
+      });
+      cleanupResults = await cleanupGeminiFiles({
+        config: params.config,
+        files: uploadedFiles,
+        dispatcher: params.dispatcher,
+      });
+      await params.onTrace?.({
+        message: `[Gemini File API][CleanupComplete] ${JSON.stringify({
+          request_label: requestLabel,
+          cleanup_results: summarizeCleanupResults(cleanupResults),
+        })}`,
+      });
+    } else {
+      await params.onTrace?.({
+        message: `[Gemini File API][CleanupSkipped] ${JSON.stringify({
+          request_label: requestLabel,
+          uploaded_file_count: uploadedFiles.length,
+          reason: 'caller_will_manage_uploaded_files',
+        })}`,
+      });
+    }
   }
 
   const text =

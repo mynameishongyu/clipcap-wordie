@@ -17,6 +17,15 @@ export type PdfPageImageAsset = {
   filter_reason?: string | null;
   filter_confidence?: number | null;
   used_for_slot_fill?: boolean;
+  gemini_file?: {
+    uri: string;
+    name?: string | null;
+    mime_type: string;
+    size_bytes?: number | null;
+    display_name?: string | null;
+    uploaded_at?: string | null;
+    request_label?: string | null;
+  } | null;
   rotation_applied?: -90 | 0 | 90 | 180;
   crop?: {
     left: number;
