@@ -22,6 +22,8 @@ interface UploadedFileMetadata {
     uploaded_page_number?: number;
     original_page_number?: number;
     storage_path?: string;
+    content_type?: string;
+    size?: number;
     rotation_applied?: -90 | 0 | 90 | 180;
     crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
   }>;
@@ -56,6 +58,8 @@ function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined)
         uploaded_page_number: number;
         original_page_number: number;
         storage_path: string;
+        content_type?: string;
+        size?: number;
         rotation_applied?: -90 | 0 | 90 | 180;
         crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
       } =>
@@ -72,6 +76,12 @@ function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined)
       uploaded_page_number: entry.uploaded_page_number,
       original_page_number: entry.original_page_number,
       storage_path: entry.storage_path,
+      ...(typeof entry.content_type === 'string' && entry.content_type.trim()
+        ? { content_type: entry.content_type.trim() }
+        : {}),
+      ...(typeof entry.size === 'number' && Number.isFinite(entry.size)
+        ? { size: entry.size }
+        : {}),
       ...(typeof entry.rotation_applied === 'number'
         ? { rotation_applied: entry.rotation_applied }
         : {}),

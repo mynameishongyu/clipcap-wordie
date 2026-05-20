@@ -135,6 +135,35 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function getVercelMemoryUsageSnapshot(stage: string) {
+  const memory = process.memoryUsage();
+
+  return {
+    stage,
+    rss_bytes: memory.rss,
+    heap_total_bytes: memory.heapTotal,
+    heap_used_bytes: memory.heapUsed,
+    external_bytes: memory.external,
+    array_buffers_bytes: memory.arrayBuffers,
+  };
+}
+
+async function appendMemoryTrace(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  taskItemId: string,
+  stage: string,
+  details?: Record<string, unknown>,
+) {
+  await appendProcessingTrace(
+    admin,
+    taskItemId,
+    `[Vercel Memory][PDF Fill][PagePreparation] ${JSON.stringify({
+      ...getVercelMemoryUsageSnapshot(stage),
+      ...(details ?? {}),
+    })}`,
+  );
+}
+
 function normalizeJsonText(rawContent: string) {
   const trimmed = rawContent.trim();
   const withoutCodeFence = trimmed
@@ -728,6 +757,12 @@ async function runGenerationTaskItemPagePreparation(params: {
       '当前流程正在准备 PDF 页面图片并进行视觉页面过滤；过滤完成后会等待用户确认用于回填的页面。',
     );
 
+    await appendMemoryTrace(admin, params.item.id, 'route_started', {
+      source_pdf_name: params.item.source_pdf_name,
+      page_image_asset_count: pageImageAssets.length,
+      precomputed_vision_page_count: precomputedVisionPages.length,
+    });
+
     await logEvent({
       ownerId: params.item.owner_id,
       actorEmail: params.actorEmail,
@@ -800,6 +835,10 @@ async function runGenerationTaskItemPagePreparation(params: {
                 admin,
                 pageImageAssets,
               });
+        await appendMemoryTrace(admin, params.item.id, 'page_filter_start', {
+          source_pdf_name: params.item.source_pdf_name,
+          page_count: visionPagesForFilter.length,
+        });
         const pageFilterResult = await classifyVisionPagesForSlotFill({
           documentName: params.item.source_pdf_name,
           visionPages: visionPagesForFilter,
@@ -807,6 +846,10 @@ async function runGenerationTaskItemPagePreparation(params: {
           onTrace: async ({ message }) => {
             await appendProcessingTrace(admin, params.item.id, message);
           },
+        });
+        await appendMemoryTrace(admin, params.item.id, 'page_filter_done', {
+          source_pdf_name: params.item.source_pdf_name,
+          decision_count: pageFilterResult.decisions.length,
         });
         const pageFilterDecisions = pageFilterResult.decisions;
         const decisionByPageNumber = new Map(
@@ -932,6 +975,12 @@ async function runGenerationTaskItemPagePreparation(params: {
       .eq('id', params.item.id)
       .select('id, status')
       .single();
+    await appendMemoryTrace(admin, params.item.id, 'page_filter_persisted', {
+      total_page_count: nextPageImageAssets.length,
+      kept_page_count: keptPageCount,
+      dropped_page_count: droppedPageCount,
+      review_page_count: reviewPageCount,
+    });
 
     if (updatedItemError) {
       throw updatedItemError;
@@ -947,7 +996,30 @@ async function runGenerationTaskItemPagePreparation(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[PDF Fill][PageFilter] PDF page images prepared and visually filtered: total=${nextPageImageAssets.length}, kept=${keptPageCount}, dropped=${droppedPageCount}, review=${reviewPageCount}. Waiting for user confirmation before slot fill.`,
+      `[PDF Fill][PageFilterAutoSelection] ${JSON.stringify({
+        source_pdf_name: params.item.source_pdf_name,
+        kept_pages: nextPageImageAssets
+          .filter((asset) => asset.used_for_slot_fill !== false)
+          .map((asset) => ({
+            uploaded_page_number: asset.uploaded_page_number,
+            original_page_number: asset.original_page_number,
+            decision: asset.filter_decision ?? null,
+            reason: asset.filter_reason ?? null,
+          })),
+        filtered_pages: nextPageImageAssets
+          .filter((asset) => asset.used_for_slot_fill === false)
+          .map((asset) => ({
+            uploaded_page_number: asset.uploaded_page_number,
+            original_page_number: asset.original_page_number,
+            decision: asset.filter_decision ?? null,
+            reason: asset.filter_reason ?? null,
+          })),
+      })}`,
+    );
+    await appendProcessingTrace(
+      admin,
+      params.item.id,
+      `[PDF Fill][PageFilter] PDF page images prepared and visually filtered: total=${nextPageImageAssets.length}, kept=${keptPageCount}, dropped=${droppedPageCount}, review=${reviewPageCount}. Browser will automatically start slot fill with kept/review pages.`,
     );
     await appendProcessingTrace(
       admin,

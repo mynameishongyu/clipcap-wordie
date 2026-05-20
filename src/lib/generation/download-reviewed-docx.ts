@@ -15,7 +15,17 @@ function ensureDocxExtension(value: string) {
 export function requestReviewedDocxDownload(input: {
   taskItemId: string;
   defaultFileName: string;
+  requireUnreviewedWarning?: boolean;
 }) {
+  if (
+    input.requireUnreviewedWarning &&
+    !window.confirm(
+      '当前内容还没有经过人工核查，可能存在填写不准确的情况。确认仍要下载吗？',
+    )
+  ) {
+    return;
+  }
+
   const sanitizedDefaultName = ensureDocxExtension(
     sanitizeDownloadFileName(input.defaultFileName) || '核查结果.docx',
   );

@@ -172,12 +172,12 @@ declare global {
   }
 }
 
-function createUploadRow(): UploadRow {
+function createUploadRow(file: File | null = null): UploadRow {
   return {
     id: crypto.randomUUID(),
-    file: null,
+    file,
     parsedPdf: null,
-    isParsing: false,
+    isParsing: Boolean(file),
     parseError: null,
     forceVisionPageFill: false,
   };
@@ -1019,6 +1019,49 @@ export function BatchGenerateModal({
   }, [taskId, taskQuery.data]);
 
   useEffect(() => {
+    if (!taskId || !taskQuery.data) {
+      return;
+    }
+
+    taskQuery.data.items.forEach((item) => {
+      if (item.status !== 'pdf_pages_ready') {
+        return;
+      }
+
+      const pageFilterPages = item.pdf_page_filter_pages ?? [];
+      const confirmedPageNumbers = pageFilterPages
+        .filter((page) => page.selectedForSlotFill !== false)
+        .map((page) => page.uploadedPageNumber);
+      const filteredPageNumbers = pageFilterPages
+        .filter((page) => page.selectedForSlotFill === false)
+        .map((page) => page.uploadedPageNumber);
+
+      console.info(
+        `[Batch Generate][${item.source_pdf_name}] 页面过滤完成，自动使用保留页面进入槽位回填`,
+        {
+          taskItemId: item.id,
+          keptPageNumbers: confirmedPageNumbers,
+          filteredPageNumbers,
+          pageFilterPages,
+        },
+      );
+
+      if (confirmedPageNumbers.length === 0) {
+        console.warn(
+          `[Batch Generate][${item.source_pdf_name}] 页面过滤没有保留页面，暂不自动启动回填`,
+          {
+            taskItemId: item.id,
+            pageFilterPages,
+          },
+        );
+        return;
+      }
+
+      launchSlotFillForItem(item, 'polling', confirmedPageNumbers);
+    });
+  }, [launchSlotFillForItem, taskId, taskQuery.data]);
+
+  useEffect(() => {
     if (!taskQuery.data) {
       return;
     }
@@ -1076,6 +1119,9 @@ export function BatchGenerateModal({
         );
         const pageFilterRawMatch = traceLine.match(
           /^\[PDF Fill\]\[PageFilterRaw\]\[([^\]]+)\] (.+)$/,
+        );
+        const pageFilterAutoSelectionMatch = traceLine.match(
+          /^\[PDF Fill\]\[PageFilterAutoSelection\] (.+)$/,
         );
         const directVisionPromptMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionPrompt\]\[([^\]]+)\] (.+)$/,
@@ -1331,6 +1377,23 @@ export function BatchGenerateModal({
           logConsoleTextChunks(
             `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM parsed result JSON (${label})`,
             JSON.stringify(parsedResult.parsed_results ?? parsedResult, null, 2),
+          );
+          return;
+        }
+
+        if (pageFilterAutoSelectionMatch) {
+          const parsedSelection = parseTraceJson<Record<string, unknown>>(
+            pageFilterAutoSelectionMatch[1] ?? '{}',
+            'page filter auto selection',
+          );
+
+          if (!parsedSelection) {
+            return;
+          }
+
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Gemini 页面过滤自动选择结果`,
+            parsedSelection,
           );
           return;
         }
@@ -2319,6 +2382,27 @@ export function BatchGenerateModal({
     );
   };
 
+  const parsePdfIntoRow = async (rowId: string, file: File) => {
+    try {
+      const parsedPdf = await parsePdf(file);
+
+      updateRow(rowId, {
+        parsedPdf,
+        isParsing: false,
+        parseError: null,
+      });
+    } catch (error) {
+      updateRow(rowId, {
+        parsedPdf: null,
+        isParsing: false,
+        parseError:
+          error instanceof Error
+            ? error.message
+            : 'PDF 解析失败，请重新选择文件。',
+      });
+    }
+  };
+
   const logSubmissionStage = (stage: {
     title: string;
     description: string;
@@ -2379,24 +2463,89 @@ export function BatchGenerateModal({
       return;
     }
 
-    try {
-      const parsedPdf = await parsePdf(file);
+    await parsePdfIntoRow(rowId, file);
+  };
 
-      updateRow(rowId, {
-        parsedPdf,
-        isParsing: false,
-        parseError: null,
+  const handleSelectPdfFiles = (fileList: FileList | File[]) => {
+    if (taskId || isPreparingFiles) {
+      return;
+    }
+
+    const incomingFiles = Array.from(fileList).filter((file) =>
+      file.name.toLowerCase().endsWith('.pdf'),
+    );
+
+    if (incomingFiles.length === 0) {
+      notifications.show({
+        color: 'yellow',
+        title: '没有可用 PDF',
+        message: '请拖入或选择 PDF 文件。',
       });
-    } catch (error) {
-      updateRow(rowId, {
-        parsedPdf: null,
-        isParsing: false,
-        parseError:
-          error instanceof Error
-            ? error.message
-            : 'PDF 解析失败，请重新选择文件。',
+      return;
+    }
+
+    const occupiedRows = rows.filter((row) => row.file);
+    const seenFileNames = new Set(
+      occupiedRows.map((row) => normalizeUploadFileName(row.file!.name)),
+    );
+    const duplicateFileNames: string[] = [];
+    const acceptedFiles: File[] = [];
+
+    incomingFiles.forEach((file) => {
+      const normalizedFileName = normalizeUploadFileName(file.name);
+
+      if (seenFileNames.has(normalizedFileName)) {
+        duplicateFileNames.push(file.name);
+        return;
+      }
+
+      seenFileNames.add(normalizedFileName);
+      acceptedFiles.push(file);
+    });
+
+    const availableSlots = Math.max(
+      0,
+      maxPdfFillTaskCount - occupiedRows.length,
+    );
+    const limitedFiles = acceptedFiles.slice(0, availableSlots);
+    const truncatedCount = Math.max(0, acceptedFiles.length - limitedFiles.length);
+    const nextRows = limitedFiles.map((file) => createUploadRow(file));
+
+    if (duplicateFileNames.length > 0) {
+      console.warn('[Batch Generate][Bulk Upload] Duplicate PDF names skipped', {
+        duplicateFileNames,
+      });
+      notifications.show({
+        color: 'yellow',
+        title: '已跳过重复文件名',
+        message: `检测到 ${duplicateFileNames.length} 个重复文件名，已保留每个文件名的第一个。`,
       });
     }
+
+    if (truncatedCount > 0) {
+      console.warn('[Batch Generate][Bulk Upload] PDF count limited', {
+        maxPdfFillTaskCount,
+        truncatedCount,
+        acceptedFileNames: acceptedFiles.map((file) => file.name),
+      });
+      notifications.show({
+        color: 'yellow',
+        title: '已按任务数量上限截断',
+        message: `一次最多 ${maxPdfFillTaskCount} 个 PDF，已选取前 ${maxPdfFillTaskCount} 个。`,
+      });
+    }
+
+    if (nextRows.length === 0) {
+      setRows(occupiedRows.length > 0 ? occupiedRows : [createUploadRow()]);
+      return;
+    }
+
+    setRows([...occupiedRows, ...nextRows]);
+    nextRows.forEach((row) => {
+      if (row.file) {
+        void parsePdfIntoRow(row.id, row.file);
+      }
+    });
   };
 
   const handleCreateTask = async () => {
@@ -2465,7 +2614,7 @@ export function BatchGenerateModal({
           );
           const renderDurationMs = Date.now() - renderStartedAt;
           console.info(
-            `[Batch Generate][${file.name}] PDF 转 PNG 总耗时：${formatDurationMs(
+            `[Batch Generate][${file.name}] PDF 页面图片生成总耗时：${formatDurationMs(
               renderDurationMs,
             )}`,
             {
@@ -2551,7 +2700,7 @@ export function BatchGenerateModal({
       );
       const renderAllDurationMs = Date.now() - renderAllStartedAt;
       console.info(
-        `[Batch Generate] PDF 转 PNG 全部文件总耗时：${formatDurationMs(
+        `[Batch Generate] PDF 页面图片生成全部文件总耗时：${formatDurationMs(
           renderAllDurationMs,
         )}`,
         {
@@ -2590,7 +2739,7 @@ export function BatchGenerateModal({
       notifications.show({
         color: 'teal',
         title: '页面准备已开始',
-        message: `已创建 1 个任务，包含 ${result.items.length} 个 PDF 子任务。页面准备完成后会继续进入回填确认流程。`,
+        message: `已创建 1 个任务，包含 ${result.items.length} 个 PDF 子任务。页面过滤完成后会自动进入回填。`,
       });
     } catch (error) {
       notifications.show({
@@ -2609,14 +2758,14 @@ export function BatchGenerateModal({
 
   const modalDescription = useMemo(() => {
     if (!taskId) {
-      return '每条记录上传一个 PDF。点击后会先解析、上传并准备页面。';
+      return '可一次拖入多份 PDF。系统会解析、上传并自动使用过滤后的保留页面回填。';
     }
 
     if (taskQuery.isLoading) {
       return '任务已创建，正在同步最新状态。';
     }
 
-    return '任务已经开始执行。页面准备完成后会进入回填确认；核查完毕后会显示下载结果按钮。';
+    return '任务已经开始执行。页面过滤完成后会自动进入回填；结果返回后可选择核查或直接下载。';
   }, [taskId, taskQuery.isLoading]);
 
   return (
@@ -2710,6 +2859,53 @@ export function BatchGenerateModal({
         {!taskId ? (
           <>
             <Stack gap="md">
+              <Paper
+                p="lg"
+                radius="lg"
+                withBorder
+                style={{
+                  borderStyle: 'dashed',
+                  background: 'rgba(255,255,255,0.03)',
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  handleSelectPdfFiles(event.dataTransfer.files);
+                }}
+              >
+                <input
+                  accept="application/pdf,.pdf"
+                  id="generation-pdf-bulk-upload"
+                  multiple
+                  style={{ display: 'none' }}
+                  type="file"
+                  onChange={(event) => {
+                    handleSelectPdfFiles(event.currentTarget.files ?? []);
+                    event.currentTarget.value = '';
+                  }}
+                />
+                <Group justify="space-between" align="center">
+                  <div>
+                    <Text fw={700} size="sm">
+                      批量拖入 PDF
+                    </Text>
+                    <Text c="dimmed" size="xs">
+                      可一次拖入多份 PDF；重复文件名会自动保留一个，最多{' '}
+                      {maxPdfFillTaskCount} 个任务。
+                    </Text>
+                  </div>
+                  <Button
+                    component="label"
+                    htmlFor="generation-pdf-bulk-upload"
+                    radius="xl"
+                    variant="light"
+                  >
+                    选择一批 PDF
+                  </Button>
+                </Group>
+              </Paper>
               {rows.map((row, index) => (
                 <Paper key={row.id} p="md" radius="xl" withBorder>
                   <Stack gap="sm">
@@ -2884,7 +3080,7 @@ export function BatchGenerateModal({
                   tick,
                   clientStartedAt,
                 );
-                const isReviewed = false;
+                const isReviewed = item.status === 'reviewed';
                 const pageFilterPages = item.pdf_page_filter_pages ?? [];
                 const confirmedPageNumbers =
                   confirmedPageNumbersByItemId[item.id] ??
@@ -2955,10 +3151,10 @@ export function BatchGenerateModal({
                               <Group justify="space-between" align="flex-start">
                                 <div>
                                   <Text fw={700} size="sm">
-                                    确认用于回填的页面
+                                    页面过滤结果
                                   </Text>
                                   <Text c="dimmed" size="xs">
-                                    系统已过滤掉疑似无关页面。请确认保留页，误删的页面可以恢复。
+                                    系统会自动使用保留页面进入回填。下方结果仅用于调试查看。
                                   </Text>
                                 </div>
                                 <Button
@@ -2979,7 +3175,7 @@ export function BatchGenerateModal({
                                     );
                                   }}
                                 >
-                                  确认并开始回填
+                                  立即开始回填
                                 </Button>
                               </Group>
 
@@ -3120,14 +3316,14 @@ export function BatchGenerateModal({
                         </>
                       ) : null}
 
-                      {item.status === 'review_pending' ? (
+                      {['review_pending', 'reviewed'].includes(item.status) ? (
                         <>
                           <Divider />
                           <Group justify="space-between" align="center">
                             <Text c="dimmed" size="sm">
                               {isReviewed
                                 ? '这个文件已经核查完毕，可以继续查看核查页或直接下载结果。'
-                                : '槽位结果已返回。请打开新的核查页确认后，再允许下载结果。'}
+                                : '槽位结果已返回。可以先下载未核查结果，也可以进入核查页修改后再下载。'}
                             </Text>
                             <Group>
                               <Button
@@ -3156,7 +3352,21 @@ export function BatchGenerateModal({
                                 >
                                   下载结果
                                 </Button>
-                              ) : null}
+                              ) : (
+                                <Button
+                                  radius="xl"
+                                  variant="default"
+                                  onClick={() => {
+                                    requestReviewedDocxDownload({
+                                      taskItemId: item.id,
+                                      defaultFileName: `${innerProps.templateName}-${item.source_pdf_name.replace(/\.pdf$/i, '')}-未核查结果.docx`,
+                                      requireUnreviewedWarning: true,
+                                    });
+                                  }}
+                                >
+                                  下载未核查结果
+                                </Button>
+                              )}
                             </Group>
                           </Group>
                         </>

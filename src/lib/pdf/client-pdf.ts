@@ -34,7 +34,7 @@ export interface PdfVisionPageCrop {
 export type PdfVisionPageRotation = -90 | 0 | 90 | 180;
 
 const DEFAULT_PDF_RENDER_SCALE = 6.0;
-const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/png';
+const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/jpeg';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
 const DEFAULT_PDF_VISION_RENDER_CONCURRENCY = 3;
 const MAX_PDF_VISION_RENDER_CONCURRENCY = 8;
@@ -81,13 +81,21 @@ function getPdfRenderScale() {
 function getPdfRenderImageFormat(): PdfRenderImageFormat {
   const rawValue =
     process.env.NEXT_PUBLIC_PDF_RENDER_IMAGE_FORMAT?.trim().toLowerCase();
+  const normalizedValue =
+    rawValue === 'jpeg' ||
+    rawValue === 'jpg' ||
+    rawValue === 'jepg' ||
+    rawValue === 'image/jpg' ||
+    rawValue === 'image/jepg'
+      ? 'image/jpeg'
+      : rawValue;
 
   if (
     SUPPORTED_PDF_RENDER_IMAGE_FORMATS.includes(
-      rawValue as PdfRenderImageFormat,
+      normalizedValue as PdfRenderImageFormat,
     )
   ) {
-    return rawValue as PdfRenderImageFormat;
+    return normalizedValue as PdfRenderImageFormat;
   }
 
   return DEFAULT_PDF_RENDER_IMAGE_FORMAT;

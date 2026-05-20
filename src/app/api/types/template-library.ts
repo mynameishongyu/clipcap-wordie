@@ -6,6 +6,9 @@ export const savedTemplateSummarySchema = z.object({
   upload_docx_name: z.string().nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
+  annotated_reference_page_numbers_to_refresh: z
+    .array(z.number().int().positive())
+    .optional(),
 });
 
 export const savedTemplateDetailSchema = savedTemplateSummarySchema.extend({

@@ -34,6 +34,7 @@ import type {
 } from '@/src/app/api/types/template-slot-extraction';
 import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
+import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import {
   SLOT_REVIEW_SESSION_KEY,
@@ -1290,6 +1291,269 @@ function PdfEvidencePageCanvas({
   );
 }
 
+function getPdfEvidenceMatchSlotKey(match: PdfEvidenceMatch) {
+  return `${match.paragraph_result_index}-${match.item_index}-${match.sequence}`;
+}
+
+function getReferencePageImageSource(
+  page: NonNullable<SlotReviewSessionPayload['pdfEvidence']>['pages'][number],
+) {
+  return page.imageDataUrl ?? page.imageUrl ?? page.fallbackImageUrl ?? '';
+}
+
+async function loadImageElementForCanvas(sourceUrl: string) {
+  const response = await fetch(sourceUrl);
+
+  if (!response.ok) {
+    throw new Error(`参考图读取失败：${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const nextImage = new Image();
+
+      nextImage.onload = () => resolve(nextImage);
+      nextImage.onerror = () => reject(new Error('参考图加载失败。'));
+      nextImage.src = objectUrl;
+    });
+
+    return { image, objectUrl };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
+
+function canvasToPngBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('带定位参考图导出失败。'));
+        return;
+      }
+
+      resolve(blob);
+    }, 'image/png');
+  });
+}
+
+async function buildAnnotatedReferencePageBlob(input: {
+  sourceUrl: string;
+  matches: PdfEvidenceMatch[];
+}) {
+  const { image, objectUrl } = await loadImageElementForCanvas(input.sourceUrl);
+
+  try {
+    const canvas = document.createElement('canvas');
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+
+    if (!context || width <= 0 || height <= 0) {
+      throw new Error('参考图画布创建失败。');
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    context.drawImage(image, 0, 0, width, height);
+
+    const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
+    const labelFontSize = Math.max(
+      10,
+      Math.round(Math.min(width, height) * 0.006),
+    );
+    const labelPaddingX = Math.max(4, Math.round(labelFontSize * 0.28));
+    const labelPaddingY = Math.max(2, Math.round(labelFontSize * 0.18));
+    const groupedMatches = new Map<string, PdfEvidenceMatch[]>();
+
+    input.matches.forEach((match) => {
+      if (!match.bbox) {
+        return;
+      }
+
+      const key = [
+        match.bbox.x,
+        match.bbox.y,
+        match.bbox.width,
+        match.bbox.height,
+      ]
+        .map((value) => Number(value).toFixed(6))
+        .join(':');
+      const currentMatches = groupedMatches.get(key) ?? [];
+
+      currentMatches.push(match);
+      groupedMatches.set(key, currentMatches);
+    });
+
+    context.font = `${labelFontSize}px Arial, sans-serif`;
+    context.textBaseline = 'top';
+
+    groupedMatches.forEach((matches) => {
+      const bbox = matches[0]?.bbox;
+
+      if (!bbox) {
+        return;
+      }
+
+      const left = Math.max(0, Math.min(width, bbox.x * width));
+      const top = Math.max(0, Math.min(height, bbox.y * height));
+      const boxWidth = Math.max(1, Math.min(width - left, bbox.width * width));
+      const boxHeight = Math.max(
+        1,
+        Math.min(height - top, bbox.height * height),
+      );
+      const labels = matches.map(getPdfEvidenceMatchSlotKey);
+      const measuredWidth = Math.max(
+        ...labels.map((label) => context.measureText(label).width),
+      );
+      const labelLineHeight = Math.ceil(labelFontSize * 1.14);
+      const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
+      const labelHeight = labels.length * labelLineHeight + labelPaddingY * 2;
+      const labelLeft = Math.max(
+        0,
+        Math.min(width - labelWidth, left - lineWidth),
+      );
+      const labelTop = Math.max(
+        0,
+        Math.min(height - labelHeight, top - labelHeight - lineWidth),
+      );
+
+      context.fillStyle = 'rgba(255, 153, 0, 0.08)';
+      context.fillRect(left, top, boxWidth, boxHeight);
+      context.strokeStyle = '#ff9900';
+      context.lineWidth = lineWidth;
+      context.strokeRect(left, top, boxWidth, boxHeight);
+      context.fillStyle = 'rgba(255, 153, 0, 0.92)';
+      context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
+      context.fillStyle = '#111111';
+      labels.forEach((label, labelIndex) => {
+        context.fillText(
+          label,
+          labelLeft + labelPaddingX,
+          labelTop + labelPaddingY + labelIndex * labelLineHeight,
+        );
+      });
+    });
+
+    return canvasToPngBlob(canvas);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function uploadAnnotatedReferencePagesForTemplate(input: {
+  templateId: string;
+  payload: SlotReviewSessionPayload;
+  pageNumbersToRefresh?: number[];
+}) {
+  const pdfEvidence = input.payload.pdfEvidence;
+
+  if (!pdfEvidence?.pages.length || !pdfEvidence.matches.length) {
+    return input.payload;
+  }
+
+  const supabase = getSupabaseBrowserClient();
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    throw new Error('请先登录后再保存带定位参考图。');
+  }
+
+  const matchesByPageNumber = new Map<number, PdfEvidenceMatch[]>();
+  const pageNumberFilter = input.pageNumbersToRefresh
+    ? new Set(input.pageNumbersToRefresh)
+    : null;
+
+  if (pageNumberFilter && pageNumberFilter.size === 0) {
+    browserProcessLog.info('[Slot Review][Annotated Reference] No changed pages');
+    return input.payload;
+  }
+
+  pdfEvidence.matches.forEach((match) => {
+    if (!match.bbox || (pageNumberFilter && !pageNumberFilter.has(match.page_number))) {
+      return;
+    }
+
+    const pageMatches = matchesByPageNumber.get(match.page_number) ?? [];
+
+    pageMatches.push(match);
+    matchesByPageNumber.set(match.page_number, pageMatches);
+  });
+
+  if (matchesByPageNumber.size === 0) {
+    return input.payload;
+  }
+
+  const startedAt = performance.now();
+  const uploadedStoragePaths = new Map<number, string>();
+
+  browserProcessLog.info('[Slot Review][Annotated Reference] Upload started', {
+    templateId: input.templateId,
+    pageCount: matchesByPageNumber.size,
+  });
+
+  for (const page of pdfEvidence.pages) {
+    const matches = matchesByPageNumber.get(page.pageNumber) ?? [];
+    const sourceUrl = getReferencePageImageSource(page);
+
+    if (matches.length === 0 || !sourceUrl) {
+      continue;
+    }
+
+    const pageStartedAt = performance.now();
+    const annotatedBlob = await buildAnnotatedReferencePageBlob({
+      sourceUrl,
+      matches,
+    });
+    const storagePath = `${user.id}/template-reference-pages/annotated/${input.templateId}/page-${page.pageNumber}.png`;
+    const { error } = await supabase.storage
+      .from('generation-pdfs')
+      .upload(storagePath, annotatedBlob, {
+        contentType: 'image/png',
+        upsert: true,
+      });
+
+    if (error) {
+      throw new Error(`保存第 ${page.pageNumber} 页带定位参考图失败：${error.message}`);
+    }
+
+    uploadedStoragePaths.set(page.pageNumber, storagePath);
+    browserProcessLog.info('[Slot Review][Annotated Reference] Page uploaded', {
+      templateId: input.templateId,
+      pageNumber: page.pageNumber,
+      storagePath,
+      slotCount: matches.length,
+      size: annotatedBlob.size,
+      durationMs: Math.round(performance.now() - pageStartedAt),
+    });
+  }
+
+  browserProcessLog.info('[Slot Review][Annotated Reference] Upload completed', {
+    templateId: input.templateId,
+    pageCount: uploadedStoragePaths.size,
+    durationMs: Math.round(performance.now() - startedAt),
+  });
+
+  return {
+    ...input.payload,
+    pdfEvidence: {
+      ...pdfEvidence,
+      pages: pdfEvidence.pages.map((page) => ({
+        ...page,
+        ...(uploadedStoragePaths.has(page.pageNumber)
+          ? { annotatedStoragePath: uploadedStoragePaths.get(page.pageNumber) }
+          : {}),
+      })),
+    },
+  } satisfies SlotReviewSessionPayload;
+}
+
 function logPdfBboxMappingDebug(input: {
   item: EditableExtractionItem;
   match: PdfEvidenceMatch;
@@ -2110,8 +2374,38 @@ export function SlotReviewWorkspace() {
           slotReviewPayload: nextPayload,
           slotPreview: buildJsonPreviewPayload(visibleItems, nextPayload),
         });
-        const savedPayload: SlotReviewSessionPayload = {
+        let annotatedPayload: SlotReviewSessionPayload = {
           ...nextPayload,
+          templateId: savedTemplate.id,
+          templateName: savedTemplate.template_name,
+        };
+        let didSaveAnnotatedReferencePages = true;
+
+        try {
+          annotatedPayload = await uploadAnnotatedReferencePagesForTemplate({
+            templateId: savedTemplate.id,
+            payload: annotatedPayload,
+            pageNumbersToRefresh:
+              savedTemplate.annotated_reference_page_numbers_to_refresh,
+          });
+        } catch (error) {
+          didSaveAnnotatedReferencePages = false;
+          browserProcessLog.error(
+            '[Slot Review][Annotated Reference] Upload failed',
+            error,
+          );
+          notifications.show({
+            color: 'yellow',
+            title: '带定位参考图保存失败',
+            message:
+              error instanceof Error
+                ? error.message
+                : '模板已保存，但带定位参考图没有保存成功。后续回填可能缺少参考定位图。',
+          });
+        }
+
+        const savedPayload: SlotReviewSessionPayload = {
+          ...annotatedPayload,
           templateId: savedTemplate.id,
           templateName: savedTemplate.template_name,
           uploadDocxName:
@@ -2132,7 +2426,9 @@ export function SlotReviewWorkspace() {
         notifications.show({
           color: 'teal',
           title: '模板已保存',
-          message: '模板名称、DOCX 原文件和当前 JSON 预览都已保存到数据库。',
+          message: didSaveAnnotatedReferencePages
+            ? '模板名称、DOCX 原文件、当前 JSON 预览和带定位参考图都已保存。'
+            : '模板已保存，但带定位参考图需要稍后重新保存一次。',
         });
 
         await queryClient.invalidateQueries({ queryKey: ['saved-templates'] });

@@ -1,7 +1,4 @@
 import { after, NextResponse } from 'next/server';
-import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
-import { existsSync } from 'fs';
-import { join } from 'path';
 import {
   fillSlotsFromVisionPages,
   type GenerationSlotSchemaItem,
@@ -39,17 +36,6 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
-const SLOT_REFERENCE_LABEL_FONT_FAMILY = 'ClipCapSlotReferenceLabel';
-const SLOT_REFERENCE_LABEL_FONT_PATH = join(
-  process.cwd(),
-  'src',
-  'assets',
-  'fonts',
-  'NotoSans-Regular.ttf',
-);
-
-let hasAttemptedSlotReferenceFontRegistration = false;
-let hasRegisteredSlotReferenceFont = false;
 
 function normalizeConfirmedPageNumbers(value: unknown) {
   if (!Array.isArray(value)) {
@@ -69,28 +55,6 @@ function normalizeConfirmedPageNumbers(value: unknown) {
         .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0),
     ),
   ).sort((left, right) => left - right);
-}
-
-function getSlotReferenceLabelFontFamily() {
-  if (!hasAttemptedSlotReferenceFontRegistration) {
-    hasAttemptedSlotReferenceFontRegistration = true;
-
-    if (existsSync(SLOT_REFERENCE_LABEL_FONT_PATH)) {
-      try {
-        GlobalFonts.registerFromPath(
-          SLOT_REFERENCE_LABEL_FONT_PATH,
-          SLOT_REFERENCE_LABEL_FONT_FAMILY,
-        );
-        hasRegisteredSlotReferenceFont = true;
-      } catch {
-        hasRegisteredSlotReferenceFont = false;
-      }
-    }
-  }
-
-  return hasRegisteredSlotReferenceFont
-    ? `"${SLOT_REFERENCE_LABEL_FONT_FAMILY}"`
-    : 'Arial, sans-serif';
 }
 
 function getMimeTypeFromStoragePath(storagePath: string) {
@@ -139,132 +103,41 @@ type ReferenceSlotBox = {
   exampleSlotValue: string;
 };
 
-function getReferenceBboxGroupKey(bbox: ReferenceSlotBox['bbox']) {
-  return [bbox.x, bbox.y, bbox.width, bbox.height]
-    .map((value) => Number(value).toFixed(6))
-    .join(':');
-}
-
-function groupReferenceSlotBoxesByBbox(slotBoxes: ReferenceSlotBox[]) {
-  const groups = new Map<
-    string,
-    {
-      bbox: ReferenceSlotBox['bbox'];
-      slotBoxes: ReferenceSlotBox[];
-    }
-  >();
-
-  for (const slotBox of slotBoxes) {
-    const key = getReferenceBboxGroupKey(slotBox.bbox);
-    const group =
-      groups.get(key) ??
-      ({
-        bbox: slotBox.bbox,
-        slotBoxes: [],
-      } satisfies {
-        bbox: ReferenceSlotBox['bbox'];
-        slotBoxes: ReferenceSlotBox[];
-      });
-
-    group.slotBoxes.push(slotBox);
-    groups.set(key, group);
-  }
-
-  return [...groups.values()];
-}
-
-function countDuplicateReferenceBboxGroups(slotBoxes: ReferenceSlotBox[]) {
-  return groupReferenceSlotBoxesByBbox(slotBoxes).filter(
-    (group) => group.slotBoxes.length > 1,
-  ).length;
-}
-
-async function buildAnnotatedReferencePageDataUrl(params: {
-  imageBuffer: Buffer;
-  slotBoxes: ReferenceSlotBox[];
-}) {
-  const image = await loadImage(params.imageBuffer);
-  const width = image.width;
-  const height = image.height;
-  const canvas = createCanvas(width, height);
-  const context = canvas.getContext('2d');
-  const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
-  const labelFontSize = Math.max(
-    10,
-    Math.round(Math.min(width, height) * 0.006),
-  );
-  const labelPaddingX = Math.max(4, Math.round(labelFontSize * 0.28));
-  const labelPaddingY = Math.max(2, Math.round(labelFontSize * 0.18));
-
-  context.drawImage(image, 0, 0, width, height);
-  context.font = `${labelFontSize}px ${getSlotReferenceLabelFontFamily()}`;
-  context.textBaseline = 'top';
-
-  groupReferenceSlotBoxesByBbox(params.slotBoxes).forEach((bboxGroup) => {
-    const { bbox } = bboxGroup;
-    const left = Math.max(0, Math.min(width, bbox.x * width));
-    const top = Math.max(0, Math.min(height, bbox.y * height));
-    const boxWidth = Math.max(
-      1,
-      Math.min(width - left, bbox.width * width),
-    );
-    const boxHeight = Math.max(
-      1,
-      Math.min(height - top, bbox.height * height),
-    );
-
-    context.fillStyle = 'rgba(255, 153, 0, 0.08)';
-    context.fillRect(left, top, boxWidth, boxHeight);
-    context.strokeStyle = '#ff9900';
-    context.lineWidth = lineWidth;
-    context.strokeRect(left, top, boxWidth, boxHeight);
-
-    const labels = bboxGroup.slotBoxes.map((slotBox) => slotBox.slotKey);
-    const measuredWidth = Math.max(
-      ...labels.map((label) => context.measureText(label).width),
-    );
-    const labelLineHeight = Math.ceil(labelFontSize * 1.14);
-    const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
-    const labelHeight = labels.length * labelLineHeight + labelPaddingY * 2;
-    const labelLeft = Math.max(
-      0,
-      Math.min(width - labelWidth, left - lineWidth),
-    );
-    const labelTop = Math.max(
-      0,
-      Math.min(height - labelHeight, top - labelHeight - lineWidth),
-    );
-
-    context.fillStyle = 'rgba(255, 153, 0, 0.92)';
-    context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
-    context.fillStyle = '#111111';
-    labels.forEach((label, labelIndex) => {
-      context.fillText(
-        label,
-        labelLeft + labelPaddingX,
-        labelTop + labelPaddingY + labelIndex * labelLineHeight,
-      );
-    });
-  });
-
-  const annotatedBuffer = canvas.toBuffer('image/png');
-
-  return {
-    dataUrl: `data:image/png;base64,${annotatedBuffer.toString('base64')}`,
-    buffer: annotatedBuffer,
-  };
-}
-
-function bufferToImageDataUrl(buffer: Buffer, mimeType: string) {
-  return `data:${mimeType};base64,${buffer.toString('base64')}`;
-}
-
 function estimateDataUrlBytes(dataUrl: string) {
   const commaIndex = dataUrl.indexOf(',');
   const base64 = commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
   const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
 
   return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+function getVercelMemoryUsageSnapshot(stage: string) {
+  const memory = process.memoryUsage();
+
+  return {
+    stage,
+    rss_bytes: memory.rss,
+    heap_total_bytes: memory.heapTotal,
+    heap_used_bytes: memory.heapUsed,
+    external_bytes: memory.external,
+    array_buffers_bytes: memory.arrayBuffers,
+  };
+}
+
+async function appendMemoryTrace(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  taskItemId: string,
+  stage: string,
+  details?: Record<string, unknown>,
+) {
+  await appendProcessingTrace(
+    admin,
+    taskItemId,
+    `[Vercel Memory][PDF Fill][SlotFill] ${JSON.stringify({
+      ...getVercelMemoryUsageSnapshot(stage),
+      ...(details ?? {}),
+    })}`,
+  );
 }
 
 function buildReferenceAnnotationStoragePath(params: {
@@ -284,6 +157,26 @@ async function createReferenceAnnotationSignedUrl(params: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
   storagePath: string;
 }) {
+  const slashIndex = params.storagePath.lastIndexOf('/');
+  const folderPath =
+    slashIndex >= 0 ? params.storagePath.slice(0, slashIndex) : '';
+  const fileName =
+    slashIndex >= 0 ? params.storagePath.slice(slashIndex + 1) : params.storagePath;
+  const { data: entries, error: listError } = await params.admin.storage
+    .from('generation-pdfs')
+    .list(folderPath, {
+      limit: 1,
+      search: fileName,
+    });
+
+  if (listError) {
+    throw listError;
+  }
+
+  if (!entries?.some((entry) => entry.name === fileName)) {
+    throw new Error(`Missing storage object for ${params.storagePath}`);
+  }
+
   const { data, error } = await params.admin.storage
     .from('generation-pdfs')
     .createSignedUrl(params.storagePath, 60 * 60 * 24);
@@ -390,198 +283,41 @@ async function loadReferenceExamplePagesWithBbox(params: {
     referencePageAssets,
     getGeminiFilePipelineConcurrency(),
     async (asset) => {
-        const annotatedStoragePath = buildReferenceAnnotationStoragePath({
-          ownerId: params.ownerId,
-          taskItemId: params.taskItemId,
-          templateId: params.templateId,
-          pageNumber: asset.pageNumber,
+      const annotatedStoragePath = buildReferenceAnnotationStoragePath({
+        ownerId: params.ownerId,
+        taskItemId: params.taskItemId,
+        templateId: params.templateId,
+        pageNumber: asset.pageNumber,
+      });
+
+      try {
+        const annotatedPreviewUrl = await createReferenceAnnotationSignedUrl({
+          admin: params.admin,
+          storagePath: annotatedStoragePath,
         });
-        const duplicateBboxGroupCount = countDuplicateReferenceBboxGroups(
-          asset.slotBoxes,
+
+        console.info(
+          '[PDF Fill][ReferenceExample] Using browser-saved annotated reference page image',
+          {
+            pageNumber: asset.pageNumber,
+            annotatedStoragePath,
+            slotCount: asset.slotBoxes.length,
+          },
         );
-        let cachedAnnotatedImageDataUrl: string | undefined;
-        let cachedAnnotatedPreviewUrl: string | undefined;
-
-        if (params.templateId && duplicateBboxGroupCount === 0) {
-          const { data: cachedBlob } = await params.admin.storage
-            .from('generation-pdfs')
-            .download(annotatedStoragePath);
-
-          if (cachedBlob) {
-            const cachedBuffer = Buffer.from(await cachedBlob.arrayBuffer());
-            const cachedMimeType =
-              cachedBlob.type ||
-              getMimeTypeFromStoragePath(annotatedStoragePath) ||
-              'image/png';
-
-            cachedAnnotatedImageDataUrl = bufferToImageDataUrl(
-              cachedBuffer,
-              cachedMimeType,
-            );
-
-            try {
-              cachedAnnotatedPreviewUrl =
-                await createReferenceAnnotationSignedUrl({
-                  admin: params.admin,
-                  storagePath: annotatedStoragePath,
-                });
-            } catch (error) {
-              console.warn(
-                '[PDF Fill][ReferenceExample] Failed to sign cached annotated reference page image',
-                {
-                  pageNumber: asset.pageNumber,
-                  annotatedStoragePath,
-                  error,
-                },
-              );
-            }
-
-            console.info(
-              '[PDF Fill][ReferenceExample] Reusing cached annotated reference page image',
-              {
-                pageNumber: asset.pageNumber,
-                annotatedStoragePath,
-                slotCount: asset.slotBoxes.length,
-                duplicateBboxGroupCount,
-              },
-            );
-
-            return {
-              page: {
-                page_number: asset.pageNumber,
-                original_page_number: asset.pageNumber,
-                image_data_url: cachedAnnotatedImageDataUrl,
-                annotated_image_data_url: cachedAnnotatedImageDataUrl,
-                ...(cachedAnnotatedPreviewUrl
-                  ? { annotated_preview_url: cachedAnnotatedPreviewUrl }
-                  : {}),
-                annotated_storage_path: annotatedStoragePath,
-                annotated_slots: asset.slotBoxes.map((slotBox) => ({
-                  slot_key: slotBox.slotKey,
-                  slot_name: slotBox.slotName,
-                  slot_source: slotBox.slotSource,
-                  example_annotation_label: slotBox.slotKey,
-                  example_box_2d: normalizedBboxToGeminiBox2d(slotBox.bbox),
-                  example_evidence_text: slotBox.exampleEvidenceText,
-                  example_slot_value: slotBox.exampleSlotValue,
-                })),
-                example_pdf_file_name: asset.examplePdfFileName,
-              } satisfies ReferencePdfVisionPageInput,
-              skippedSlotCount: 0,
-              downloadFailure: null,
-            };
-          }
-        } else if (params.templateId && duplicateBboxGroupCount > 0) {
-          console.info(
-            '[PDF Fill][ReferenceExample] Regenerating annotated reference page image because multiple slot keys share bbox',
-            {
-              pageNumber: asset.pageNumber,
-              annotatedStoragePath,
-              slotCount: asset.slotBoxes.length,
-              duplicateBboxGroupCount,
-            },
-          );
-        }
-
-        const { data: fileBlob, error } = await params.admin.storage
-          .from('generation-pdfs')
-          .download(asset.storagePath);
-
-        if (error || !fileBlob) {
-          const errorMessage = error?.message ?? 'Missing storage object';
-
-          console.warn(
-            '[PDF Fill][ReferenceExample] Skipping missing reference page image',
-            {
-              pageNumber: asset.pageNumber,
-              storagePath: asset.storagePath,
-              slotCount: asset.slotBoxes.length,
-              error: errorMessage,
-            },
-          );
-
-          return {
-            page: null,
-            skippedSlotCount: asset.slotBoxes.length,
-            downloadFailure: {
-              page_number: asset.pageNumber,
-              storage_path: asset.storagePath,
-              slot_count: asset.slotBoxes.length,
-              error_message: errorMessage,
-            },
-          };
-        }
-
-        const buffer = Buffer.from(await fileBlob.arrayBuffer());
-        const mimeType =
-          fileBlob.type || getMimeTypeFromStoragePath(asset.storagePath);
-        const imageDataUrl = bufferToImageDataUrl(buffer, mimeType);
-        let annotatedImageDataUrl: string | undefined;
-        let annotatedPreviewUrl: string | undefined;
-        let uploadedAnnotatedStoragePath: string | undefined;
-
-        try {
-          const annotatedImage = await buildAnnotatedReferencePageDataUrl({
-            imageBuffer: buffer,
-            slotBoxes: asset.slotBoxes,
-          });
-          annotatedImageDataUrl = annotatedImage.dataUrl;
-          uploadedAnnotatedStoragePath = annotatedStoragePath;
-
-          const { error: uploadError } = await params.admin.storage
-            .from('generation-pdfs')
-            .upload(uploadedAnnotatedStoragePath, annotatedImage.buffer, {
-              contentType: 'image/png',
-              upsert: true,
-            });
-
-          if (uploadError) {
-            throw uploadError;
-          }
-
-          annotatedPreviewUrl = await createReferenceAnnotationSignedUrl({
-            admin: params.admin,
-            storagePath: uploadedAnnotatedStoragePath,
-          });
-
-          if (params.templateId) {
-            console.info(
-              '[PDF Fill][ReferenceExample] Cached annotated reference page image',
-              {
-                pageNumber: asset.pageNumber,
-                annotatedStoragePath: uploadedAnnotatedStoragePath,
-                slotCount: asset.slotBoxes.length,
-                duplicateBboxGroupCount,
-              },
-            );
-          }
-        } catch (error) {
-          annotatedPreviewUrl = undefined;
-          uploadedAnnotatedStoragePath = undefined;
-          console.warn(
-            '[PDF Fill][ReferenceExample] Failed to annotate reference page image',
-            {
-              pageNumber: asset.pageNumber,
-              storagePath: asset.storagePath,
-              error,
-            },
-          );
-        }
 
         return {
           page: {
             page_number: asset.pageNumber,
             original_page_number: asset.pageNumber,
-            image_data_url: imageDataUrl,
-            ...(annotatedImageDataUrl
-              ? { annotated_image_data_url: annotatedImageDataUrl }
-              : {}),
-            ...(annotatedPreviewUrl
-              ? { annotated_preview_url: annotatedPreviewUrl }
-              : {}),
-            ...(uploadedAnnotatedStoragePath
-              ? { annotated_storage_path: uploadedAnnotatedStoragePath }
-              : {}),
+            image_data_url: '',
+            annotated_preview_url: annotatedPreviewUrl,
+            annotated_storage_path: annotatedStoragePath,
+            gemini_file: {
+              uri: annotatedPreviewUrl,
+              mimeType: getMimeTypeFromStoragePath(annotatedStoragePath),
+              sizeBytes: 0,
+              displayName: `annotated-reference-page-${asset.pageNumber}`,
+            },
             annotated_slots: asset.slotBoxes.map((slotBox) => ({
               slot_key: slotBox.slotKey,
               slot_name: slotBox.slotName,
@@ -596,6 +332,32 @@ async function loadReferenceExamplePagesWithBbox(params: {
           skippedSlotCount: 0,
           downloadFailure: null,
         };
+      } catch (error) {
+        const errorMessage = getErrorMessage(error);
+
+        console.warn(
+          '[PDF Fill][ReferenceExample] Missing browser-saved annotated reference page image',
+          {
+            pageNumber: asset.pageNumber,
+            annotatedStoragePath,
+            sourceStoragePath: asset.storagePath,
+            slotCount: asset.slotBoxes.length,
+            error: errorMessage,
+          },
+        );
+
+        return {
+          page: null,
+          skippedSlotCount: asset.slotBoxes.length,
+          downloadFailure: {
+            page_number: asset.pageNumber,
+            storage_path: annotatedStoragePath,
+            slot_count: asset.slotBoxes.length,
+            error_message:
+              `Missing browser-saved annotated reference image. ${errorMessage}`,
+          },
+        };
+      }
     },
   );
   const skippedReferencePageDownloads = pageResults.flatMap((result) =>
@@ -674,6 +436,7 @@ function normalizeCachedGeminiFile(value: unknown): UploadedGeminiFile | null {
 
   const record = value as Record<string, unknown>;
   const uri = typeof record.uri === 'string' ? record.uri.trim() : '';
+  const name = typeof record.name === 'string' ? record.name : undefined;
   const mimeType =
     typeof record.mime_type === 'string'
       ? record.mime_type
@@ -685,9 +448,13 @@ function normalizeCachedGeminiFile(value: unknown): UploadedGeminiFile | null {
     return null;
   }
 
+  if (/^https?:\/\//i.test(uri) && !name) {
+    return null;
+  }
+
   return {
     uri,
-    name: typeof record.name === 'string' ? record.name : undefined,
+    name,
     mimeType,
     sizeBytes:
       typeof record.size_bytes === 'number'
@@ -1132,6 +899,26 @@ async function getSharedReferencePagesForSlotFill(params: {
     return params.pages;
   }
 
+  if (params.pages.every((page) => Boolean(page.gemini_file?.uri))) {
+    await appendProcessingTrace(
+      params.admin,
+      params.taskItemId,
+      `[Gemini External URL][SharedReferencePages] ${JSON.stringify({
+        task_id: params.taskId,
+        template_id: params.templateId,
+        reference_page_count: params.pages.length,
+        source: 'supabase_signed_url',
+        pages: params.pages.map((page) => ({
+          page_number: page.page_number,
+          annotated_storage_path: page.annotated_storage_path ?? null,
+          file_uri: page.gemini_file?.uri ?? null,
+          mime_type: page.gemini_file?.mimeType ?? null,
+        })),
+      })}`,
+    );
+    return params.pages;
+  }
+
   let cache = await loadSharedReferenceGeminiCache({
     admin: params.admin,
     taskId: params.taskId,
@@ -1435,9 +1222,15 @@ async function runGenerationTaskItemSlotFill(params: {
             uploaded_page_number: asset.uploaded_page_number,
             original_page_number: asset.original_page_number,
             storage_path: asset.storage_path,
-          })),
+        })),
       })}`,
     );
+    await appendMemoryTrace(admin, params.item.id, 'slot_fill_route_started', {
+      source_pdf_name: params.item.source_pdf_name,
+      page_image_asset_count: pageImageAssets.length,
+      precomputed_vision_page_count: precomputedVisionPages.length,
+      slot_count: slotSchema.length,
+    });
 
     const llmConfig = getLlmRuntimeConfig('vision');
     const cachedGeminiVisionPages =
@@ -1471,7 +1264,7 @@ async function runGenerationTaskItemSlotFill(params: {
       !canReuseCachedGeminiFiles &&
       llmConfig.provider === 'gemini'
         ? visionPages.flatMap((page) =>
-            page.gemini_file ? [page.gemini_file] : [],
+            page.gemini_file?.name ? [page.gemini_file] : [],
           )
         : [];
 
@@ -1498,6 +1291,12 @@ async function runGenerationTaskItemSlotFill(params: {
       throw new Error('当前任务没有可读取的新 PDF 页面图片。');
     }
 
+    await appendMemoryTrace(admin, params.item.id, 'vision_page_urls_ready', {
+      vision_page_count: visionPages.length,
+      source:
+        llmConfig.provider === 'gemini' ? 'supabase_signed_url' : 'data_url',
+    });
+
     const referenceExamplePages = await loadReferenceExamplePagesWithBbox({
       admin,
       taskItemId: params.item.id,
@@ -1513,6 +1312,9 @@ async function runGenerationTaskItemSlotFill(params: {
         templateId: params.item.template_id,
         pages: referenceExamplePages.pages,
       });
+    await appendMemoryTrace(admin, params.item.id, 'reference_page_urls_ready', {
+      reference_page_count: referencePagesForSlotFill.length,
+    });
 
     await admin
       .from('generation_task_items')
@@ -1661,6 +1463,9 @@ async function runGenerationTaskItemSlotFill(params: {
         }
       },
     });
+    await appendMemoryTrace(admin, params.item.id, 'vision_slot_fill_done', {
+      extracted_item_count: llmOutput.extracted_items.length,
+    });
 
     const finishedAt = new Date();
     const elapsedSeconds = Math.max(
@@ -1698,6 +1503,10 @@ async function runGenerationTaskItemSlotFill(params: {
     if (updateError) {
       throw updateError;
     }
+    await appendMemoryTrace(admin, params.item.id, 'slot_fill_persisted', {
+      completed_slot_count: completedSlots,
+      slot_count: slotSchema.length,
+    });
 
     await recalculateTaskSummary(admin, params.item.task_id);
     await appendProcessingTrace(

@@ -50,6 +50,35 @@ function formatDurationMs(durationMs: number) {
   return `${(durationMs / 1000).toFixed(2)}s`;
 }
 
+function getVercelMemoryUsageSnapshot(stage: string) {
+  const memory = process.memoryUsage();
+
+  return {
+    stage,
+    rss_bytes: memory.rss,
+    heap_total_bytes: memory.heapTotal,
+    heap_used_bytes: memory.heapUsed,
+    external_bytes: memory.external,
+    array_buffers_bytes: memory.arrayBuffers,
+  };
+}
+
+async function appendMemoryTrace(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  taskId: string,
+  stage: string,
+  details?: Record<string, unknown>,
+) {
+  await appendProcessingTrace(
+    admin,
+    taskId,
+    `[Vercel Memory][Template Extract] ${JSON.stringify({
+      ...getVercelMemoryUsageSnapshot(stage),
+      ...(details ?? {}),
+    })}`,
+  );
+}
+
 function normalizePdfVisionPages(value: unknown) {
   if (!Array.isArray(value)) {
     return [] as PdfVisionPageInput[];
@@ -94,6 +123,8 @@ function normalizePdfVisionPageAssets(value: unknown) {
       const uploadedPageNumber = Number(record.uploaded_page_number);
       const originalPageNumber = Number(record.original_page_number);
       const storagePath = String(record.storage_path ?? '').trim();
+      const contentType = String(record.content_type ?? '').trim();
+      const size = Number(record.size);
       const rotationApplied = Number(record.rotation_applied);
 
       if (
@@ -106,10 +137,12 @@ function normalizePdfVisionPageAssets(value: unknown) {
         return null;
       }
 
-      return {
+      const asset: PdfPageImageAsset = {
         uploaded_page_number: uploadedPageNumber,
         original_page_number: originalPageNumber,
         storage_path: storagePath,
+        ...(contentType ? { content_type: contentType } : {}),
+        ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
         ...(Number.isFinite(rotationApplied)
           ? {
               rotation_applied:
@@ -117,6 +150,8 @@ function normalizePdfVisionPageAssets(value: unknown) {
             }
           : {}),
       };
+
+      return asset;
     })
     .filter((item): item is PdfPageImageAsset => Boolean(item));
 }
@@ -290,6 +325,11 @@ export async function POST(
       `槽位抽取路由：/api/template-extraction-tasks/${task.id}/process`,
     );
 
+    await appendMemoryTrace(routeAdmin, task.id, 'route_started', {
+      source_docx_name: task.source_docx_name,
+      source_pdf_name: task.source_pdf_name ?? null,
+    });
+
     await logEvent({
       ownerId,
       actorEmail,
@@ -359,6 +399,10 @@ export async function POST(
       },
     });
     const textExtractionFinishedAt = Date.now();
+    await appendMemoryTrace(routeAdmin, task.id, 'text_slot_extraction_done', {
+      total_paragraphs: result.totalParagraphs,
+      extracted_paragraphs: result.extraction_result.length,
+    });
     await appendProcessingTrace(
       routeAdmin,
       task.id,
@@ -378,6 +422,9 @@ export async function POST(
       })}`,
     );
 
+    await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_start', {
+      pdf_file_name: task.source_pdf_name ?? null,
+    });
     const pdfVisionPages = await resolvePdfVisionPages({
       admin: routeAdmin,
       sourcePdfVisionPages: task.source_pdf_vision_pages,
@@ -386,6 +433,9 @@ export async function POST(
       onTrace: async (entry) => {
         await appendProcessingTrace(routeAdmin, task.id, entry.message);
       },
+    });
+    await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_done', {
+      pdf_page_image_count: pdfVisionPages.length,
     });
     const pdfMappingStartedAt = Date.now();
     let pdfEvidence = null as Awaited<
@@ -412,6 +462,10 @@ export async function POST(
       });
     }
     const pdfMappingFinishedAt = Date.now();
+    await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_done', {
+      pdf_page_image_count: pdfVisionPages.length,
+      matched_slot_count: pdfEvidence?.matches.length ?? 0,
+    });
     await appendProcessingTrace(
       routeAdmin,
       task.id,
@@ -465,6 +519,9 @@ export async function POST(
         updated_at: new Date().toISOString(),
       })
       .eq('id', task.id);
+    await appendMemoryTrace(routeAdmin, task.id, 'task_persisted', {
+      status: 'completed',
+    });
 
     await logEvent({
       ownerId,

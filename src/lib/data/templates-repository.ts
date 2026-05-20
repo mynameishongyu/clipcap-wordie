@@ -520,5 +520,9 @@ export async function saveUserTemplate(
     pageNumbers: changedAnnotatedReferencePageNumbers,
   });
 
-  return data;
+  return {
+    ...data,
+    annotated_reference_page_numbers_to_refresh:
+      changedAnnotatedReferencePageNumbers,
+  };
 }

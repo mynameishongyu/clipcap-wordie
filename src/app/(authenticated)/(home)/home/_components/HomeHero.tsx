@@ -369,9 +369,9 @@ function formatDurationMs(durationMs: number) {
 function getTemplateExtractionTimingStageLabel(stage: string | undefined) {
   switch (stage) {
     case 'pdf_page_render':
-      return 'PDF 转 PNG';
+      return 'PDF 页面图片生成';
     case 'pdf_page_image_upload':
-      return 'PNG 上传 Supabase';
+      return 'PDF 页面图片上传 Supabase';
     case 'text_slot_extraction':
       return 'DOCX 槽位抽取';
     case 'slot_pdf_page_mapping':

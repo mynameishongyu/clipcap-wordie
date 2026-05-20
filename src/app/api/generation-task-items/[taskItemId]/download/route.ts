@@ -44,11 +44,11 @@ export async function GET(
     );
   }
 
-  if (item.status !== 'reviewed') {
+  if (!['review_pending', 'reviewed'].includes(item.status)) {
     return NextResponse.json(
       {
-        code: 'GENERATION_TASK_ITEM_NOT_REVIEWED',
-        message: '请先完成核查，核查通过后才能下载。',
+        code: 'GENERATION_TASK_ITEM_NOT_READY_TO_DOWNLOAD',
+        message: '当前任务还没有生成可下载结果。',
       },
       { status: 400 },
     );

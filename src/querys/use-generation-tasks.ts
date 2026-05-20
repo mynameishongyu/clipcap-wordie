@@ -251,7 +251,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
     input.files.map(async (item) => {
       input.onStageChange?.({
         title: '正在准备 PDF 页面图片',
-        description: `${item.file.name}：不上传原始 PDF，只上传转换后的 PNG 页面图片。`,
+        description: `${item.file.name}：不上传原始 PDF，只上传转换后的 PDF 页面图片。`,
       });
 
       let uploadedPageImageCount = 0;
@@ -264,6 +264,8 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             uploaded_page_number: number;
             original_page_number: number;
             storage_path: string;
+            content_type?: string;
+            size?: number;
             crop?: PdfVisionPageInput['crop'];
             rotation_applied?: PdfVisionPageInput['rotationApplied'];
           }
@@ -323,6 +325,8 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             uploaded_page_number: uploadedPageNumber,
             original_page_number: originalPageNumber,
             storage_path: pageImageStoragePath,
+            content_type: imageBlob.type || 'application/octet-stream',
+            size: imageBlob.size,
             ...(visionPage.crop ? { crop: visionPage.crop } : {}),
             ...(visionPage.rotationApplied
               ? { rotation_applied: visionPage.rotationApplied }

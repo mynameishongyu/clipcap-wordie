@@ -7,7 +7,6 @@ import type {
 } from '@/src/lib/llm/fill-template-from-pdf';
 import {
   getGeminiFilePipelineConcurrency,
-  uploadGeminiFileBytes,
   type GeminiFileApiDispatcher,
   type UploadedGeminiFile,
 } from '@/src/lib/llm/gemini-file-api';
@@ -20,6 +19,8 @@ export type PdfPageImageAsset = {
   uploaded_page_number: number;
   original_page_number: number;
   storage_path: string;
+  content_type?: string | null;
+  size?: number | null;
   filter_decision?: 'keep' | 'drop' | 'review' | string;
   filter_reason?: string | null;
   filter_confidence?: number | null;
@@ -189,6 +190,18 @@ export function normalizePdfPageImageAssets(value: unknown): PdfPageImageAsset[]
         typeof entry.storage_path === 'string' &&
         entry.storage_path.trim().length > 0,
     )
+    .map((entry) => ({
+      ...entry,
+      content_type:
+        typeof (entry as { content_type?: unknown }).content_type === 'string'
+          ? (entry as { content_type: string }).content_type
+          : null,
+      size:
+        typeof (entry as { size?: unknown }).size === 'number' &&
+        Number.isFinite((entry as { size: number }).size)
+          ? (entry as { size: number }).size
+          : null,
+    }))
     .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
 }
 
@@ -212,6 +225,16 @@ function getMimeTypeFromStoragePath(storagePath: string) {
   }
 
   return 'application/octet-stream';
+}
+
+function getImageAssetMimeType(asset: PdfPageImageAsset) {
+  const contentType = asset.content_type?.trim();
+
+  if (contentType?.startsWith('image/')) {
+    return contentType;
+  }
+
+  return getMimeTypeFromStoragePath(asset.storage_path);
 }
 
 export async function loadVisionPagesFromStoredAssets(params: {
@@ -288,10 +311,13 @@ export async function uploadStoredPageImagesToGeminiFileApi(params: {
   const startedAt = Date.now();
 
   await params.onTrace?.({
-    message: `[Gemini File API][StoragePipelineStart] ${JSON.stringify({
+    message: `[Gemini External URL][StoragePipelineStart] ${JSON.stringify({
       request_label: params.requestLabel,
+      model: params.config.model,
+      provider: params.config.provider,
       image_count: params.pageImageAssets.length,
       pipeline_concurrency: pipelineConcurrency,
+      source: 'supabase_signed_url',
     })}`,
   });
 
@@ -299,48 +325,41 @@ export async function uploadStoredPageImagesToGeminiFileApi(params: {
     params.pageImageAssets,
     pipelineConcurrency,
     async (asset, index) => {
-      const downloadStartedAt = Date.now();
-      const { data: fileBlob, error } = await params.admin.storage
+      const signStartedAt = Date.now();
+      const { data, error } = await params.admin.storage
         .from('generation-pdfs')
-        .download(asset.storage_path);
+        .createSignedUrl(asset.storage_path, 60 * 60 * 24);
 
-      if (error || !fileBlob) {
-        const errorMessage = error?.message ?? 'Missing storage object';
+      if (error || !data?.signedUrl) {
+        const errorMessage = error?.message ?? 'Missing signed URL';
 
         throw new Error(
-          `[Gemini File API][StoragePipelineDownloadFailed] Unable to download uploaded PDF page image: storage_path=${asset.storage_path}, uploaded_page=${asset.uploaded_page_number}, original_page=${asset.original_page_number}, error=${errorMessage}`,
+          `[Gemini External URL][StoragePipelineSignFailed] Unable to sign uploaded PDF page image URL: storage_path=${asset.storage_path}, uploaded_page=${asset.uploaded_page_number}, original_page=${asset.original_page_number}, error=${errorMessage}`,
           error ? { cause: error } : undefined,
         );
       }
 
-      const buffer = Buffer.from(await fileBlob.arrayBuffer());
-      const mimeType =
-        fileBlob.type || getMimeTypeFromStoragePath(asset.storage_path);
-      const downloadDurationMs = Date.now() - downloadStartedAt;
-      const uploadStartedAt = Date.now();
-      const geminiFile = await uploadGeminiFileBytes({
-        config: params.config,
-        buffer,
+      const mimeType = getImageAssetMimeType(asset);
+      const signDurationMs = Date.now() - signStartedAt;
+      const geminiFile = {
+        uri: data.signedUrl,
         mimeType,
+        sizeBytes: asset.size ?? 0,
         displayName: `${params.requestLabel}-page-${asset.uploaded_page_number}`,
-        dispatcher: params.dispatcher,
-        signal: params.signal,
-      });
-      const uploadDurationMs = Date.now() - uploadStartedAt;
+      } satisfies UploadedGeminiFile;
 
       await params.onTrace?.({
-        message: `[Gemini File API][StoragePipelinePageComplete] ${JSON.stringify({
+        message: `[Gemini External URL][StoragePipelinePageComplete] ${JSON.stringify({
           request_label: params.requestLabel,
           sequence_index: index + 1,
           uploaded_page_number: asset.uploaded_page_number,
           original_page_number: asset.original_page_number,
           storage_path: asset.storage_path,
           mime_type: mimeType,
-          image_size_bytes: buffer.byteLength,
-          gemini_file_name: geminiFile.name ?? null,
-          gemini_file_uri: geminiFile.uri,
-          download_duration_ms: downloadDurationMs,
-          upload_duration_ms: uploadDurationMs,
+          image_size_bytes: asset.size ?? null,
+          file_uri: geminiFile.uri,
+          source: 'supabase_signed_url',
+          sign_duration_ms: signDurationMs,
         })}`,
       });
 
@@ -356,9 +375,10 @@ export async function uploadStoredPageImagesToGeminiFileApi(params: {
   const durationMs = Date.now() - startedAt;
 
   await params.onTrace?.({
-    message: `[Gemini File API][StoragePipelineComplete] ${JSON.stringify({
+    message: `[Gemini External URL][StoragePipelineComplete] ${JSON.stringify({
       request_label: params.requestLabel,
       image_count: pages.length,
+      source: 'supabase_signed_url',
       duration_ms: durationMs,
       duration_seconds: Number((durationMs / 1000).toFixed(2)),
     })}`,
@@ -375,7 +395,7 @@ export function collectGeminiFilesFromVisionPages(
   pages.forEach((page) => {
     const file = page.gemini_file;
 
-    if (!file?.uri) {
+    if (!file?.uri || !file.name) {
       return;
     }
 

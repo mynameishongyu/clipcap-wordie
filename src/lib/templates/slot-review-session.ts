@@ -18,6 +18,7 @@ export interface SlotReviewPdfEvidencePayload {
     imageUrl?: string;
     fallbackImageUrl?: string;
     storagePath?: string;
+    annotatedStoragePath?: string;
     rotationApplied?: SlotReviewPdfPageRotation;
     crop?: {
       left: number;
