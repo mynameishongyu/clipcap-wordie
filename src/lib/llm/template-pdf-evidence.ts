@@ -16,6 +16,7 @@ import {
   getLlmRuntimeTraceConfig,
   type LlmProvider,
 } from '@/src/lib/llm/provider';
+import { getExtractionItemSlotKey } from '@/src/lib/templates/slot-key';
 
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 
@@ -946,7 +947,11 @@ function buildLocateSlots(extractionResult: ExtractionParagraph[]) {
 
       return [
         {
-          slot_key: `${paragraphResultIndex}-${itemIndex}-${item.sequence}`,
+          slot_key: getExtractionItemSlotKey(
+            item,
+            paragraphResultIndex,
+            itemIndex,
+          ),
           paragraph_result_index: paragraphResultIndex,
           item_index: itemIndex,
           sequence: item.sequence,
@@ -1464,6 +1469,7 @@ export async function buildTemplatePdfEvidence(input: {
       }
 
       const nextMatch = {
+        slot_key: slot.slot_key,
         paragraph_result_index: slot.paragraph_result_index,
         item_index: slot.item_index,
         sequence: slot.sequence,

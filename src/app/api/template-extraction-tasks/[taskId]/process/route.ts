@@ -17,6 +17,7 @@ import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
 import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
+import { ensureExtractionResultSlotKeys } from '@/src/lib/templates/slot-key';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -401,6 +402,9 @@ export async function POST(
         }
       },
     });
+    const extractionResultWithSlotKeys = ensureExtractionResultSlotKeys(
+      result.extraction_result,
+    );
     const textExtractionFinishedAt = Date.now();
     await appendMemoryTrace(routeAdmin, task.id, 'text_slot_extraction_done', {
       total_paragraphs: result.totalParagraphs,
@@ -441,9 +445,14 @@ export async function POST(
       pdf_page_image_count: pdfVisionPages.length,
     });
     const pdfMappingStartedAt = Date.now();
-    await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_start', {
-      pdf_page_image_count: pdfVisionPages.length,
-    });
+    await appendMemoryTrace(
+      routeAdmin,
+      task.id,
+      'slot_pdf_page_mapping_start',
+      {
+        pdf_page_image_count: pdfVisionPages.length,
+      },
+    );
     let pdfEvidence = null as Awaited<
       ReturnType<typeof buildTemplatePdfEvidence>
     > | null;
@@ -453,7 +462,7 @@ export async function POST(
         task.source_pdf_name && pdfVisionPages.length > 0
           ? await buildTemplatePdfEvidence({
               pdfFileName: task.source_pdf_name,
-              extractionResult: result.extraction_result,
+              extractionResult: extractionResultWithSlotKeys,
               visionPages: pdfVisionPages,
               onTrace: async (entry) => {
                 await appendProcessingTrace(routeAdmin, task.id, entry.message);
@@ -520,7 +529,7 @@ export async function POST(
         upload_html: result.uploadHtml,
         result: {
           document_info: result.document_info,
-          extraction_result: result.extraction_result,
+          extraction_result: extractionResultWithSlotKeys,
         },
         pdf_evidence: pdfEvidence,
         error_message: partialCompletionMessage,

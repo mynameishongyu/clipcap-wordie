@@ -6,7 +6,14 @@ import type {
   SavedTemplateDetail,
   SavedTemplateSummary,
 } from '@/src/app/api/types/template-library';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-session';
+import {
+  ensureExtractionResultSlotKeys,
+  filterPdfEvidenceMatchesBySlotKeys,
+  getExtractionResultSlotKeySet,
+  getPdfEvidenceMatchSlotKey,
+} from '@/src/lib/templates/slot-key';
 
 export interface SaveTemplateInput {
   templateId?: string;
@@ -129,7 +136,10 @@ async function persistReferencePdfPageForTemplate(input: {
     }
 
     const { data: signedUrlData, error: signedUrlError } =
-      await storage.createSignedUrl(targetPath, 60 * 60 * 24);
+      await storage.createSignedUrl(
+        targetPath,
+        getSupabaseSignedUrlExpiresInSeconds(),
+      );
 
     if (signedUrlError || !signedUrlData?.signedUrl) {
       throw signedUrlError ?? new Error(`Missing signed URL for ${targetPath}`);
@@ -171,11 +181,12 @@ function buildTemplateAnnotationSignatureByPage(
   >();
 
   for (const match of payload?.pdfEvidence?.matches ?? []) {
-    if (!match.bbox || !Number.isInteger(match.page_number)) {
+    const slotKey = getPdfEvidenceMatchSlotKey(match);
+
+    if (!slotKey || !match.bbox || !Number.isInteger(match.page_number)) {
       continue;
     }
 
-    const slotKey = `${match.paragraph_result_index}-${match.item_index}-${match.sequence}`;
     const pageMatches = matchesByPage.get(match.page_number) ?? [];
 
     pageMatches.push({
@@ -227,6 +238,38 @@ function getChangedAnnotatedReferencePageNumbers(params: {
   );
 }
 
+function removeOrphanPdfEvidenceMatches(
+  payload: SlotReviewSessionPayload,
+): SlotReviewSessionPayload {
+  if (!payload.pdfEvidence) {
+    return payload;
+  }
+
+  const payloadSlotKeys = getExtractionResultSlotKeySet(
+    payload.extractionResult,
+  );
+  const filteredMatches = filterPdfEvidenceMatchesBySlotKeys(
+    payload.pdfEvidence.matches,
+    payloadSlotKeys,
+  );
+  const pagesWithMatches = new Set(
+    filteredMatches.map((match) => match.page_number),
+  );
+
+  return {
+    ...payload,
+    pdfEvidence: {
+      ...payload.pdfEvidence,
+      matches: filteredMatches,
+      pages: payload.pdfEvidence.pages.map((page) =>
+        pagesWithMatches.has(page.pageNumber)
+          ? page
+          : { ...page, annotatedStoragePath: undefined },
+      ),
+    },
+  };
+}
+
 async function cleanupChangedTemplateAnnotatedReferencePages(input: {
   supabase: SupabaseClient;
   user: User;
@@ -237,9 +280,11 @@ async function cleanupChangedTemplateAnnotatedReferencePages(input: {
     return;
   }
 
-  const pathsToRemove = input.pageNumbers.map(
-    (pageNumber) =>
-      `${input.user.id}/template-reference-pages/annotated/${input.templateId}/page-${pageNumber}.png`,
+  const pathsToRemove = input.pageNumbers.flatMap((pageNumber) =>
+    ['jpg', 'png'].map(
+      (extension) =>
+        `${input.user.id}/template-reference-pages/annotated/${input.templateId}/page-${pageNumber}.${extension}`,
+    ),
   );
 
   const { error } = await input.supabase.storage
@@ -454,12 +499,22 @@ export async function saveUserTemplate(
     }
   }
 
+  const slotReviewPayloadWithKeys: SlotReviewSessionPayload = {
+    ...input.slotReviewPayload,
+    extractionResult: ensureExtractionResultSlotKeys(
+      input.slotReviewPayload.extractionResult,
+    ),
+  };
+  const slotReviewPayloadForSave = removeOrphanPdfEvidenceMatches(
+    slotReviewPayloadWithKeys,
+  );
+
   const nextPayload = await persistTemplateReferencePdfPages({
     supabase,
     user,
     templateId,
     slotReviewPayload: {
-      ...input.slotReviewPayload,
+      ...slotReviewPayloadForSave,
       templateId,
       templateName: normalizedTemplateName,
     },

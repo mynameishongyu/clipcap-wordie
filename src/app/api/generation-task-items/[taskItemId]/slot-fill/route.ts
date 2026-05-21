@@ -31,6 +31,7 @@ import {
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -179,7 +180,10 @@ async function createReferenceAnnotationSignedUrl(params: {
 
   const { data, error } = await params.admin.storage
     .from('generation-pdfs')
-    .createSignedUrl(params.storagePath, 60 * 60 * 24);
+    .createSignedUrl(
+      params.storagePath,
+      getSupabaseSignedUrlExpiresInSeconds(),
+    );
 
   if (error || !data?.signedUrl) {
     throw error ?? new Error(`Missing signed URL for ${params.storagePath}`);

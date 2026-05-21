@@ -214,7 +214,7 @@ function normalizeTemplateOriginalSlots(value: unknown): TemplateOriginalSlot[] 
           : itemIndex + 1;
 
       return {
-        slot_key: `${paragraphIndex}-${itemIndex}-${sequence}`,
+        slot_key: String(record.slot_key ?? `${paragraphIndex}-${itemIndex}-${sequence}`),
         field_category: normalizeSlotCategoryLabel(String(record.field_category ?? '')),
         meaning_to_applicant: String(record.meaning_to_applicant ?? ''),
         original_value: String(record.original_value ?? ''),

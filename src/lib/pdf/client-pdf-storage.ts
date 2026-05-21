@@ -6,6 +6,7 @@ import type {
   PdfVisionPageInput,
 } from '@/src/lib/pdf/client-pdf';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
 const MAX_PDF_STORAGE_UPLOAD_CONCURRENCY = 8;
@@ -254,7 +255,7 @@ export async function uploadPdfVisionPagesToSupabase(input: {
       const { data: signedUrlData, error: signedUrlError } =
         await supabase.storage
           .from('generation-pdfs')
-          .createSignedUrl(storagePath, 60 * 60 * 24);
+          .createSignedUrl(storagePath, getSupabaseSignedUrlExpiresInSeconds());
 
       if (signedUrlError || !signedUrlData?.signedUrl) {
         throw new Error(

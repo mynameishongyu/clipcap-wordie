@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 type GenerationTaskItemListRecord = {
   id: string;
@@ -69,7 +70,10 @@ async function buildPageFilterPages(input: {
     assets.map(async (asset) => {
       const { data } = await input.admin.storage
         .from('generation-pdfs')
-        .createSignedUrl(asset.storage_path, 60 * 60);
+        .createSignedUrl(
+          asset.storage_path,
+          getSupabaseSignedUrlExpiresInSeconds(),
+        );
 
       return {
         uploadedPageNumber: asset.uploaded_page_number,

@@ -12,6 +12,7 @@ import {
 } from '@/src/lib/llm/gemini-file-api';
 import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
@@ -328,7 +329,10 @@ export async function uploadStoredPageImagesToGeminiFileApi(params: {
       const signStartedAt = Date.now();
       const { data, error } = await params.admin.storage
         .from('generation-pdfs')
-        .createSignedUrl(asset.storage_path, 60 * 60 * 24);
+        .createSignedUrl(
+          asset.storage_path,
+          getSupabaseSignedUrlExpiresInSeconds(),
+        );
 
       if (error || !data?.signedUrl) {
         const errorMessage = error?.message ?? 'Missing signed URL';

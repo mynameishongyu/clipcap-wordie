@@ -12,6 +12,10 @@ import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-session';
+import {
+  getExtractionItemSlotKey,
+  getPdfEvidenceMatchSlotKey,
+} from '@/src/lib/templates/slot-key';
 
 interface UploadedFileMetadata {
   file_name?: string;
@@ -120,19 +124,10 @@ function buildSlotSchemaFromPayload(
     itemIndex: number,
     item: ExtractionParagraph['items'][number],
   ): GenerationSlotReferencePdfEvidence | null => {
-    const match =
-      evidenceMatches.find(
-        (candidate) =>
-          candidate.paragraph_result_index === paragraphIndex &&
-          candidate.item_index === itemIndex &&
-          candidate.sequence === item.sequence,
-      ) ??
-      evidenceMatches.find(
-        (candidate) =>
-          candidate.sequence === item.sequence &&
-          candidate.field_category === item.field_category &&
-          candidate.original_value === item.original_value,
-      );
+    const slotKey = getExtractionItemSlotKey(item, paragraphIndex, itemIndex);
+    const match = evidenceMatches.find(
+      (candidate) => getPdfEvidenceMatchSlotKey(candidate) === slotKey,
+    );
 
     if (!match) {
       return null;
@@ -157,7 +152,7 @@ function buildSlotSchemaFromPayload(
 
   return paragraphs.flatMap((paragraph: ExtractionParagraph, paragraphIndex) =>
     paragraph.items.map((item, itemIndex) => ({
-      slot_key: `${paragraphIndex}-${itemIndex}-${item.sequence}`,
+      slot_key: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
       field_category: item.field_category,
       meaning_to_applicant: item.meaning_to_applicant,
       reference_pdf_evidence: buildReferenceEvidence(paragraphIndex, itemIndex, item),

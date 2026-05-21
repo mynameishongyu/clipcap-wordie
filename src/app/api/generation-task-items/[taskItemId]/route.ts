@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 type GenerationPdfPreviewPage = {
   pageNumber: number;
@@ -80,7 +81,10 @@ async function createGenerationPdfPreviewPages(input: {
     assets.map(async (asset): Promise<GenerationPdfPreviewPage | null> => {
       const { data, error } = await input.admin.storage
         .from('generation-pdfs')
-        .createSignedUrl(asset.storage_path, 60 * 60);
+        .createSignedUrl(
+          asset.storage_path,
+          getSupabaseSignedUrlExpiresInSeconds(),
+        );
 
       if (error || !data?.signedUrl) {
         return null;
@@ -168,7 +172,10 @@ export async function GET(
         ? { data: null }
         : await admin.storage
             .from('generation-pdfs')
-            .createSignedUrl(item.source_pdf_path, 60 * 60);
+            .createSignedUrl(
+              item.source_pdf_path,
+              getSupabaseSignedUrlExpiresInSeconds(),
+            );
 
     const pdfPreviewPages = await createGenerationPdfPreviewPages({
       admin,

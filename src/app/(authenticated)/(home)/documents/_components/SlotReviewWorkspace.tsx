@@ -46,6 +46,13 @@ import {
   SLOT_REVIEW_SESSION_KEY,
   type SlotReviewSessionPayload,
 } from '@/src/lib/templates/slot-review-session';
+import {
+  createManualSlotKey,
+  filterPdfEvidenceMatchesBySlotKeys,
+  getExtractionItemSlotKey,
+  getExtractionResultSlotKeySet,
+  getPdfEvidenceMatchSlotKey,
+} from '@/src/lib/templates/slot-key';
 import { openSaveTemplateModal } from '@/src/modals/save-template';
 import { openSlotReviewGuideModal } from '@/src/modals/slot-review-guide';
 import { useSaveTemplate } from '@/src/querys/use-template-library';
@@ -67,6 +74,13 @@ type PdfEvidenceMatch = TemplatePdfEvidenceResult['matches'][number];
 interface PdfBbox {
   x: number;
   y: number;
+  width: number;
+  height: number;
+}
+
+interface CanvasRect {
+  left: number;
+  top: number;
   width: number;
   height: number;
 }
@@ -130,6 +144,33 @@ interface SlotReviewWorkspaceState {
   pendingNewItemMeaning: string;
 }
 
+function getParagraphGroupKey(input: {
+  paragraphTitle: string;
+  paragraphIndex: number | undefined;
+}) {
+  return `${input.paragraphTitle}::${input.paragraphIndex ?? 'manual'}`;
+}
+
+function getSourceParagraphGroupKey(
+  paragraph: ExtractionParagraph,
+  fallbackParagraphIndex: number,
+) {
+  return getParagraphGroupKey({
+    paragraphTitle: paragraph.paragraph_title,
+    paragraphIndex: paragraph.paragraph_index ?? fallbackParagraphIndex,
+  });
+}
+
+function getItemParagraphGroupKey(item: EditableExtractionItem) {
+  return getParagraphGroupKey({
+    paragraphTitle: item.paragraphTitle,
+    paragraphIndex:
+      typeof item.paragraph_index === 'number'
+        ? item.paragraph_index
+        : undefined,
+  });
+}
+
 function buildExtractionResultFromItems(
   items: EditableExtractionItem[],
   sourceParagraphs: ExtractionParagraph[],
@@ -137,8 +178,18 @@ function buildExtractionResultFromItems(
   const matchedItemIds = new Set<string>();
   const groupedSourceParagraphs = sourceParagraphs.flatMap(
     (paragraph, paragraphIndex) => {
+      const paragraphGroupKey = getSourceParagraphGroupKey(
+        paragraph,
+        paragraphIndex,
+      );
       const paragraphItems = items
-        .filter((item) => item.id.startsWith(`${paragraphIndex}-`))
+        .filter((item) => {
+          if (matchedItemIds.has(item.id)) {
+            return false;
+          }
+
+          return getItemParagraphGroupKey(item) === paragraphGroupKey;
+        })
         .map(({ id, paragraphTitle, ...rest }) => {
           matchedItemIds.add(id);
           return rest;
@@ -176,7 +227,10 @@ function buildExtractionResultFromItems(
       typeof rest.paragraph_index === 'number'
         ? rest.paragraph_index
         : undefined;
-    const paragraphKey = `${paragraphTitle}::${paragraphIndex ?? 'manual'}`;
+    const paragraphKey = getParagraphGroupKey({
+      paragraphTitle,
+      paragraphIndex,
+    });
     const bucket = manualParagraphMap.get(paragraphKey) ?? {
       paragraphIndex,
       paragraphTitle,
@@ -196,6 +250,72 @@ function buildExtractionResultFromItems(
   );
 
   return [...groupedSourceParagraphs, ...manualParagraphs];
+}
+
+function createManualSlotKeyForNewItem(input: {
+  items: EditableExtractionItem[];
+  sourceParagraphs: ExtractionParagraph[];
+  draftItem: EditableExtractionItem;
+}) {
+  const draftItems = [...input.items, input.draftItem];
+  const draftExtractionResult = buildExtractionResultFromItems(
+    draftItems,
+    input.sourceParagraphs,
+  );
+
+  for (const [paragraphIndex, paragraph] of draftExtractionResult.entries()) {
+    const itemIndex = paragraph.items.findIndex(
+      (item) =>
+        item.sequence === input.draftItem.sequence &&
+        item.original_value === input.draftItem.original_value &&
+        item.meaning_to_applicant === input.draftItem.meaning_to_applicant &&
+        item.original_doc_position === input.draftItem.original_doc_position,
+    );
+
+    if (itemIndex >= 0) {
+      return createManualSlotKey({
+        paragraphIndex,
+        itemIndex,
+        sequence: input.draftItem.sequence,
+      });
+    }
+  }
+
+  return createManualSlotKey({
+    paragraphIndex: draftExtractionResult.length,
+    itemIndex: 0,
+    sequence: input.draftItem.sequence,
+  });
+}
+
+function removeOrphanPdfEvidenceMatches(
+  payload: SlotReviewSessionPayload,
+): SlotReviewSessionPayload {
+  if (!payload.pdfEvidence) {
+    return payload;
+  }
+
+  const slotKeys = getExtractionResultSlotKeySet(payload.extractionResult);
+  const filteredMatches = filterPdfEvidenceMatchesBySlotKeys(
+    payload.pdfEvidence.matches,
+    slotKeys,
+  );
+  const pagesWithMatches = new Set(
+    filteredMatches.map((match) => match.page_number),
+  );
+
+  return {
+    ...payload,
+    pdfEvidence: {
+      ...payload.pdfEvidence,
+      matches: filteredMatches,
+      pages: payload.pdfEvidence.pages.map((page) =>
+        pagesWithMatches.has(page.pageNumber)
+          ? page
+          : { ...page, annotatedStoragePath: undefined },
+      ),
+    },
+  };
 }
 
 function extractParagraphTextsFromUploadText(uploadText: string) {
@@ -260,9 +380,9 @@ function buildPreviewItems(
     ...items,
     {
       id: 'pending-new-item',
-      paragraphTitle: '鎵嬪姩娣诲姞妲戒綅',
+      paragraphTitle: '手动新增槽位',
       sequence: Number.MAX_SAFE_INTEGER,
-      field_category: '鎵嬪姩娣诲姞',
+      field_category: '手动新增',
       original_value: pendingNewItemSelection.trim(),
       meaning_to_applicant: '',
       original_doc_position: pendingNewItemSelection.trim(),
@@ -1000,8 +1120,9 @@ function filterPlainPreviewItems(
 }
 
 function parseSlotItemIdentity(item: EditableExtractionItem) {
-  const [paragraphResultIndexRaw, itemIndexRaw, sequenceRaw] =
-    item.id.split('-');
+  const [paragraphResultIndexRaw, itemIndexRaw, sequenceRaw] = item.id
+    .replace(/^manual-/, '')
+    .split('-');
   const paragraphResultIndex = Number(paragraphResultIndexRaw);
   const itemIndex = Number(itemIndexRaw);
   const sequence = Number(sequenceRaw);
@@ -1025,14 +1146,9 @@ function isPdfEvidenceMatchForItem(
   match: PdfEvidenceMatch,
   item: EditableExtractionItem,
 ) {
-  const identity = parseSlotItemIdentity(item);
+  const itemSlotKey = item.slot_key?.trim() || item.id;
 
-  return Boolean(
-    identity &&
-      match.paragraph_result_index === identity.paragraphResultIndex &&
-      match.item_index === identity.itemIndex &&
-      match.sequence === identity.sequence,
-  );
+  return getPdfEvidenceMatchSlotKey(match) === itemSlotKey;
 }
 
 function findPdfEvidenceMatchForItem(
@@ -1089,8 +1205,10 @@ function buildManualPdfEvidenceMatch(input: {
   existingMatch: PdfEvidenceMatch | null;
 }): PdfEvidenceMatch {
   const identity = parseSlotItemIdentity(input.item);
+  const slotKey = input.item.slot_key?.trim() || input.item.id;
 
   return {
+    slot_key: slotKey,
     paragraph_result_index:
       input.existingMatch?.paragraph_result_index ??
       identity?.paragraphResultIndex ??
@@ -1297,10 +1415,6 @@ function PdfEvidencePageCanvas({
   );
 }
 
-function getPdfEvidenceMatchSlotKey(match: PdfEvidenceMatch) {
-  return `${match.paragraph_result_index}-${match.item_index}-${match.sequence}`;
-}
-
 function getReferencePageImageSource(
   page: NonNullable<SlotReviewSessionPayload['pdfEvidence']>['pages'][number],
 ) {
@@ -1382,6 +1496,223 @@ function canvasToJpegBlob(canvas: HTMLCanvasElement, quality: number) {
   });
 }
 
+function clampCanvasRectPosition(
+  rect: CanvasRect,
+  canvasWidth: number,
+  canvasHeight: number,
+): CanvasRect {
+  return {
+    ...rect,
+    left: Math.max(0, Math.min(canvasWidth - rect.width, rect.left)),
+    top: Math.max(0, Math.min(canvasHeight - rect.height, rect.top)),
+  };
+}
+
+function getCanvasRectOverlapArea(
+  firstRect: CanvasRect,
+  secondRect: CanvasRect,
+  padding = 0,
+) {
+  const left = Math.max(firstRect.left, secondRect.left - padding);
+  const top = Math.max(firstRect.top, secondRect.top - padding);
+  const right = Math.min(
+    firstRect.left + firstRect.width,
+    secondRect.left + secondRect.width + padding,
+  );
+  const bottom = Math.min(
+    firstRect.top + firstRect.height,
+    secondRect.top + secondRect.height + padding,
+  );
+
+  return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
+function doCanvasRectsOverlap(
+  firstRect: CanvasRect,
+  secondRect: CanvasRect,
+  padding = 0,
+) {
+  return getCanvasRectOverlapArea(firstRect, secondRect, padding) > 0;
+}
+
+function getCanvasRectCenter(rect: CanvasRect) {
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+function getCanvasRectDistanceScore(
+  firstRect: CanvasRect,
+  secondRect: CanvasRect,
+) {
+  const firstCenter = getCanvasRectCenter(firstRect);
+  const secondCenter = getCanvasRectCenter(secondRect);
+  const distanceX = firstCenter.x - secondCenter.x;
+  const distanceY = firstCenter.y - secondCenter.y;
+
+  return distanceX * distanceX + distanceY * distanceY;
+}
+
+function pickCanvasLabelRect(input: {
+  bboxRect: CanvasRect;
+  labelWidth: number;
+  labelHeight: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  gap: number;
+  placedLabelRects: CanvasRect[];
+  bboxRects: CanvasRect[];
+}) {
+  const {
+    bboxRect,
+    labelWidth,
+    labelHeight,
+    canvasWidth,
+    canvasHeight,
+    gap,
+    placedLabelRects,
+    bboxRects,
+  } = input;
+  const leftOffsets = [
+    bboxRect.left,
+    bboxRect.left + bboxRect.width - labelWidth,
+    bboxRect.left + bboxRect.width + gap,
+    bboxRect.left - labelWidth - gap,
+  ];
+  const topOffsets = [
+    bboxRect.top - labelHeight - gap,
+    bboxRect.top + bboxRect.height + gap,
+    bboxRect.top,
+    bboxRect.top + bboxRect.height - labelHeight,
+  ];
+  const rawCandidates: CanvasRect[] = [
+    ...leftOffsets.flatMap((left) => [
+      {
+        left,
+        top: bboxRect.top - labelHeight - gap,
+        width: labelWidth,
+        height: labelHeight,
+      },
+      {
+        left,
+        top: bboxRect.top + bboxRect.height + gap,
+        width: labelWidth,
+        height: labelHeight,
+      },
+    ]),
+    ...topOffsets.flatMap((top) => [
+      {
+        left: bboxRect.left + bboxRect.width + gap,
+        top,
+        width: labelWidth,
+        height: labelHeight,
+      },
+      {
+        left: bboxRect.left - labelWidth - gap,
+        top,
+        width: labelWidth,
+        height: labelHeight,
+      },
+    ]),
+    {
+      left: bboxRect.left + gap,
+      top: bboxRect.top + gap,
+      width: labelWidth,
+      height: labelHeight,
+    },
+  ];
+  const candidates = rawCandidates.reduce<CanvasRect[]>((uniqueRects, rect) => {
+    const clampedRect = clampCanvasRectPosition(
+      rect,
+      canvasWidth,
+      canvasHeight,
+    );
+    const duplicateRect = uniqueRects.some(
+      (currentRect) =>
+        Math.abs(currentRect.left - clampedRect.left) < 1 &&
+        Math.abs(currentRect.top - clampedRect.top) < 1,
+    );
+
+    return duplicateRect ? uniqueRects : [...uniqueRects, clampedRect];
+  }, []);
+  const hasNoPlacedLabelOverlap = (candidate: CanvasRect) =>
+    placedLabelRects.every(
+      (placedLabelRect) =>
+        !doCanvasRectsOverlap(candidate, placedLabelRect, gap),
+    );
+  const hasNoBboxOverlap = (candidate: CanvasRect) =>
+    bboxRects.every(
+      (currentBboxRect) =>
+        !doCanvasRectsOverlap(candidate, currentBboxRect, gap),
+    );
+
+  return (
+    candidates.find(
+      (candidate) =>
+        hasNoPlacedLabelOverlap(candidate) && hasNoBboxOverlap(candidate),
+    ) ??
+    candidates.find((candidate) => hasNoPlacedLabelOverlap(candidate)) ??
+    candidates
+      .map((candidate) => {
+        const labelOverlapScore = placedLabelRects.reduce(
+          (sum, placedLabelRect) =>
+            sum + getCanvasRectOverlapArea(candidate, placedLabelRect, gap),
+          0,
+        );
+        const bboxOverlapScore = bboxRects.reduce(
+          (sum, currentBboxRect) =>
+            sum + getCanvasRectOverlapArea(candidate, currentBboxRect, gap),
+          0,
+        );
+
+        return {
+          candidate,
+          score:
+            labelOverlapScore * 8 +
+            bboxOverlapScore * 4 +
+            getCanvasRectDistanceScore(candidate, bboxRect) * 0.0001,
+        };
+      })
+      .sort((firstCandidate, secondCandidate) => {
+        return firstCandidate.score - secondCandidate.score;
+      })[0]?.candidate ??
+    clampCanvasRectPosition(
+      {
+        left: bboxRect.left,
+        top: bboxRect.top - labelHeight - gap,
+        width: labelWidth,
+        height: labelHeight,
+      },
+      canvasWidth,
+      canvasHeight,
+    )
+  );
+}
+
+function drawLabelConnector(
+  context: CanvasRenderingContext2D,
+  bboxRect: CanvasRect,
+  labelRect: CanvasRect,
+  lineWidth: number,
+) {
+  if (doCanvasRectsOverlap(bboxRect, labelRect)) {
+    return;
+  }
+
+  const bboxCenter = getCanvasRectCenter(bboxRect);
+  const labelCenter = getCanvasRectCenter(labelRect);
+
+  context.save();
+  context.strokeStyle = 'rgba(255, 153, 0, 0.76)';
+  context.lineWidth = Math.max(1, Math.round(lineWidth * 0.6));
+  context.beginPath();
+  context.moveTo(labelCenter.x, labelCenter.y);
+  context.lineTo(bboxCenter.x, bboxCenter.y);
+  context.stroke();
+  context.restore();
+}
+
 async function buildAnnotatedReferencePageBlob(input: {
   sourceUrl: string;
   matches: PdfEvidenceMatch[];
@@ -1451,61 +1782,124 @@ async function buildAnnotatedReferencePageBlob(input: {
     annotatedContext.font = `${labelFontSize}px Arial, sans-serif`;
     annotatedContext.textBaseline = 'top';
 
-    groupedMatches.forEach((matches) => {
-      const bbox = matches[0]?.bbox;
+    const annotationEntries = Array.from(groupedMatches.values())
+      .flatMap((matches) => {
+        const bbox = matches[0]?.bbox;
 
-      if (!bbox) {
-        return;
-      }
+        if (!bbox) {
+          return [];
+        }
 
-      const left = Math.max(
-        0,
-        Math.min(annotatedWidth, bbox.x * annotatedWidth),
-      );
-      const top = Math.max(
-        0,
-        Math.min(annotatedHeight, bbox.y * annotatedHeight),
-      );
-      const boxWidth = Math.max(
-        1,
-        Math.min(annotatedWidth - left, bbox.width * annotatedWidth),
-      );
-      const boxHeight = Math.max(
-        1,
-        Math.min(annotatedHeight - top, bbox.height * annotatedHeight),
-      );
-      const labels = matches.map(getPdfEvidenceMatchSlotKey);
-      const measuredWidth = Math.max(
-        ...labels.map((label) => annotatedContext.measureText(label).width),
-      );
-      const labelLineHeight = Math.ceil(labelFontSize * 1.14);
-      const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
-      const labelHeight = labels.length * labelLineHeight + labelPaddingY * 2;
-      const labelLeft = Math.max(
-        0,
-        Math.min(annotatedWidth - labelWidth, left - lineWidth),
-      );
-      const labelTop = Math.max(
-        0,
-        Math.min(annotatedHeight - labelHeight, top - labelHeight - lineWidth),
-      );
+        const left = Math.max(
+          0,
+          Math.min(annotatedWidth, bbox.x * annotatedWidth),
+        );
+        const top = Math.max(
+          0,
+          Math.min(annotatedHeight, bbox.y * annotatedHeight),
+        );
+        const boxWidth = Math.max(
+          1,
+          Math.min(annotatedWidth - left, bbox.width * annotatedWidth),
+        );
+        const boxHeight = Math.max(
+          1,
+          Math.min(annotatedHeight - top, bbox.height * annotatedHeight),
+        );
+        const labels = matches.map(getPdfEvidenceMatchSlotKey).filter(Boolean);
 
-      annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.08)';
-      annotatedContext.fillRect(left, top, boxWidth, boxHeight);
-      annotatedContext.strokeStyle = '#ff9900';
-      annotatedContext.lineWidth = lineWidth;
-      annotatedContext.strokeRect(left, top, boxWidth, boxHeight);
-      annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.92)';
-      annotatedContext.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
-      annotatedContext.fillStyle = '#111111';
-      labels.forEach((label, labelIndex) => {
-        annotatedContext.fillText(
-          label,
-          labelLeft + labelPaddingX,
-          labelTop + labelPaddingY + labelIndex * labelLineHeight,
+        if (labels.length === 0) {
+          return [];
+        }
+
+        const measuredWidth = Math.max(
+          ...labels.map((label) => annotatedContext.measureText(label).width),
+        );
+        const labelLineHeight = Math.ceil(labelFontSize * 1.14);
+        const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
+        const labelHeight =
+          labels.length * labelLineHeight + labelPaddingY * 2;
+
+        return [
+          {
+            bboxRect: {
+              left,
+              top,
+              width: boxWidth,
+              height: boxHeight,
+            },
+            labels,
+            labelLineHeight,
+            labelWidth,
+            labelHeight,
+          },
+        ];
+      })
+      .sort((firstEntry, secondEntry) => {
+        return (
+          firstEntry.bboxRect.top - secondEntry.bboxRect.top ||
+          firstEntry.bboxRect.left - secondEntry.bboxRect.left
         );
       });
+    const bboxRects = annotationEntries.map((entry) => entry.bboxRect);
+
+    annotationEntries.forEach(({ bboxRect }) => {
+      annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.08)';
+      annotatedContext.fillRect(
+        bboxRect.left,
+        bboxRect.top,
+        bboxRect.width,
+        bboxRect.height,
+      );
+      annotatedContext.strokeStyle = '#ff9900';
+      annotatedContext.lineWidth = lineWidth;
+      annotatedContext.strokeRect(
+        bboxRect.left,
+        bboxRect.top,
+        bboxRect.width,
+        bboxRect.height,
+      );
     });
+
+    const placedLabelRects: CanvasRect[] = [];
+
+    annotationEntries.forEach(
+      ({ bboxRect, labels, labelLineHeight, labelWidth, labelHeight }) => {
+        const labelRect = pickCanvasLabelRect({
+          bboxRect,
+          labelWidth,
+          labelHeight,
+          canvasWidth: annotatedWidth,
+          canvasHeight: annotatedHeight,
+          gap: lineWidth,
+          placedLabelRects,
+          bboxRects,
+        });
+
+        drawLabelConnector(
+          annotatedContext,
+          bboxRect,
+          labelRect,
+          lineWidth,
+        );
+        annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.92)';
+        annotatedContext.fillRect(
+          labelRect.left,
+          labelRect.top,
+          labelRect.width,
+          labelRect.height,
+        );
+        annotatedContext.fillStyle = '#111111';
+        labels.forEach((label, labelIndex) => {
+          annotatedContext.fillText(
+            label,
+            labelRect.left + labelPaddingX,
+            labelRect.top + labelPaddingY + labelIndex * labelLineHeight,
+          );
+        });
+        placedLabelRects.push(labelRect);
+      },
+    );
 
     return canvasToJpegBlob(
       annotatedCanvas,
@@ -1869,13 +2263,16 @@ function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
     };
   }
 
-  const parsed = JSON.parse(rawValue) as SlotReviewSessionPayload;
+  const parsed = removeOrphanPdfEvidenceMatches(
+    JSON.parse(rawValue) as SlotReviewSessionPayload,
+  );
   const flattenedItems = parsed.extractionResult.flatMap(
     (paragraph: ExtractionParagraph, paragraphIndex) =>
       paragraph.items.map((item, itemIndex) => ({
         ...item,
+        slot_key: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
         field_category: normalizeSlotCategoryLabel(item.field_category),
-        id: `${paragraphIndex}-${itemIndex}-${item.sequence}`,
+        id: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
         paragraphTitle: paragraph.paragraph_title,
       })),
   );
@@ -2531,11 +2928,11 @@ export function SlotReviewWorkspace() {
           visibleItems,
           payload.extractionResult,
         );
-        const nextPayload: SlotReviewSessionPayload = {
+        const nextPayload = removeOrphanPdfEvidenceMatches({
           ...payload,
           templateName,
           extractionResult: nextExtractionResult,
-        };
+        });
         const savedTemplate = await saveTemplateMutation.mutateAsync({
           templateId: payload.templateId,
           templateName,
@@ -2900,8 +3297,8 @@ export function SlotReviewWorkspace() {
                                         Math.max(maxSequence, item.sequence),
                                       0,
                                     ) + 1;
-                                  const newItem: EditableExtractionItem = {
-                                    id: `manual-${Date.now()}`,
+                                  const draftItem: EditableExtractionItem = {
+                                    id: `pending-manual-${nextSequence}`,
                                     paragraphTitle: '手动新增槽位',
                                     sequence: nextSequence,
                                     field_category: '手动新增',
@@ -2914,6 +3311,20 @@ export function SlotReviewWorkspace() {
                                     paragraph_index:
                                       currentState.pendingNewItemParagraphIndex ??
                                       undefined,
+                                  };
+                                  const slotKey = createManualSlotKeyForNewItem(
+                                    {
+                                      items: currentState.items,
+                                      sourceParagraphs:
+                                        currentState.payload
+                                          ?.extractionResult ?? [],
+                                      draftItem,
+                                    },
+                                  );
+                                  const newItem: EditableExtractionItem = {
+                                    ...draftItem,
+                                    id: slotKey,
+                                    slot_key: slotKey,
                                   };
 
                                   return {
@@ -3208,10 +3619,37 @@ export function SlotReviewWorkspace() {
                                       (currentItem) =>
                                         currentItem.id !== item.id,
                                     );
+                                    const removedSlotKey =
+                                      item.slot_key?.trim() || item.id;
                                     const nextActiveItemId =
                                       currentState.activeItemId === item.id
                                         ? nextVisibleItemId
                                         : currentState.activeItemId;
+                                    const nextPayload = currentState.payload
+                                      ? removeOrphanPdfEvidenceMatches({
+                                          ...currentState.payload,
+                                          extractionResult:
+                                            buildExtractionResultFromItems(
+                                              nextItems,
+                                              currentState.payload
+                                                .extractionResult,
+                                            ),
+                                          pdfEvidence: currentState.payload
+                                            .pdfEvidence
+                                            ? {
+                                                ...currentState.payload
+                                                  .pdfEvidence,
+                                                matches:
+                                                  currentState.payload.pdfEvidence.matches.filter(
+                                                    (match) =>
+                                                      getPdfEvidenceMatchSlotKey(
+                                                        match,
+                                                      ) !== removedSlotKey,
+                                                  ),
+                                              }
+                                            : undefined,
+                                        })
+                                      : currentState.payload;
 
                                     const nextPendingSelectionByItemId =
                                       Object.fromEntries(
@@ -3223,9 +3661,16 @@ export function SlotReviewWorkspace() {
                                         ),
                                       );
 
+                                    if (nextPayload) {
+                                      persistSlotReviewPayloadToSession(
+                                        nextPayload,
+                                      );
+                                    }
+
                                     return {
                                       ...currentState,
                                       items: nextItems,
+                                      payload: nextPayload,
                                       activeItemId: nextActiveItemId,
                                       editingItemId:
                                         currentState.editingItemId === item.id

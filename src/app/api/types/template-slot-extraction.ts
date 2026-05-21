@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const extractionItemSchema = z.object({
+  slot_key: z.string().optional(),
   sequence: z.number().int().positive(),
   paragraph_index: z.number().int().nonnegative().nullable().optional(),
   field_category: z.string(),
@@ -35,6 +36,7 @@ export const templatePdfEvidenceBboxSchema = z.object({
 });
 
 export const templatePdfEvidenceMatchSchema = z.object({
+  slot_key: z.string().optional(),
   paragraph_result_index: z.number().int().nonnegative(),
   item_index: z.number().int().nonnegative(),
   sequence: z.number().int().positive(),
