@@ -36,6 +36,12 @@ export type PdfVisionPageRotation = -90 | 0 | 90 | 180;
 const DEFAULT_PDF_RENDER_SCALE = 6.0;
 const DEFAULT_PDF_RENDER_IMAGE_FORMAT = 'image/jpeg';
 const DEFAULT_PDF_RENDER_JPEG_QUALITY = 0.92;
+const DEFAULT_PDF_RENDER_JPEG_MAX_LONG_EDGE = 3200;
+const DEFAULT_PDF_RENDER_JPEG_BACKGROUND_CLEANUP = true;
+const DEFAULT_PDF_RENDER_JPEG_GRAYSCALE = false;
+const DEFAULT_PDF_RENDER_JPEG_BACKGROUND_WHITE_THRESHOLD = 246;
+const DEFAULT_PDF_RENDER_JPEG_BACKGROUND_INK_THRESHOLD = 190;
+const DEFAULT_PDF_RENDER_JPEG_CONTRAST = 1.04;
 const DEFAULT_PDF_VISION_RENDER_CONCURRENCY = 3;
 const MAX_PDF_VISION_RENDER_CONCURRENCY = 8;
 const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
@@ -57,6 +63,8 @@ const SUPPORTED_PDF_RENDER_IMAGE_FORMATS = [
 ] as const;
 
 type PdfRenderImageFormat = (typeof SUPPORTED_PDF_RENDER_IMAGE_FORMATS)[number];
+
+type PdfRenderConfig = ReturnType<typeof getPdfRenderConfig>;
 
 const PDFJS_VERSION = '5.6.205';
 const PDFJS_CMAP_URL = `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/cmaps/`;
@@ -111,11 +119,9 @@ function getPdfRenderJpegQuality() {
   return Math.min(1, Math.max(0.1, parsedValue));
 }
 
-function getPdfAutoRotatePages() {
-  const rawValue = process.env.NEXT_PUBLIC_PDF_AUTO_ROTATE_PAGES;
-
+function getBooleanEnvValue(rawValue: string | undefined, fallback: boolean) {
   if (typeof rawValue !== 'string' || !rawValue.trim()) {
-    return DEFAULT_PDF_AUTO_ROTATE_PAGES;
+    return fallback;
   }
 
   const normalizedValue = rawValue.trim().toLowerCase();
@@ -128,7 +134,74 @@ function getPdfAutoRotatePages() {
     return true;
   }
 
-  return DEFAULT_PDF_AUTO_ROTATE_PAGES;
+  return fallback;
+}
+
+function getPdfAutoRotatePages() {
+  return getBooleanEnvValue(
+    process.env.NEXT_PUBLIC_PDF_AUTO_ROTATE_PAGES,
+    DEFAULT_PDF_AUTO_ROTATE_PAGES,
+  );
+}
+
+function getPdfRenderJpegMaxLongEdge() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_MAX_LONG_EDGE,
+  );
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return DEFAULT_PDF_RENDER_JPEG_MAX_LONG_EDGE;
+  }
+
+  return Math.min(8000, Math.max(0, Math.floor(parsedValue)));
+}
+
+function getPdfRenderJpegBackgroundCleanup() {
+  return getBooleanEnvValue(
+    process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_BACKGROUND_CLEANUP,
+    DEFAULT_PDF_RENDER_JPEG_BACKGROUND_CLEANUP,
+  );
+}
+
+function getPdfRenderJpegGrayscale() {
+  return getBooleanEnvValue(
+    process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_GRAYSCALE,
+    DEFAULT_PDF_RENDER_JPEG_GRAYSCALE,
+  );
+}
+
+function getPdfRenderJpegBackgroundWhiteThreshold() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_BACKGROUND_WHITE_THRESHOLD,
+  );
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_PDF_RENDER_JPEG_BACKGROUND_WHITE_THRESHOLD;
+  }
+
+  return Math.min(255, Math.max(0, parsedValue));
+}
+
+function getPdfRenderJpegBackgroundInkThreshold() {
+  const parsedValue = Number(
+    process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_BACKGROUND_INK_THRESHOLD,
+  );
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_PDF_RENDER_JPEG_BACKGROUND_INK_THRESHOLD;
+  }
+
+  return Math.min(255, Math.max(0, parsedValue));
+}
+
+function getPdfRenderJpegContrast() {
+  const parsedValue = Number(process.env.NEXT_PUBLIC_PDF_RENDER_JPEG_CONTRAST);
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return DEFAULT_PDF_RENDER_JPEG_CONTRAST;
+  }
+
+  return Math.min(3, Math.max(0.1, parsedValue));
 }
 
 export function getPdfRenderConfig() {
@@ -137,6 +210,12 @@ export function getPdfRenderConfig() {
     imageFormat: getPdfRenderImageFormat(),
     imageQuality: getPdfRenderJpegQuality(),
     autoRotatePages: getPdfAutoRotatePages(),
+    jpegMaxLongEdge: getPdfRenderJpegMaxLongEdge(),
+    jpegBackgroundCleanup: getPdfRenderJpegBackgroundCleanup(),
+    jpegGrayscale: getPdfRenderJpegGrayscale(),
+    jpegBackgroundWhiteThreshold: getPdfRenderJpegBackgroundWhiteThreshold(),
+    jpegBackgroundInkThreshold: getPdfRenderJpegBackgroundInkThreshold(),
+    jpegContrast: getPdfRenderJpegContrast(),
   };
 }
 
@@ -284,7 +363,7 @@ function isLikelyWhitePixel(data: Uint8ClampedArray, index: number) {
 }
 
 function findCanvasContentBounds(canvas: HTMLCanvasElement) {
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d', { willReadFrequently: true });
 
   if (!context || !PDF_AUTO_CROP_WHITE_MARGIN) {
     return null;
@@ -365,6 +444,119 @@ function cropCanvas(canvas: HTMLCanvasElement, crop: PdfVisionPageCrop) {
   return croppedCanvas;
 }
 
+function resizeCanvasToMaxLongEdge(
+  canvas: HTMLCanvasElement,
+  maxLongEdge: number,
+) {
+  if (!Number.isFinite(maxLongEdge) || maxLongEdge <= 0) {
+    return canvas;
+  }
+
+  const longEdge = Math.max(canvas.width, canvas.height);
+
+  if (longEdge <= maxLongEdge) {
+    return canvas;
+  }
+
+  const resizeScale = maxLongEdge / longEdge;
+  const resizedCanvas = document.createElement('canvas');
+  const context = resizedCanvas.getContext('2d');
+
+  if (!context) {
+    throw new Error('Failed to create resized PDF page canvas.');
+  }
+
+  resizedCanvas.width = Math.max(1, Math.round(canvas.width * resizeScale));
+  resizedCanvas.height = Math.max(1, Math.round(canvas.height * resizeScale));
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(
+    canvas,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+    0,
+    0,
+    resizedCanvas.width,
+    resizedCanvas.height,
+  );
+
+  return resizedCanvas;
+}
+
+function enhanceCanvasForJpeg(
+  canvas: HTMLCanvasElement,
+  config: PdfRenderConfig,
+) {
+  if (
+    !config.jpegBackgroundCleanup &&
+    !config.jpegGrayscale &&
+    config.jpegContrast === 1
+  ) {
+    return;
+  }
+
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+
+  if (!context) {
+    return;
+  }
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const red = data[index] ?? 255;
+    const green = data[index + 1] ?? 255;
+    const blue = data[index + 2] ?? 255;
+    const gray = 0.299 * red + 0.587 * green + 0.114 * blue;
+
+    if (
+      config.jpegBackgroundCleanup &&
+      gray >= config.jpegBackgroundWhiteThreshold
+    ) {
+      data[index] = 255;
+      data[index + 1] = 255;
+      data[index + 2] = 255;
+      continue;
+    }
+
+    const contrastedGray = Math.max(
+      0,
+      Math.min(255, (gray - 128) * config.jpegContrast + 128),
+    );
+
+    if (config.jpegGrayscale) {
+      const nextValue =
+        config.jpegBackgroundCleanup &&
+        contrastedGray <= config.jpegBackgroundInkThreshold
+          ? Math.max(0, contrastedGray - 6)
+          : contrastedGray;
+
+      data[index] = nextValue;
+      data[index + 1] = nextValue;
+      data[index + 2] = nextValue;
+      continue;
+    }
+
+    data[index] = Math.max(
+      0,
+      Math.min(255, (red - 128) * config.jpegContrast + 128),
+    );
+    data[index + 1] = Math.max(
+      0,
+      Math.min(255, (green - 128) * config.jpegContrast + 128),
+    );
+    data[index + 2] = Math.max(
+      0,
+      Math.min(255, (blue - 128) * config.jpegContrast + 128),
+    );
+  }
+
+  context.putImageData(imageData, 0, 0);
+}
+
 function calculateStandardDeviation(values: number[]) {
   if (values.length === 0) {
     return 0;
@@ -407,8 +599,9 @@ function getEdgeInkDensity(
 function analyzeCanvasSidewaysRotation(
   canvas: HTMLCanvasElement,
   contentBounds: PdfVisionPageCrop | null,
+  config: PdfRenderConfig,
 ): PdfVisionPageRotation {
-  if (!getPdfAutoRotatePages() || !contentBounds) {
+  if (!config.autoRotatePages || !contentBounds) {
     return 0;
   }
 
@@ -544,26 +737,34 @@ function rotateCanvas(
   return rotatedCanvas;
 }
 
-function createPdfVisionCanvas(canvas: HTMLCanvasElement) {
+function createPdfVisionCanvas(
+  canvas: HTMLCanvasElement,
+  config: PdfRenderConfig,
+) {
   const initialCrop = findCanvasContentBounds(canvas);
-  const rotationApplied = analyzeCanvasSidewaysRotation(canvas, initialCrop);
+  const rotationApplied = analyzeCanvasSidewaysRotation(
+    canvas,
+    initialCrop,
+    config,
+  );
   const orientedCanvas = rotateCanvas(canvas, rotationApplied);
   const crop =
     rotationApplied === 0
       ? initialCrop
       : findCanvasContentBounds(orientedCanvas);
+  const croppedCanvas = crop ? cropCanvas(orientedCanvas, crop) : orientedCanvas;
+  const optimizedCanvas =
+    config.imageFormat === 'image/jpeg'
+      ? resizeCanvasToMaxLongEdge(croppedCanvas, config.jpegMaxLongEdge)
+      : croppedCanvas;
 
-  if (!crop) {
-    return {
-      canvas: orientedCanvas,
-      crop: undefined,
-      rotationApplied,
-    };
+  if (config.imageFormat === 'image/jpeg') {
+    enhanceCanvasForJpeg(optimizedCanvas, config);
   }
 
   return {
-    canvas: cropCanvas(orientedCanvas, crop),
-    crop,
+    canvas: optimizedCanvas,
+    crop: crop ?? undefined,
     rotationApplied,
   };
 }
@@ -605,7 +806,8 @@ export async function renderPdfPagesForVision(
   const results: Array<PdfVisionPageInput | undefined> = Array.from({
     length: pageNumbers.length,
   });
-  const { scale, imageFormat, imageQuality } = getPdfRenderConfig();
+  const renderConfig = getPdfRenderConfig();
+  const { scale, imageFormat, imageQuality } = renderConfig;
   const configuredRenderConcurrency = getPdfVisionRenderConcurrency();
   const renderConcurrency = Math.min(
     configuredRenderConcurrency,
@@ -632,7 +834,7 @@ export async function renderPdfPagesForVision(
       viewport,
     }).promise;
 
-    const visionCanvas = createPdfVisionCanvas(canvas);
+    const visionCanvas = createPdfVisionCanvas(canvas, renderConfig);
     const imageBlob = await canvasToImageBlob(
       visionCanvas.canvas,
       imageFormat,
