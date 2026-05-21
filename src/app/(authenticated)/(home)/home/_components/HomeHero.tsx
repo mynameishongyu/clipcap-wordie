@@ -366,6 +366,100 @@ function formatDurationMs(durationMs: number) {
   return `${(durationMs / 1000).toFixed(2)}s`;
 }
 
+function formatBytesAsMegabytes(bytes: number) {
+  return `${(Math.max(0, bytes) / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function formatMemoryMb(bytes: unknown) {
+  const numericBytes = typeof bytes === 'number' ? bytes : Number(bytes);
+
+  if (!Number.isFinite(numericBytes) || numericBytes < 0) {
+    return 'unknown';
+  }
+
+  return `${(numericBytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function getTemplateExtractionMemoryStageLabel(stage: string | undefined) {
+  switch (stage) {
+    case 'route_started':
+      return '槽位抽取路由开始';
+    case 'text_slot_extraction_start':
+      return 'DOCX 槽位抽取开始';
+    case 'text_slot_extraction_done':
+      return 'DOCX 槽位抽取完成';
+    case 'pdf_page_url_prepare_start':
+      return 'PDF 页图外链准备开始';
+    case 'pdf_page_url_prepare_done':
+      return 'PDF 页图外链准备完成';
+    case 'slot_pdf_page_mapping_start':
+      return '槽位与 PDF 内容关联开始';
+    case 'slot_pdf_page_mapping_done':
+      return '槽位与 PDF 内容关联完成';
+    case 'task_persist_start':
+      return '槽位抽取结果保存开始';
+    case 'task_persisted':
+      return '槽位抽取结果保存完成';
+    case 'route_failed':
+      return '槽位抽取路由失败';
+    default:
+      return stage ?? 'unknown';
+  }
+}
+
+function logTemplateExtractionVercelMemoryTrace(line: string) {
+  const marker = '[Vercel Memory][Template Extract]';
+
+  if (!line.includes(marker)) {
+    return false;
+  }
+
+  const jsonStartIndex = line.indexOf('{');
+
+  if (jsonStartIndex < 0) {
+    browserProcessLog.info(line);
+    return true;
+  }
+
+  try {
+    const memory = JSON.parse(line.slice(jsonStartIndex)) as {
+      stage?: string;
+      rss_bytes?: number;
+      heap_total_bytes?: number;
+      heap_used_bytes?: number;
+      external_bytes?: number;
+      array_buffers_bytes?: number;
+    } & Record<string, unknown>;
+    const stageLabel = getTemplateExtractionMemoryStageLabel(memory.stage);
+    const payload = {
+      ...memory,
+      stage_label: stageLabel,
+      rss_mb: formatMemoryMb(memory.rss_bytes),
+      heap_total_mb: formatMemoryMb(memory.heap_total_bytes),
+      heap_used_mb: formatMemoryMb(memory.heap_used_bytes),
+      external_mb: formatMemoryMb(memory.external_bytes),
+      array_buffers_mb: formatMemoryMb(memory.array_buffers_bytes),
+    };
+    const debugWindow = window as typeof window & {
+      clipcapTemplateExtractionVercelMemory?: Array<typeof payload>;
+    };
+
+    debugWindow.clipcapTemplateExtractionVercelMemory = [
+      ...(debugWindow.clipcapTemplateExtractionVercelMemory ?? []),
+      payload,
+    ];
+
+    browserProcessLog.info(
+      `[Vercel Memory][Template Extract] ${stageLabel}: rss ${payload.rss_mb}, heap used ${payload.heap_used_mb}, external ${payload.external_mb}, array buffers ${payload.array_buffers_mb}`,
+      payload,
+    );
+  } catch {
+    browserProcessLog.info(line);
+  }
+
+  return true;
+}
+
 function getTemplateExtractionTimingStageLabel(stage: string | undefined) {
   switch (stage) {
     case 'pdf_page_render':
@@ -665,7 +759,7 @@ async function preparePdfVisionPageAssets(
       duration_ms: Math.round(renderDurationMs),
       duration_text: formatDurationMs(renderDurationMs),
       page_count: visionPages.length,
-      total_bytes: renderedTotalBytes,
+      total_mb: formatBytesAsMegabytes(renderedTotalBytes),
       pdf_render_config: pdfRenderConfig,
     })}`,
   );
@@ -677,7 +771,7 @@ async function preparePdfVisionPageAssets(
       pdf_file_name: file.name,
       started_at: new Date().toISOString(),
       page_count: visionPages.length,
-      total_bytes: renderedTotalBytes,
+      total_mb: formatBytesAsMegabytes(renderedTotalBytes),
     })}`,
   );
 
@@ -704,7 +798,7 @@ async function preparePdfVisionPageAssets(
       ).toISOString(),
       finished_at: new Date().toISOString(),
       page_count: uploadedAssets.length,
-      total_bytes: uploadedTotalBytes,
+      total_mb: formatBytesAsMegabytes(uploadedTotalBytes),
       duration_ms: Math.round(uploadDurationMs),
       duration_text: formatDurationMs(uploadDurationMs),
     })}`,
@@ -1036,6 +1130,10 @@ export function HomeHero() {
       }
 
       if (logTemplateExtractionTimingTrace(line)) {
+        continue;
+      }
+
+      if (logTemplateExtractionVercelMemoryTrace(line)) {
         continue;
       }
 

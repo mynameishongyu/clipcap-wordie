@@ -1559,6 +1559,13 @@ async function runGenerationTaskItemSlotFill(params: {
       params.item.id,
       `[PDF Fill][RawError][SlotFill] ${getErrorMessage(error)}`,
     );
+    await appendMemoryTrace(admin, params.item.id, 'route_failed', {
+      error_message: getErrorMessage(error),
+      source_pdf_name: params.item.source_pdf_name,
+      slot_count: slotSchema.length,
+      vision_page_count: precomputedVisionPages.length,
+      page_image_asset_count: pageImageAssets.length,
+    });
     await appendProcessingTrace(
       admin,
       params.item.id,

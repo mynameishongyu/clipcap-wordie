@@ -145,6 +145,10 @@ function formatDurationMs(durationMs: number) {
   return `${(durationMs / 1000).toFixed(2)} 秒`;
 }
 
+function formatBytesAsMegabytes(bytes: number) {
+  return `${(Math.max(0, bytes) / 1024 / 1024).toFixed(2)} MB`;
+}
+
 async function runWithConcurrency<T>(
   items: T[],
   concurrency: number,
@@ -335,6 +339,10 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
         },
       );
       const uploadDurationMs = Date.now() - uploadStartedAt;
+      const uploadedTotalBytes = pageImageAssets.reduce(
+        (sum, asset) => sum + (asset?.size ?? 0),
+        0,
+      );
       console.info(
         `[Batch Generate][${item.file.name}] 上传 PDF 页面图片到 Supabase 总耗时：${formatDurationMs(
           uploadDurationMs,
@@ -345,7 +353,18 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
           uploadedPageImageCount,
           uploadConcurrency,
           durationMs: uploadDurationMs,
+          totalMb: formatBytesAsMegabytes(uploadedTotalBytes),
           storagePath: pdfPageFolderPath,
+        },
+      );
+      console.info(
+        `[Batch Generate][${item.file.name}] PDF 页面图片上传总大小：${formatBytesAsMegabytes(
+          uploadedTotalBytes,
+        )}`,
+        {
+          fileName: item.file.name,
+          pageImageCount: totalPageImageCount,
+          totalMb: formatBytesAsMegabytes(uploadedTotalBytes),
         },
       );
 
@@ -367,6 +386,15 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
     }),
   );
   const uploadAllDurationMs = Date.now() - uploadAllStartedAt;
+  const uploadAllTotalBytes = results.reduce(
+    (fileSum, item) =>
+      fileSum +
+      item.ocr_image_assets.reduce(
+        (assetSum, asset) => assetSum + (asset.size ?? 0),
+        0,
+      ),
+    0,
+  );
 
   console.info(
     `[Batch Generate] 上传 PDF 页面图片到 Supabase 全部文件总耗时：${formatDurationMs(
@@ -376,6 +404,17 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
       fileCount: input.files.length,
       fileNames: input.files.map((item) => item.file.name),
       durationMs: uploadAllDurationMs,
+      totalMb: formatBytesAsMegabytes(uploadAllTotalBytes),
+    },
+  );
+  console.info(
+    `[Batch Generate] PDF 页面图片上传全部文件总大小：${formatBytesAsMegabytes(
+      uploadAllTotalBytes,
+    )}`,
+    {
+      fileCount: input.files.length,
+      fileNames: input.files.map((item) => item.file.name),
+      totalMb: formatBytesAsMegabytes(uploadAllTotalBytes),
     },
   );
 

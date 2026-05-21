@@ -169,6 +169,12 @@ declare global {
       previewUrl: string;
       storagePath?: string | null;
     }>;
+    clipcapPdfFillVercelMemory?: Array<{
+      fileName: string;
+      taskItemId: string;
+      scope: 'PagePreparation' | 'SlotFill';
+      data: Record<string, unknown>;
+    }>;
   }
 }
 
@@ -617,6 +623,10 @@ function formatDurationMs(durationMs: number) {
   return `${(durationMs / 1000).toFixed(2)} 秒`;
 }
 
+function formatBytesAsMegabytes(bytes: number) {
+  return `${(Math.max(0, bytes) / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function getTraceTimestampMs(line: string) {
   const timestampMatch = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]/);
 
@@ -627,6 +637,119 @@ function getTraceTimestampMs(line: string) {
   const parsedTimestamp = Date.parse(timestampMatch[1]);
 
   return Number.isFinite(parsedTimestamp) ? parsedTimestamp : null;
+}
+
+function formatMemoryMb(bytes: unknown) {
+  const numericBytes = typeof bytes === 'number' ? bytes : Number(bytes);
+
+  if (!Number.isFinite(numericBytes) || numericBytes < 0) {
+    return 'unknown';
+  }
+
+  return `${(numericBytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function getPdfFillMemoryStageLabel(
+  scope: 'PagePreparation' | 'SlotFill',
+  stage: string | undefined,
+) {
+  if (scope === 'PagePreparation') {
+    switch (stage) {
+      case 'route_started':
+        return '页面过滤路由开始';
+      case 'page_filter_start':
+        return '页面过滤开始';
+      case 'page_filter_done':
+        return '页面过滤完成';
+      case 'page_filter_persisted':
+        return '页面过滤结果保存完成';
+      case 'route_failed':
+        return '页面过滤路由失败';
+      default:
+        return stage ?? 'unknown';
+    }
+  }
+
+  switch (stage) {
+    case 'slot_fill_route_started':
+      return '槽位回填路由开始';
+    case 'vision_page_urls_ready':
+      return '上传 PDF 页图外链准备完成';
+    case 'reference_page_urls_ready':
+      return '带定位参考图外链准备完成';
+    case 'vision_slot_fill_done':
+      return '视觉槽位回填完成';
+    case 'slot_fill_persisted':
+      return '槽位回填结果保存完成';
+    case 'route_failed':
+      return '槽位回填路由失败';
+    default:
+      return stage ?? 'unknown';
+  }
+}
+
+function logPdfFillVercelMemoryTrace(input: {
+  fileName: string;
+  taskItemId: string;
+  traceLine: string;
+}) {
+  const match = input.traceLine.match(
+    /^\[Vercel Memory\]\[PDF Fill\]\[(PagePreparation|SlotFill)\] (.+)$/,
+  );
+
+  if (!match?.[1] || !match[2]) {
+    return false;
+  }
+
+  const scope = match[1] as 'PagePreparation' | 'SlotFill';
+
+  try {
+    const memory = JSON.parse(match[2]) as Record<string, unknown> & {
+      stage?: string;
+      rss_bytes?: number;
+      heap_total_bytes?: number;
+      heap_used_bytes?: number;
+      external_bytes?: number;
+      array_buffers_bytes?: number;
+    };
+    const stageLabel = getPdfFillMemoryStageLabel(scope, memory.stage);
+    const payload = {
+      ...memory,
+      stage_label: stageLabel,
+      rss_mb: formatMemoryMb(memory.rss_bytes),
+      heap_total_mb: formatMemoryMb(memory.heap_total_bytes),
+      heap_used_mb: formatMemoryMb(memory.heap_used_bytes),
+      external_mb: formatMemoryMb(memory.external_bytes),
+      array_buffers_mb: formatMemoryMb(memory.array_buffers_bytes),
+    };
+    const currentEntries = window.clipcapPdfFillVercelMemory ?? [];
+
+    window.clipcapPdfFillVercelMemory = [
+      ...currentEntries,
+      {
+        fileName: input.fileName,
+        taskItemId: input.taskItemId,
+        scope,
+        data: payload,
+      },
+    ];
+
+    console.info(
+      `[Batch Generate][${input.fileName}][Vercel Memory][PDF Fill][${scope}] ${stageLabel}: rss ${payload.rss_mb}, heap used ${payload.heap_used_mb}, external ${payload.external_mb}, array buffers ${payload.array_buffers_mb}`,
+      {
+        taskItemId: input.taskItemId,
+        scope,
+        ...payload,
+      },
+    );
+  } catch {
+    console.info(
+      `[Batch Generate][${input.fileName}][Vercel Memory][PDF Fill][${scope}]`,
+      input.traceLine,
+    );
+  }
+
+  return true;
 }
 
 function getPendingSlotCount(item: GenerationTaskItemSummary) {
@@ -1162,6 +1285,16 @@ export function BatchGenerateModal({
         const rawErrorMatch = traceLine.match(
           /^\[PDF Fill\]\[RawError\]\[([^\]]+)\] (.*)$/,
         );
+
+        if (
+          logPdfFillVercelMemoryTrace({
+            fileName: item.source_pdf_name,
+            taskItemId: item.id,
+            traceLine,
+          })
+        ) {
+          return;
+        }
 
         if (
           traceLine.includes(
@@ -2613,16 +2746,21 @@ export function BatchGenerateModal({
             },
           );
           const renderDurationMs = Date.now() - renderStartedAt;
+          const renderedTotalBytes = pdfVisionPages.reduce(
+            (sum, page) => sum + (page.imageBlob?.size ?? 0),
+            0,
+          );
           console.info(
             `[Batch Generate][${file.name}] PDF 页面图片生成总耗时：${formatDurationMs(
               renderDurationMs,
-            )}`,
+            )}，总大小：${formatBytesAsMegabytes(renderedTotalBytes)}`,
             {
               fileName: file.name,
               pageCount: pdfVisionPages.length,
               selectedOriginalPageNumbers,
               renderConcurrency: pdfPageRenderConcurrency,
               durationMs: renderDurationMs,
+              totalMb: formatBytesAsMegabytes(renderedTotalBytes),
             },
           );
           logSubmissionStage({
@@ -2699,14 +2837,24 @@ export function BatchGenerateModal({
         }),
       );
       const renderAllDurationMs = Date.now() - renderAllStartedAt;
+      const renderedAllTotalBytes = preparedFiles.reduce(
+        (fileSum, item) =>
+          fileSum +
+          item.pageVisionPages.reduce(
+            (pageSum, page) => pageSum + (page.imageBlob?.size ?? 0),
+            0,
+          ),
+        0,
+      );
       console.info(
         `[Batch Generate] PDF 页面图片生成全部文件总耗时：${formatDurationMs(
           renderAllDurationMs,
-        )}`,
+        )}，总大小：${formatBytesAsMegabytes(renderedAllTotalBytes)}`,
         {
           fileCount: preparedFiles.length,
           fileNames: preparedFiles.map((item) => item.file.name),
           durationMs: renderAllDurationMs,
+          totalMb: formatBytesAsMegabytes(renderedAllTotalBytes),
         },
       );
 

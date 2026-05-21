@@ -37,7 +37,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PAGE_FILTER_BATCH_SIZE_DEFAULT = 4;
-const PAGE_FILTER_BATCH_SIZE_MAX = 15;
+const PAGE_FILTER_BATCH_SIZE_MAX = 20;
 const PAGE_FILTER_REQUEST_TIMEOUT_MS = 180000;
 const PAGE_FILTER_DROP_EXAMPLES_DIR_DEFAULT = 'pdf_page_filter_drop_examples';
 const PAGE_FILTER_DROP_EXAMPLES_MAX = 4;
@@ -1089,6 +1089,13 @@ async function runGenerationTaskItemPagePreparation(params: {
       params.item.id,
       `[PDF Fill][RawError][PagePreparation] ${getErrorMessage(error)}`,
     );
+    await appendMemoryTrace(admin, params.item.id, 'route_failed', {
+      error_message: getErrorMessage(error),
+      source_pdf_name: params.item.source_pdf_name,
+      slot_count: slotSchema.length,
+      vision_page_count: precomputedVisionPages.length,
+      page_image_asset_count: pageImageAssets.length,
+    });
     await appendProcessingTrace(
       admin,
       params.item.id,

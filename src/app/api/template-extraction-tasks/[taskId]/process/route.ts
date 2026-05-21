@@ -348,6 +348,9 @@ export async function POST(
     let lastLoggedCompletedParagraphs = 0;
 
     const textExtractionStartedAt = Date.now();
+    await appendMemoryTrace(routeAdmin, task.id, 'text_slot_extraction_start', {
+      total_paragraphs: task.total_paragraphs,
+    });
     const result = await extractTemplateSlotsFromDocx({
       buffer,
       fileName: task.source_docx_name,
@@ -438,6 +441,9 @@ export async function POST(
       pdf_page_image_count: pdfVisionPages.length,
     });
     const pdfMappingStartedAt = Date.now();
+    await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_start', {
+      pdf_page_image_count: pdfVisionPages.length,
+    });
     let pdfEvidence = null as Awaited<
       ReturnType<typeof buildTemplatePdfEvidence>
     > | null;
@@ -501,6 +507,9 @@ export async function POST(
       );
     }
 
+    await appendMemoryTrace(routeAdmin, task.id, 'task_persist_start', {
+      status: 'completed',
+    });
     await routeAdmin
       .from('template_extraction_tasks')
       .update({
@@ -556,6 +565,9 @@ export async function POST(
           taskId,
           `槽位抽取失败：${error instanceof Error ? error.message : String(error)}`,
         );
+        await appendMemoryTrace(admin, taskId, 'route_failed', {
+          error_message: error instanceof Error ? error.message : String(error),
+        });
         await appendProcessingTrace(
           admin,
           taskId,
