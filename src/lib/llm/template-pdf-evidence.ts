@@ -1267,21 +1267,28 @@ async function locateSlotsInPageBatch(input: {
         requestLabel,
         dispatcher: visionLocateFetchDispatcher,
         signal: controller.signal,
+        onGenerateContentRequestBody: async ({
+          requestBody: geminiRequestBody,
+          uploadedFiles,
+        }) => {
+          await input.onTrace?.({
+            message:
+              `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+              JSON.stringify({
+                route: '/api/template-extraction-tasks/[taskId]/process',
+                config_scope: 'VISION_LLM',
+                model: llmConfig.model,
+                provider: traceConfig.provider,
+                request_label: requestLabel,
+                request_mode: 'gemini_file_api_generate_content',
+                ...summarizeGeminiFileApiRequestForTrace({
+                  requestBody: geminiRequestBody,
+                  uploadedFiles,
+                }),
+              }),
+          });
+        },
         onTrace: input.onTrace,
-      });
-
-      await input.onTrace?.({
-        message:
-          `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
-          JSON.stringify({
-            route: '/api/template-extraction-tasks/[taskId]/process',
-            config_scope: 'VISION_LLM',
-            model: llmConfig.model,
-            provider: traceConfig.provider,
-            request_label: requestLabel,
-            request_mode: 'gemini_file_api_generate_content',
-            ...summarizeGeminiFileApiRequestForTrace(geminiResult),
-          }),
       });
 
       payload = geminiResult.payload;

@@ -161,6 +161,8 @@ function buildGeminiNativeRequestBody(params: {
   };
 }
 
+type GeminiNativeRequestBody = ReturnType<typeof buildGeminiNativeRequestBody>;
+
 export async function callGeminiFileApiChatCompletion(params: {
   config: LlmRuntimeConfig;
   body: GeminiFileApiChatCompletionBody;
@@ -168,13 +170,17 @@ export async function callGeminiFileApiChatCompletion(params: {
   dispatcher?: UndiciFetchInit['dispatcher'];
   signal?: AbortSignal;
   cleanupUploadedFiles?: boolean;
+  onGenerateContentRequestBody?: (entry: {
+    requestBody: GeminiNativeRequestBody;
+    uploadedFiles: UploadedGeminiFile[];
+  }) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const imageParts = collectImageParts(params.body);
   const requestLabel = params.requestLabel ?? 'gemini file api vision request';
   const callStartedAt = Date.now();
   let uploadedFiles: UploadedGeminiFile[] = [];
-  let requestBody: ReturnType<typeof buildGeminiNativeRequestBody> | null = null;
+  let requestBody: GeminiNativeRequestBody | null = null;
   let responsePayload:
     | {
         candidates?: Array<{
@@ -238,6 +244,10 @@ export async function callGeminiFileApiChatCompletion(params: {
     requestBody = buildGeminiNativeRequestBody({
       body: params.body,
       uploadedFilesByPart,
+    });
+    await params.onGenerateContentRequestBody?.({
+      requestBody,
+      uploadedFiles,
     });
     await params.onTrace?.({
       message: `[Gemini File API][GenerateContentStart] ${JSON.stringify({
