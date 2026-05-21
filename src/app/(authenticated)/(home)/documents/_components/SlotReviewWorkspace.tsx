@@ -34,6 +34,12 @@ import type {
 } from '@/src/app/api/types/template-slot-extraction';
 import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
+import {
+  createOptimizedPdfJpegCanvas,
+  getPdfRenderConfig,
+  getPdfStorageUploadConcurrency,
+  getPdfVisionRenderConcurrency,
+} from '@/src/lib/pdf/client-pdf';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import {
@@ -1327,22 +1333,59 @@ async function loadImageElementForCanvas(sourceUrl: string) {
   }
 }
 
-function canvasToPngBlob(canvas: HTMLCanvasElement) {
-  return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        reject(new Error('带定位参考图导出失败。'));
-        return;
-      }
+function formatMegabytes(bytes: number) {
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
 
-      resolve(blob);
-    }, 'image/png');
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length || 1);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        const currentItem = items[currentIndex];
+
+        if (!currentItem) {
+          continue;
+        }
+
+        results[currentIndex] = await worker(currentItem, currentIndex);
+      }
+    }),
+  );
+
+  return results;
+}
+
+function canvasToJpegBlob(canvas: HTMLCanvasElement, quality: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error('带定位参考图导出失败。'));
+          return;
+        }
+
+        resolve(blob);
+      },
+      'image/jpeg',
+      quality,
+    );
   });
 }
 
 async function buildAnnotatedReferencePageBlob(input: {
   sourceUrl: string;
   matches: PdfEvidenceMatch[];
+  pdfRenderConfig: ReturnType<typeof getPdfRenderConfig>;
 }) {
   const { image, objectUrl } = await loadImageElementForCanvas(input.sourceUrl);
 
@@ -1358,12 +1401,29 @@ async function buildAnnotatedReferencePageBlob(input: {
 
     canvas.width = width;
     canvas.height = height;
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, width, height);
     context.drawImage(image, 0, 0, width, height);
 
-    const lineWidth = Math.max(2, Math.round(Math.min(width, height) * 0.0015));
+    const annotatedCanvas = createOptimizedPdfJpegCanvas(
+      canvas,
+      input.pdfRenderConfig,
+    );
+    const annotatedContext = annotatedCanvas.getContext('2d');
+    const annotatedWidth = annotatedCanvas.width;
+    const annotatedHeight = annotatedCanvas.height;
+
+    if (!annotatedContext || annotatedWidth <= 0 || annotatedHeight <= 0) {
+      throw new Error('带定位参考图画布创建失败。');
+    }
+
+    const lineWidth = Math.max(
+      2,
+      Math.round(Math.min(annotatedWidth, annotatedHeight) * 0.0015),
+    );
     const labelFontSize = Math.max(
       10,
-      Math.round(Math.min(width, height) * 0.006),
+      Math.round(Math.min(annotatedWidth, annotatedHeight) * 0.006),
     );
     const labelPaddingX = Math.max(4, Math.round(labelFontSize * 0.28));
     const labelPaddingY = Math.max(2, Math.round(labelFontSize * 0.18));
@@ -1388,8 +1448,8 @@ async function buildAnnotatedReferencePageBlob(input: {
       groupedMatches.set(key, currentMatches);
     });
 
-    context.font = `${labelFontSize}px Arial, sans-serif`;
-    context.textBaseline = 'top';
+    annotatedContext.font = `${labelFontSize}px Arial, sans-serif`;
+    annotatedContext.textBaseline = 'top';
 
     groupedMatches.forEach((matches) => {
       const bbox = matches[0]?.bbox;
@@ -1398,39 +1458,48 @@ async function buildAnnotatedReferencePageBlob(input: {
         return;
       }
 
-      const left = Math.max(0, Math.min(width, bbox.x * width));
-      const top = Math.max(0, Math.min(height, bbox.y * height));
-      const boxWidth = Math.max(1, Math.min(width - left, bbox.width * width));
+      const left = Math.max(
+        0,
+        Math.min(annotatedWidth, bbox.x * annotatedWidth),
+      );
+      const top = Math.max(
+        0,
+        Math.min(annotatedHeight, bbox.y * annotatedHeight),
+      );
+      const boxWidth = Math.max(
+        1,
+        Math.min(annotatedWidth - left, bbox.width * annotatedWidth),
+      );
       const boxHeight = Math.max(
         1,
-        Math.min(height - top, bbox.height * height),
+        Math.min(annotatedHeight - top, bbox.height * annotatedHeight),
       );
       const labels = matches.map(getPdfEvidenceMatchSlotKey);
       const measuredWidth = Math.max(
-        ...labels.map((label) => context.measureText(label).width),
+        ...labels.map((label) => annotatedContext.measureText(label).width),
       );
       const labelLineHeight = Math.ceil(labelFontSize * 1.14);
       const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
       const labelHeight = labels.length * labelLineHeight + labelPaddingY * 2;
       const labelLeft = Math.max(
         0,
-        Math.min(width - labelWidth, left - lineWidth),
+        Math.min(annotatedWidth - labelWidth, left - lineWidth),
       );
       const labelTop = Math.max(
         0,
-        Math.min(height - labelHeight, top - labelHeight - lineWidth),
+        Math.min(annotatedHeight - labelHeight, top - labelHeight - lineWidth),
       );
 
-      context.fillStyle = 'rgba(255, 153, 0, 0.08)';
-      context.fillRect(left, top, boxWidth, boxHeight);
-      context.strokeStyle = '#ff9900';
-      context.lineWidth = lineWidth;
-      context.strokeRect(left, top, boxWidth, boxHeight);
-      context.fillStyle = 'rgba(255, 153, 0, 0.92)';
-      context.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
-      context.fillStyle = '#111111';
+      annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.08)';
+      annotatedContext.fillRect(left, top, boxWidth, boxHeight);
+      annotatedContext.strokeStyle = '#ff9900';
+      annotatedContext.lineWidth = lineWidth;
+      annotatedContext.strokeRect(left, top, boxWidth, boxHeight);
+      annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.92)';
+      annotatedContext.fillRect(labelLeft, labelTop, labelWidth, labelHeight);
+      annotatedContext.fillStyle = '#111111';
       labels.forEach((label, labelIndex) => {
-        context.fillText(
+        annotatedContext.fillText(
           label,
           labelLeft + labelPaddingX,
           labelTop + labelPaddingY + labelIndex * labelLineHeight,
@@ -1438,7 +1507,10 @@ async function buildAnnotatedReferencePageBlob(input: {
       });
     });
 
-    return canvasToPngBlob(canvas);
+    return canvasToJpegBlob(
+      annotatedCanvas,
+      input.pdfRenderConfig.imageQuality,
+    );
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
@@ -1471,12 +1543,17 @@ async function uploadAnnotatedReferencePagesForTemplate(input: {
     : null;
 
   if (pageNumberFilter && pageNumberFilter.size === 0) {
-    browserProcessLog.info('[Slot Review][Annotated Reference] No changed pages');
+    browserProcessLog.info(
+      '[Slot Review][Annotated Reference] No changed pages',
+    );
     return input.payload;
   }
 
   pdfEvidence.matches.forEach((match) => {
-    if (!match.bbox || (pageNumberFilter && !pageNumberFilter.has(match.page_number))) {
+    if (
+      !match.bbox ||
+      (pageNumberFilter && !pageNumberFilter.has(match.page_number))
+    ) {
       return;
     }
 
@@ -1491,54 +1568,145 @@ async function uploadAnnotatedReferencePagesForTemplate(input: {
   }
 
   const startedAt = performance.now();
+  const pdfRenderConfig = getPdfRenderConfig();
+  const renderConcurrency = getPdfVisionRenderConcurrency();
+  const uploadConcurrency = getPdfStorageUploadConcurrency();
   const uploadedStoragePaths = new Map<number, string>();
-
-  browserProcessLog.info('[Slot Review][Annotated Reference] Upload started', {
-    templateId: input.templateId,
-    pageCount: matchesByPageNumber.size,
-  });
-
-  for (const page of pdfEvidence.pages) {
+  const pagesToRefresh = pdfEvidence.pages.flatMap((page) => {
     const matches = matchesByPageNumber.get(page.pageNumber) ?? [];
     const sourceUrl = getReferencePageImageSource(page);
 
     if (matches.length === 0 || !sourceUrl) {
-      continue;
+      return [];
     }
 
-    const pageStartedAt = performance.now();
-    const annotatedBlob = await buildAnnotatedReferencePageBlob({
-      sourceUrl,
-      matches,
-    });
-    const storagePath = `${user.id}/template-reference-pages/annotated/${input.templateId}/page-${page.pageNumber}.png`;
-    const { error } = await supabase.storage
-      .from('generation-pdfs')
-      .upload(storagePath, annotatedBlob, {
-        contentType: 'image/png',
-        upsert: true,
-      });
-
-    if (error) {
-      throw new Error(`保存第 ${page.pageNumber} 页带定位参考图失败：${error.message}`);
-    }
-
-    uploadedStoragePaths.set(page.pageNumber, storagePath);
-    browserProcessLog.info('[Slot Review][Annotated Reference] Page uploaded', {
-      templateId: input.templateId,
-      pageNumber: page.pageNumber,
-      storagePath,
-      slotCount: matches.length,
-      size: annotatedBlob.size,
-      durationMs: Math.round(performance.now() - pageStartedAt),
-    });
-  }
-
-  browserProcessLog.info('[Slot Review][Annotated Reference] Upload completed', {
-    templateId: input.templateId,
-    pageCount: uploadedStoragePaths.size,
-    durationMs: Math.round(performance.now() - startedAt),
+    return [
+      {
+        page,
+        matches,
+        sourceUrl,
+      },
+    ];
   });
+
+  browserProcessLog.info('[Slot Review][Annotated Reference] Upload started', {
+    templateId: input.templateId,
+    pageCount: pagesToRefresh.length,
+    renderConcurrency,
+    uploadConcurrency,
+    imageFormat: 'image/jpeg',
+    imageQuality: pdfRenderConfig.imageQuality,
+    jpegMaxLongEdge: pdfRenderConfig.jpegMaxLongEdge,
+    jpegBackgroundCleanup: pdfRenderConfig.jpegBackgroundCleanup,
+    jpegGrayscale: pdfRenderConfig.jpegGrayscale,
+    jpegBackgroundWhiteThreshold: pdfRenderConfig.jpegBackgroundWhiteThreshold,
+    jpegBackgroundInkThreshold: pdfRenderConfig.jpegBackgroundInkThreshold,
+    jpegContrast: pdfRenderConfig.jpegContrast,
+  });
+
+  const annotatedPages = await runWithConcurrency(
+    pagesToRefresh,
+    renderConcurrency,
+    async ({ page, matches, sourceUrl }) => {
+      const pageStartedAt = performance.now();
+      const annotatedBlob = await buildAnnotatedReferencePageBlob({
+        sourceUrl,
+        matches,
+        pdfRenderConfig,
+      });
+      const durationMs = Math.round(performance.now() - pageStartedAt);
+      const storagePath = `${user.id}/template-reference-pages/annotated/${input.templateId}/page-${page.pageNumber}.jpg`;
+
+      browserProcessLog.info(
+        '[Slot Review][Annotated Reference] Page rendered',
+        {
+          templateId: input.templateId,
+          pageNumber: page.pageNumber,
+          storagePath,
+          slotCount: matches.length,
+          size: annotatedBlob.size,
+          sizeMb: formatMegabytes(annotatedBlob.size),
+          durationMs,
+          renderConcurrency,
+          imageFormat: 'image/jpeg',
+          imageQuality: pdfRenderConfig.imageQuality,
+          jpegMaxLongEdge: pdfRenderConfig.jpegMaxLongEdge,
+          jpegBackgroundCleanup: pdfRenderConfig.jpegBackgroundCleanup,
+          jpegGrayscale: pdfRenderConfig.jpegGrayscale,
+          jpegContrast: pdfRenderConfig.jpegContrast,
+        },
+      );
+
+      return {
+        pageNumber: page.pageNumber,
+        matches,
+        annotatedBlob,
+        storagePath,
+        renderDurationMs: durationMs,
+      };
+    },
+  );
+
+  await runWithConcurrency(
+    annotatedPages,
+    uploadConcurrency,
+    async ({
+      pageNumber,
+      matches,
+      annotatedBlob,
+      storagePath,
+      renderDurationMs,
+    }) => {
+      const uploadStartedAt = performance.now();
+      const { error } = await supabase.storage
+        .from('generation-pdfs')
+        .upload(storagePath, annotatedBlob, {
+          contentType: 'image/jpeg',
+          upsert: true,
+        });
+
+      if (error) {
+        throw new Error(
+          `保存第 ${pageNumber} 页带定位参考图失败：${error.message}`,
+        );
+      }
+
+      uploadedStoragePaths.set(pageNumber, storagePath);
+      browserProcessLog.info(
+        '[Slot Review][Annotated Reference] Page uploaded',
+        {
+          templateId: input.templateId,
+          pageNumber,
+          storagePath,
+          slotCount: matches.length,
+          size: annotatedBlob.size,
+          sizeMb: formatMegabytes(annotatedBlob.size),
+          renderDurationMs,
+          uploadDurationMs: Math.round(performance.now() - uploadStartedAt),
+          uploadConcurrency,
+          contentType: 'image/jpeg',
+        },
+      );
+    },
+  );
+
+  browserProcessLog.info(
+    '[Slot Review][Annotated Reference] Upload completed',
+    {
+      templateId: input.templateId,
+      pageCount: uploadedStoragePaths.size,
+      totalSize: annotatedPages.reduce(
+        (sum, page) => sum + page.annotatedBlob.size,
+        0,
+      ),
+      totalSizeMb: formatMegabytes(
+        annotatedPages.reduce((sum, page) => sum + page.annotatedBlob.size, 0),
+      ),
+      renderConcurrency,
+      uploadConcurrency,
+      durationMs: Math.round(performance.now() - startedAt),
+    },
+  );
 
   return {
     ...input.payload,
