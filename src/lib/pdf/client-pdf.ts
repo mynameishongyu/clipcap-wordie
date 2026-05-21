@@ -557,6 +557,20 @@ function enhanceCanvasForJpeg(
   context.putImageData(imageData, 0, 0);
 }
 
+export function createOptimizedPdfJpegCanvas(
+  canvas: HTMLCanvasElement,
+  config: PdfRenderConfig = getPdfRenderConfig(),
+) {
+  const optimizedCanvas = resizeCanvasToMaxLongEdge(
+    canvas,
+    config.jpegMaxLongEdge,
+  );
+
+  enhanceCanvasForJpeg(optimizedCanvas, config);
+
+  return optimizedCanvas;
+}
+
 function calculateStandardDeviation(values: number[]) {
   if (values.length === 0) {
     return 0;
