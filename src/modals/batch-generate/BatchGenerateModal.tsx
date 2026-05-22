@@ -48,16 +48,6 @@ interface UploadRow {
   forceVisionPageFill: boolean;
 }
 
-interface DuplicatePdfFileNameAlert {
-  fileName: string;
-  selectedRowId: string;
-  duplicateRows: Array<{
-    rowId: string;
-    rowNumber: number;
-    fileName: string | null;
-  }>;
-}
-
 type PageFilterPage = NonNullable<
   GenerationTaskItemSummary['pdf_page_filter_pages']
 >[number];
@@ -762,15 +752,13 @@ export function BatchGenerateModal({
   innerProps,
 }: ContextModalProps<BatchGenerateModalInnerProps>) {
   const queryClient = useQueryClient();
-  const [rows, setRows] = useState<UploadRow[]>([createUploadRow()]);
+  const [rows, setRows] = useState<UploadRow[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
   const [submissionStartedAt, setSubmissionStartedAt] = useState<number | null>(
     null,
   );
-  const [duplicatePdfFileNameAlert, setDuplicatePdfFileNameAlert] =
-    useState<DuplicatePdfFileNameAlert | null>(null);
   const [itemStartedAtById, setItemStartedAtById] = useState<
     Record<string, number>
   >({});
@@ -944,8 +932,6 @@ export function BatchGenerateModal({
   const hasRowParseError = rowsWithFiles.some((row) => Boolean(row.parseError));
   const hasUnparsedRows = rowsWithFiles.some((row) => !row.parsedPdf);
   const selectedFiles = rowsWithFiles.map((row) => row.file);
-  const canAddUploadRow =
-    !taskId && !isPreparingFiles && rows.length < maxPdfFillTaskCount;
   const rowSelectionStates = useMemo(
     () =>
       rows.map((row) => {
@@ -2545,60 +2531,6 @@ export function BatchGenerateModal({
     );
   };
 
-  const handleSelectPdfFile = async (rowId: string, file: File | null) => {
-    if (file) {
-      const normalizedSelectedFileName = normalizeUploadFileName(file.name);
-      const duplicateRows = rows.filter(
-        (row) =>
-          row.id !== rowId &&
-          row.file &&
-          normalizeUploadFileName(row.file.name) === normalizedSelectedFileName,
-      );
-
-      if (duplicateRows.length > 0) {
-        const duplicateRowDetails = duplicateRows.map((row) => ({
-          rowId: row.id,
-          rowNumber:
-            rows.findIndex((currentRow) => currentRow.id === row.id) + 1,
-          fileName: row.file?.name ?? null,
-        }));
-
-        console.warn('[Batch Generate][Duplicate PDF File Name]', {
-          selectedFileName: file.name,
-          selectedRowId: rowId,
-          duplicateRows: duplicateRowDetails.map((row, index) => ({
-            ...row,
-            duplicateIndex: index + 1,
-          })),
-        });
-
-        setDuplicatePdfFileNameAlert({
-          fileName: file.name,
-          selectedRowId: rowId,
-          duplicateRows: duplicateRowDetails,
-        });
-        return;
-      }
-    }
-
-    updateRow(rowId, {
-      file,
-      parsedPdf: null,
-      isParsing: Boolean(file),
-      parseError: null,
-      forceVisionPageFill: false,
-    });
-
-    if (!file) {
-      updateRow(rowId, {
-        isParsing: false,
-      });
-      return;
-    }
-
-    await parsePdfIntoRow(rowId, file);
-  };
-
   const handleSelectPdfFiles = (fileList: FileList | File[]) => {
     if (taskId || isPreparingFiles) {
       return;
@@ -2669,7 +2601,7 @@ export function BatchGenerateModal({
     }
 
     if (nextRows.length === 0) {
-      setRows(occupiedRows.length > 0 ? occupiedRows : [createUploadRow()]);
+      setRows(occupiedRows);
       return;
     }
 
@@ -2926,38 +2858,6 @@ export function BatchGenerateModal({
         padding: 24,
       }}
     >
-      <Modal
-        centered
-        opened={Boolean(duplicatePdfFileNameAlert)}
-        title="PDF 文件名重复"
-        zIndex={1000}
-        onClose={() => setDuplicatePdfFileNameAlert(null)}
-      >
-        {duplicatePdfFileNameAlert ? (
-          <Stack gap="sm">
-            <Text size="sm">
-              当前选择的文件名“{duplicatePdfFileNameAlert.fileName}
-              ”已经上传过，请选择其他 PDF，或先删除/替换已有记录。
-            </Text>
-            {duplicatePdfFileNameAlert.duplicateRows.length > 0 ? (
-              <Text c="dimmed" size="xs">
-                重复位置：
-                {duplicatePdfFileNameAlert.duplicateRows
-                  .map((row) => `第 ${row.rowNumber} 条`)
-                  .join('、')}
-              </Text>
-            ) : null}
-            <Button
-              fullWidth
-              radius="xl"
-              onClick={() => setDuplicatePdfFileNameAlert(null)}
-            >
-              知道了
-            </Button>
-          </Stack>
-        ) : null}
-      </Modal>
-
       {isSubmittingTask ? (
         <div
           style={{
@@ -3037,7 +2937,7 @@ export function BatchGenerateModal({
                 <Group justify="space-between" align="center">
                   <div>
                     <Text fw={700} size="sm">
-                      批量拖入 PDF
+                      批量输入 PDF
                     </Text>
                     <Text c="dimmed" size="xs">
                       可一次拖入多份 PDF；重复文件名会自动保留一个，最多{' '}
@@ -3054,120 +2954,119 @@ export function BatchGenerateModal({
                   </Button>
                 </Group>
               </Paper>
-              {rows.map((row, index) => (
-                <Paper key={row.id} p="md" radius="xl" withBorder>
+
+              {rowsWithFiles.length > 0 ? (
+                <Paper p="md" radius="xl" withBorder>
                   <Stack gap="sm">
                     <Group justify="space-between" align="center">
-                      <Text fw={700}>#{index + 1}</Text>
-                      {rows.length > 1 ? (
-                        <Button
-                          color="red"
-                          radius="xl"
-                          size="compact-sm"
-                          variant="subtle"
-                          onClick={() => {
-                            setRows((currentRows) =>
-                              currentRows.filter(
-                                (currentRow) => currentRow.id !== row.id,
-                              ),
-                            );
-                          }}
-                        >
-                          删除
-                        </Button>
-                      ) : null}
+                      <div>
+                        <Text fw={700} size="sm">
+                          待处理列表
+                        </Text>
+                        <Text c="dimmed" size="xs">
+                          已选择 {rowsWithFiles.length} / 最多{' '}
+                          {maxPdfFillTaskCount} 个 PDF。点击开始后会创建对应页面准备任务。
+                        </Text>
+                      </div>
+                      <Badge color="teal" radius="xl" variant="light">
+                        {rowsWithFiles.length} 个 PDF
+                      </Badge>
                     </Group>
 
-                    <input
-                      accept="application/pdf,.pdf"
-                      id={`generation-pdf-${row.id}`}
-                      style={{ display: 'none' }}
-                      type="file"
-                      onChange={(event) => {
-                        void handleSelectPdfFile(
-                          row.id,
-                          event.currentTarget.files?.[0] ?? null,
+                    <Stack gap="xs">
+                      {rowsWithFiles.map((row, index) => {
+                        const selectionState = rowSelectionStates.find(
+                          (state) => state.rowId === row.id,
                         );
-                        event.currentTarget.value = '';
-                      }}
-                    />
+                        const statusText = row.parseError
+                          ? row.parseError
+                          : row.isParsing
+                            ? '正在解析 PDF'
+                            : row.parsedPdf && selectionState
+                              ? `全部 ${selectionState.selectedPageNumbers.length} 页将参与页面准备`
+                              : '等待解析';
 
-                    <Group justify="space-between" align="center">
-                      <Text c={row.file ? undefined : 'dimmed'} size="sm">
-                        {row.file ? row.file.name : '还未上传 PDF'}
-                      </Text>
-                      <Button
-                        component="label"
-                        htmlFor={`generation-pdf-${row.id}`}
-                        radius="xl"
-                        variant={row.file ? 'default' : 'light'}
-                      >
-                        {row.file ? '重新选择 PDF' : '上传 PDF'}
-                      </Button>
-                    </Group>
-                    {row.file && row.parsedPdf ? (
-                      <Paper
-                        p="sm"
-                        radius="lg"
-                        style={{
-                          background: 'rgba(255,255,255,0.03)',
-                          border: '1px solid rgba(255,255,255,0.06)',
-                        }}
-                      >
-                        <Stack gap="sm">
-                          {(() => {
-                            const selectionState = rowSelectionStates.find(
-                              (state) => state.rowId === row.id,
-                            );
-
-                            if (!selectionState) {
-                              return null;
-                            }
-
-                            return (
-                              <Group gap="xs">
-                                <Badge color="teal" radius="xl" variant="light">
-                                  全部页面
+                        return (
+                          <Paper
+                            key={row.id}
+                            p="sm"
+                            radius="lg"
+                            style={{
+                              background: 'rgba(255,255,255,0.03)',
+                              border: '1px solid rgba(255,255,255,0.06)',
+                            }}
+                          >
+                            <Group
+                              align="center"
+                              justify="space-between"
+                              wrap="nowrap"
+                            >
+                              <Group gap="sm" style={{ minWidth: 0 }}>
+                                <Badge radius="sm" variant="filled">
+                                  #{index + 1}
                                 </Badge>
-                                <Text c="dimmed" size="xs">
-                                  将上传{' '}
-                                  {selectionState.selectedPageNumbers.length}{' '}
-                                  页，对应原 PDF 第{' '}
-                                  {selectionState.selectedPageRangeLabel}{' '}
-                                  页，先参与页面准备，再进入槽位回填。
-                                </Text>
+                                <div style={{ minWidth: 0 }}>
+                                  <Text fw={700} size="sm" truncate>
+                                    {row.file.name}
+                                  </Text>
+                                  <Text
+                                    c={row.parseError ? 'red' : 'dimmed'}
+                                    size="xs"
+                                  >
+                                    {formatBytesAsMegabytes(row.file.size)} ·{' '}
+                                    {statusText}
+                                  </Text>
+                                </div>
                               </Group>
-                            );
-                          })()}
-                        </Stack>
-                      </Paper>
-                    ) : null}
+                              <Button
+                                color="red"
+                                disabled={isPreparingFiles}
+                                radius="xl"
+                                size="compact-sm"
+                                variant="subtle"
+                                onClick={() => {
+                                  setRows((currentRows) =>
+                                    currentRows.filter(
+                                      (currentRow) => currentRow.id !== row.id,
+                                    ),
+                                  );
+                                }}
+                              >
+                                删除
+                              </Button>
+                            </Group>
+                          </Paper>
+                        );
+                      })}
+                    </Stack>
                   </Stack>
                 </Paper>
-              ))}
-            </Stack>
-
-            <Group justify="space-between">
-              <Stack gap={4}>
-                <Button
-                  disabled={!canAddUploadRow}
+              ) : (
+                <Paper
+                  p="lg"
                   radius="xl"
-                  variant="subtle"
-                  onClick={() => {
-                    setRows((currentRows) =>
-                      currentRows.length >= maxPdfFillTaskCount
-                        ? currentRows
-                        : [...currentRows, createUploadRow()],
-                    );
+                  withBorder
+                  style={{
+                    background: 'rgba(255,255,255,0.02)',
                   }}
                 >
-                  添加记录
-                </Button>
-                <Text c="dimmed" size="xs">
-                  最多添加 {maxPdfFillTaskCount} 个回填任务，当前 {rows.length}/
-                  {maxPdfFillTaskCount}。
-                </Text>
-              </Stack>
+                  <Stack align="center" gap={4}>
+                    <Text fw={700} size="sm">
+                      还没有选择 PDF
+                    </Text>
+                    <Text c="dimmed" size="xs" ta="center">
+                      请拖入或选择一批 PDF。重复文件名会自动去重，超出任务上限的文件会自动忽略。
+                    </Text>
+                  </Stack>
+                </Paper>
+              )}
+            </Stack>
+
+            <Group justify="space-between" align="flex-end">
+              <Text c="dimmed" size="xs">
+                最多创建 {maxPdfFillTaskCount} 个回填任务，当前{' '}
+                {rowsWithFiles.length}/{maxPdfFillTaskCount}。
+              </Text>
               <Group>
                 <Button
                   color="gray"

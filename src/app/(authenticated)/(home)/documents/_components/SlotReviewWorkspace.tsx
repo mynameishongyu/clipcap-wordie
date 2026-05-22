@@ -3061,20 +3061,37 @@ export function SlotReviewWorkspace() {
     const existingTemplateName = payload.templateName?.trim();
 
     if (payload.templateId && existingTemplateName) {
-      void saveTemplateWithName(existingTemplateName).catch((error) => {
-        browserProcessLog.error('[Slot Review][Save Template] Save failed', {
-          templateId: payload.templateId,
-          error,
-        });
-        notifications.show({
-          color: 'red',
-          title: '模板保存失败',
-          message:
-            error instanceof Error
-              ? error.message
-              : '保存模板时发生未知错误，请稍后再试。',
-        });
+      const savingNotificationId = 'slot-review-save-template';
+
+      notifications.show({
+        id: savingNotificationId,
+        autoClose: false,
+        color: 'teal',
+        loading: true,
+        title: '正在保存模板',
+        message: '正在保存当前槽位、PDF 定位和带定位参考图，请稍候。',
+        withCloseButton: false,
       });
+
+      void saveTemplateWithName(existingTemplateName)
+        .then(() => {
+          notifications.hide(savingNotificationId);
+        })
+        .catch((error) => {
+          notifications.hide(savingNotificationId);
+          browserProcessLog.error('[Slot Review][Save Template] Save failed', {
+            templateId: payload.templateId,
+            error,
+          });
+          notifications.show({
+            color: 'red',
+            title: '模板保存失败',
+            message:
+              error instanceof Error
+                ? error.message
+                : '保存模板时发生未知错误，请稍后再试。',
+          });
+        });
       return;
     }
 
