@@ -73,6 +73,22 @@ const TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS = 90_000;
 const TEMPLATE_PDF_LOCATE_RAW_RESPONSE_TRACE_CHUNK_SIZE = 8000;
 const DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 1;
 const MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 8;
+const TEMPLATE_PDF_LOCATE_MODEL_BUSY_MESSAGE = '模型繁忙，稍后再试。';
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTemplatePdfLocateModelBusyError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+
+  return (
+    message.includes('gemini generatecontent request failed (429)') ||
+    message.includes('gemini generatecontent request failed (428)') ||
+    message.includes('resource_exhausted') ||
+    message.includes('rate limit')
+  );
+}
 
 function getTemplatePdfLocateLlmConcurrency() {
   const rawValue = getOptionalEnv('TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY');
@@ -1440,9 +1456,17 @@ export async function buildTemplatePdfEvidence(input: {
       } catch (error) {
         const failedMessage =
           `[Template PDF Locate] Visual location batch ${pageBatchIndex + 1}/${pageBatches.length} skipped after failure: ` +
-          `${error instanceof Error ? error.message : String(error)}`;
+          `${getErrorMessage(error)}`;
         console.error(failedMessage);
         await input.onTrace?.({ message: failedMessage });
+
+        if (isTemplatePdfLocateModelBusyError(error)) {
+          await input.onTrace?.({
+            message: `[Template PDF Locate] ${TEMPLATE_PDF_LOCATE_MODEL_BUSY_MESSAGE}`,
+          });
+          throw new Error(TEMPLATE_PDF_LOCATE_MODEL_BUSY_MESSAGE);
+        }
+
         return { pageBatchIndex, rawMatches: [] };
       }
     }),
