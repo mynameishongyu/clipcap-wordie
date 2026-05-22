@@ -85,6 +85,91 @@ function decodeDataUrlImage(dataUrl: string) {
   };
 }
 
+async function createReferencePdfPageSignedUrl(input: {
+  supabase: SupabaseClient;
+  storagePath: string;
+}) {
+  const storagePath = input.storagePath.trim();
+
+  if (!storagePath) {
+    return null;
+  }
+
+  const { data, error } = await input.supabase.storage
+    .from('generation-pdfs')
+    .createSignedUrl(storagePath, getSupabaseSignedUrlExpiresInSeconds());
+
+  if (error || !data?.signedUrl) {
+    throw error ?? new Error(`Missing signed URL for ${storagePath}`);
+  }
+
+  return data.signedUrl;
+}
+
+async function refreshReferencePdfPageSignedUrl(input: {
+  supabase: SupabaseClient;
+  page: SlotReviewPdfEvidencePage;
+}) {
+  const storagePath = input.page.storagePath?.trim();
+
+  if (!storagePath) {
+    return input.page;
+  }
+
+  try {
+    const signedUrl = await createReferencePdfPageSignedUrl({
+      supabase: input.supabase,
+      storagePath,
+    });
+
+    if (!signedUrl) {
+      return input.page;
+    }
+
+    return {
+      ...input.page,
+      imageUrl: signedUrl,
+      fallbackImageUrl: signedUrl,
+    };
+  } catch (error) {
+    console.warn('[Templates] Failed to refresh reference PDF page signed URL.', {
+      pageNumber: input.page.pageNumber,
+      storagePath,
+      error,
+    });
+
+    return input.page;
+  }
+}
+
+async function refreshTemplateReferencePdfPageSignedUrls(input: {
+  supabase: SupabaseClient;
+  payload: unknown;
+}) {
+  const payload = input.payload as SlotReviewSessionPayload | null | undefined;
+
+  if (!payload?.pdfEvidence?.pages?.length) {
+    return input.payload;
+  }
+
+  const pages = await Promise.all(
+    payload.pdfEvidence.pages.map((page) =>
+      refreshReferencePdfPageSignedUrl({
+        supabase: input.supabase,
+        page,
+      }),
+    ),
+  );
+
+  return {
+    ...payload,
+    pdfEvidence: {
+      ...payload.pdfEvidence,
+      pages,
+    },
+  };
+}
+
 async function persistReferencePdfPageForTemplate(input: {
   supabase: SupabaseClient;
   user: User;
@@ -95,7 +180,10 @@ async function persistReferencePdfPageForTemplate(input: {
   const stablePrefix = `${input.user.id}/template-reference-pages/original/${input.templateId}/`;
 
   if (currentPath.startsWith(stablePrefix)) {
-    return input.page;
+    return refreshReferencePdfPageSignedUrl({
+      supabase: input.supabase,
+      page: input.page,
+    });
   }
 
   if (!currentPath && !input.page.imageDataUrl?.startsWith('data:image/')) {
@@ -135,21 +223,16 @@ async function persistReferencePdfPageForTemplate(input: {
       }
     }
 
-    const { data: signedUrlData, error: signedUrlError } =
-      await storage.createSignedUrl(
-        targetPath,
-        getSupabaseSignedUrlExpiresInSeconds(),
-      );
-
-    if (signedUrlError || !signedUrlData?.signedUrl) {
-      throw signedUrlError ?? new Error(`Missing signed URL for ${targetPath}`);
-    }
+    const signedUrl = await createReferencePdfPageSignedUrl({
+      supabase: input.supabase,
+      storagePath: targetPath,
+    });
 
     return {
       ...input.page,
       storagePath: targetPath,
-      imageUrl: signedUrlData.signedUrl,
-      fallbackImageUrl: signedUrlData.signedUrl,
+      imageUrl: signedUrl ?? input.page.imageUrl,
+      fallbackImageUrl: signedUrl ?? input.page.fallbackImageUrl,
     };
   } catch (error) {
     console.warn('[Templates] Failed to persist reference PDF page image.', {
@@ -448,7 +531,17 @@ export async function getUserTemplateById(
     .maybeSingle<SavedTemplateDetail>();
 
   if (!error) {
-    return data;
+    if (!data) {
+      return data;
+    }
+
+    return {
+      ...data,
+      slot_review_payload: await refreshTemplateReferencePdfPageSignedUrls({
+        supabase,
+        payload: data.slot_review_payload,
+      }),
+    };
   }
 
   if (isMissingTemplateLibraryColumnError(error)) {
