@@ -103,6 +103,16 @@ function getPageFilterBatchSize() {
   return Math.min(PAGE_FILTER_BATCH_SIZE_MAX, parsedValue);
 }
 
+function isGeminiExternalUrlFetchError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+
+  return (
+    message.includes('cannot fetch content from the provided url') ||
+    (message.includes('gemini generatecontent request failed (400)') &&
+      message.includes('invalid_argument'))
+  );
+}
+
 function estimateDataUrlBytes(dataUrl: string) {
   const commaIndex = dataUrl.indexOf(',');
 
@@ -285,8 +295,6 @@ function buildPageFilterPromptPayload(input: {
     decision_options: {
       keep: 'Keep this page for later visual slot filling.',
       drop: 'Drop this page because it is similar to the provided irrelevant examples, because it is a dense contract terms/body page with only tiny incidental handwriting, or because it is a handwritten collateral/pledge/mortgage list page that should not be used as a slot-fill source. Do not use drop for real contract signing/confirmation pages with actual signatures, stamps, dates, IDs, responsible-person names, or borrower/bank acknowledgement text.',
-      review:
-        'Uncertain. Keep for human review instead of dropping automatically.',
     },
     drop_examples_meaning:
       input.dropExampleCount > 0
@@ -299,13 +307,13 @@ function buildPageFilterPromptPayload(input: {
     dense_terms_sparse_handwriting_rule:
       'If the page is dominated by dense printed contract clauses, terms, explanations, or body text, and handwriting occupies only a tiny area such as one name, a short underline, a check mark, a brief note, or a small date, classify it as drop unless the page is clearly a signing/confirmation/acknowledgement page or contains strong reusable slot values such as full signature block, official stamp, ID number, amount, account/balance, vehicle registration certificate data, or bank system data.',
     signature_page_guardrail:
-      'A candidate page that has a title or content like contract signing page / acknowledgement page / confirmation page, plus real handwriting signatures, red seals/stamps, signing date, ID number, borrower/guarantor/bank representative fields, or confirmation text, must be classified as keep. If it visually resembles a contract tail page but contains these filled signature or stamp values, use keep. If uncertain, use review, never drop.',
+      'A candidate page that has a title or content like contract signing page / acknowledgement page / confirmation page, plus real handwriting signatures, red seals/stamps, signing date, ID number, borrower/guarantor/bank representative fields, or confirmation text, must be classified as keep. If it visually resembles a contract tail page but contains these filled signature or stamp values, use keep. If uncertain, use keep, never drop.',
     page_numbers: input.pageNumbers,
     output_schema: {
       pages: [
         {
           page_number: 'one of page_numbers',
-          decision: 'keep | drop | review',
+          decision: 'keep | drop',
           page_type:
             'id_card | agreement | signature_page | table | system_screenshot | vehicle_info | terms_page | dense_terms_sparse_handwriting | blank | other',
           reason: 'short reason in Chinese',
@@ -322,7 +330,7 @@ function buildPageFilterPromptPayload(input: {
       'Drop handwritten collateral/mortgage/pledge list pages even if they contain handwritten car plates, amounts, or dates.',
       'Do not keep a page merely because it has table lines or handwriting; keep it only when it is a reliable source page for the current slot-fill workflow.',
       'If a page has both drop-like layout and keep-worthy signature/stamp/date/ID/acknowledgement values, choose decision="keep".',
-      'If uncertain, use decision="review" instead of decision="drop".',
+      'If uncertain, use decision="keep" instead of decision="drop".',
     ],
   };
 }
@@ -839,14 +847,56 @@ async function runGenerationTaskItemPagePreparation(params: {
           source_pdf_name: params.item.source_pdf_name,
           page_count: visionPagesForFilter.length,
         });
-        const pageFilterResult = await classifyVisionPagesForSlotFill({
-          documentName: params.item.source_pdf_name,
-          visionPages: visionPagesForFilter,
-          dropExamples: pageFilterDropExamples,
-          onTrace: async ({ message }) => {
-            await appendProcessingTrace(admin, params.item.id, message);
-          },
-        });
+        let pageFilterResult;
+
+        try {
+          pageFilterResult = await classifyVisionPagesForSlotFill({
+            documentName: params.item.source_pdf_name,
+            visionPages: visionPagesForFilter,
+            dropExamples: pageFilterDropExamples,
+            onTrace: async ({ message }) => {
+              await appendProcessingTrace(admin, params.item.id, message);
+            },
+          });
+        } catch (filterError) {
+          if (
+            llmConfig.provider !== 'gemini' ||
+            !isGeminiExternalUrlFetchError(filterError) ||
+            pageImageAssets.length === 0
+          ) {
+            throw filterError;
+          }
+
+          await appendProcessingTrace(
+            admin,
+            params.item.id,
+            `[PDF Fill][PageFilter] Gemini cannot fetch Supabase signed URL images; retrying page filter by downloading images through Vercel and uploading them to Gemini File API. ${getErrorMessage(filterError)}`,
+          );
+          await appendMemoryTrace(
+            admin,
+            params.item.id,
+            'page_filter_signed_url_fetch_failed_retry_with_upload',
+            {
+              source_pdf_name: params.item.source_pdf_name,
+              page_count: pageImageAssets.length,
+              error_message: getErrorMessage(filterError),
+            },
+          );
+
+          const fallbackVisionPages = await loadVisionPagesFromStoredAssets({
+            admin,
+            pageImageAssets,
+          });
+
+          pageFilterResult = await classifyVisionPagesForSlotFill({
+            documentName: params.item.source_pdf_name,
+            visionPages: fallbackVisionPages,
+            dropExamples: pageFilterDropExamples,
+            onTrace: async ({ message }) => {
+              await appendProcessingTrace(admin, params.item.id, message);
+            },
+          });
+        }
         await appendMemoryTrace(admin, params.item.id, 'page_filter_done', {
           source_pdf_name: params.item.source_pdf_name,
           decision_count: pageFilterResult.decisions.length,

@@ -7,7 +7,6 @@ import {
   Divider,
   Group,
   Loader,
-  Modal,
   Paper,
   Progress,
   SimpleGrid,
@@ -22,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
 import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
 import {
+  getPdfRenderConfig,
   getPdfVisionRenderConcurrency,
   parsePdf,
   renderPdfPagesForVision,
@@ -613,6 +613,18 @@ function formatDurationMs(durationMs: number) {
   return `${(durationMs / 1000).toFixed(2)} 秒`;
 }
 
+function getBrowserTimestampMs() {
+  return performance.timeOrigin + performance.now();
+}
+
+function getBrowserMonotonicMs() {
+  return performance.now();
+}
+
+function formatBrowserIsoTimestamp(timestampMs: number) {
+  return new Date(timestampMs).toISOString();
+}
+
 function formatBytesAsMegabytes(bytes: number) {
   return `${(Math.max(0, bytes) / 1024 / 1024).toFixed(2)} MB`;
 }
@@ -754,7 +766,7 @@ export function BatchGenerateModal({
   const queryClient = useQueryClient();
   const [rows, setRows] = useState<UploadRow[]>([]);
   const [taskId, setTaskId] = useState<string | null>(null);
-  const [tick, setTick] = useState(() => Date.now());
+  const [tick, setTick] = useState(() => getBrowserTimestampMs());
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
   const [submissionStartedAt, setSubmissionStartedAt] = useState<number | null>(
     null,
@@ -1004,7 +1016,7 @@ export function BatchGenerateModal({
     }
 
     const intervalId = window.setInterval(() => {
-      setTick(Date.now());
+      setTick(getBrowserTimestampMs());
     }, 1000);
 
     return () => {
@@ -1061,7 +1073,7 @@ export function BatchGenerateModal({
       }
 
       launchedPagePreparationItemIdsRef.current.add(item.id);
-      const clientStartedAt = Date.now();
+      const clientStartedAt = getBrowserTimestampMs();
       setItemStartedAtById((current) =>
         current[item.id] ? current : { ...current, [item.id]: clientStartedAt },
       );
@@ -1304,7 +1316,7 @@ export function BatchGenerateModal({
           )
         ) {
           const startedAt = pageFilterStartedAtRef.current.get(item.id);
-          const finishedAt = traceTimestampMs ?? Date.now();
+          const finishedAt = traceTimestampMs ?? getBrowserTimestampMs();
 
           if (
             startedAt &&
@@ -1327,7 +1339,7 @@ export function BatchGenerateModal({
 
         if (traceLine.includes('[PDF Fill][RawError][PageFilter]')) {
           const startedAt = pageFilterStartedAtRef.current.get(item.id);
-          const finishedAt = traceTimestampMs ?? Date.now();
+          const finishedAt = traceTimestampMs ?? getBrowserTimestampMs();
 
           if (
             startedAt &&
@@ -2628,7 +2640,7 @@ export function BatchGenerateModal({
     }
 
     setIsPreparingFiles(true);
-    const submissionStartedAtMs = Date.now();
+    const submissionStartedAtMs = getBrowserTimestampMs();
     setSubmissionStartedAt(submissionStartedAtMs);
     logSubmissionStage({
       title: '正在准备文件',
@@ -2637,7 +2649,7 @@ export function BatchGenerateModal({
     });
 
     try {
-      const renderAllStartedAt = Date.now();
+      const renderAllStartedAt = getBrowserMonotonicMs();
       const preparedFiles = await Promise.all(
         rowsWithFiles.map(async (row, rowIndex) => {
           const file = row.file;
@@ -2659,11 +2671,34 @@ export function BatchGenerateModal({
             }),
           );
           const pdfPageRenderConcurrency = getPdfVisionRenderConcurrency();
+          const pdfRenderConfig = getPdfRenderConfig();
           logSubmissionStage({
             title: '正在生成 PDF 页面图片',
             description: `${file.name}：正在并行生成 PDF 页面图片（文件 ${rowIndex + 1}/${rowsWithFiles.length}，共 ${selectedOriginalPageNumbers.length} 页，并发数 ${pdfPageRenderConcurrency}）。`,
           });
-          const renderStartedAt = Date.now();
+          const renderStartedAt = getBrowserMonotonicMs();
+          const renderStartedAtTimestamp = getBrowserTimestampMs();
+          console.info('[PDF Fill][Timing]', {
+            stage: 'pdf_page_render',
+            pdf_file_name: file.name,
+            started_at: formatBrowserIsoTimestamp(renderStartedAtTimestamp),
+            page_count: selectedOriginalPageNumbers.length,
+            pdf_render_config: {
+              scale: pdfRenderConfig.scale,
+              imageFormat: pdfRenderConfig.imageFormat,
+              imageQuality: pdfRenderConfig.imageQuality,
+              autoRotatePages: pdfRenderConfig.autoRotatePages,
+              jpegMaxLongEdge: pdfRenderConfig.jpegMaxLongEdge,
+              jpegBackgroundCleanup: pdfRenderConfig.jpegBackgroundCleanup,
+              jpegGrayscale: pdfRenderConfig.jpegGrayscale,
+              jpegBackgroundWhiteThreshold:
+                pdfRenderConfig.jpegBackgroundWhiteThreshold,
+              jpegBackgroundInkThreshold:
+                pdfRenderConfig.jpegBackgroundInkThreshold,
+              jpegContrast: pdfRenderConfig.jpegContrast,
+            },
+            render_concurrency: pdfPageRenderConcurrency,
+          });
           const pdfVisionPages = await renderPdfPagesForVision(
             file,
             selectedOriginalPageNumbers,
@@ -2677,11 +2712,38 @@ export function BatchGenerateModal({
               },
             },
           );
-          const renderDurationMs = Date.now() - renderStartedAt;
+          const renderFinishedAt = getBrowserMonotonicMs();
+          const renderFinishedAtTimestamp = getBrowserTimestampMs();
+          const renderDurationMs = renderFinishedAt - renderStartedAt;
           const renderedTotalBytes = pdfVisionPages.reduce(
             (sum, page) => sum + (page.imageBlob?.size ?? 0),
             0,
           );
+          console.info('[PDF Fill][Timing]', {
+            stage: 'pdf_page_render',
+            pdf_file_name: file.name,
+            started_at: formatBrowserIsoTimestamp(renderStartedAtTimestamp),
+            finished_at: formatBrowserIsoTimestamp(renderFinishedAtTimestamp),
+            duration_ms: Math.round(renderDurationMs),
+            duration_text: formatDurationMs(renderDurationMs),
+            page_count: pdfVisionPages.length,
+            total_mb: formatBytesAsMegabytes(renderedTotalBytes),
+            pdf_render_config: {
+              scale: pdfRenderConfig.scale,
+              imageFormat: pdfRenderConfig.imageFormat,
+              imageQuality: pdfRenderConfig.imageQuality,
+              autoRotatePages: pdfRenderConfig.autoRotatePages,
+              jpegMaxLongEdge: pdfRenderConfig.jpegMaxLongEdge,
+              jpegBackgroundCleanup: pdfRenderConfig.jpegBackgroundCleanup,
+              jpegGrayscale: pdfRenderConfig.jpegGrayscale,
+              jpegBackgroundWhiteThreshold:
+                pdfRenderConfig.jpegBackgroundWhiteThreshold,
+              jpegBackgroundInkThreshold:
+                pdfRenderConfig.jpegBackgroundInkThreshold,
+              jpegContrast: pdfRenderConfig.jpegContrast,
+            },
+            render_concurrency: pdfPageRenderConcurrency,
+          });
           console.info(
             `[Batch Generate][${file.name}] PDF 页面图片生成总耗时：${formatDurationMs(
               renderDurationMs,
@@ -2768,7 +2830,7 @@ export function BatchGenerateModal({
           };
         }),
       );
-      const renderAllDurationMs = Date.now() - renderAllStartedAt;
+      const renderAllDurationMs = getBrowserMonotonicMs() - renderAllStartedAt;
       const renderedAllTotalBytes = preparedFiles.reduce(
         (fileSum, item) =>
           fileSum +
@@ -2790,14 +2852,15 @@ export function BatchGenerateModal({
         },
       );
 
-      const uploadAllStartedAt = Date.now();
+      const uploadAllStartedAt = getBrowserMonotonicMs();
       const result = await createGenerationTaskMutation.mutateAsync({
         templateId: innerProps.templateId,
         templateName: innerProps.templateName,
         files: preparedFiles,
         onStageChange: logSubmissionStage,
       });
-      const uploadAndCreateDurationMs = Date.now() - uploadAllStartedAt;
+      const uploadAndCreateDurationMs =
+        getBrowserMonotonicMs() - uploadAllStartedAt;
       console.info(
         `[Batch Generate] 上传 PDF 页面图片并创建任务总耗时：${formatDurationMs(
           uploadAndCreateDurationMs,
