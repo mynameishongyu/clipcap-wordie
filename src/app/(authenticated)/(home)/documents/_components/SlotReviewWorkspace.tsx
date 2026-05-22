@@ -46,6 +46,7 @@ import {
   SLOT_REVIEW_SESSION_KEY,
   type SlotReviewSessionPayload,
 } from '@/src/lib/templates/slot-review-session';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 import {
   createManualSlotKey,
   filterPdfEvidenceMatchesBySlotKeys,
@@ -1421,6 +1422,38 @@ function getReferencePageImageSource(
   return page.imageDataUrl ?? page.imageUrl ?? page.fallbackImageUrl ?? '';
 }
 
+async function getFreshReferencePageImageSource(input: {
+  page: NonNullable<SlotReviewSessionPayload['pdfEvidence']>['pages'][number];
+  supabase: ReturnType<typeof getSupabaseBrowserClient>;
+}) {
+  if (input.page.imageDataUrl) {
+    return input.page.imageDataUrl;
+  }
+
+  const storagePath = input.page.storagePath?.trim();
+
+  if (storagePath) {
+    const { data, error } = await input.supabase.storage
+      .from('generation-pdfs')
+      .createSignedUrl(storagePath, getSupabaseSignedUrlExpiresInSeconds());
+
+    if (error || !data?.signedUrl) {
+      browserProcessLog.warn(
+        '[Slot Review][Annotated Reference] Fresh signed URL failed',
+        {
+          pageNumber: input.page.pageNumber,
+          storagePath,
+          error,
+        },
+      );
+    } else {
+      return data.signedUrl;
+    }
+  }
+
+  return getReferencePageImageSource(input.page);
+}
+
 async function loadImageElementForCanvas(sourceUrl: string) {
   const response = await fetch(sourceUrl);
 
@@ -1966,22 +1999,40 @@ async function uploadAnnotatedReferencePagesForTemplate(input: {
   const renderConcurrency = getPdfVisionRenderConcurrency();
   const uploadConcurrency = getPdfStorageUploadConcurrency();
   const uploadedStoragePaths = new Map<number, string>();
-  const pagesToRefresh = pdfEvidence.pages.flatMap((page) => {
-    const matches = matchesByPageNumber.get(page.pageNumber) ?? [];
-    const sourceUrl = getReferencePageImageSource(page);
+  const pagesToRefresh = (
+    await Promise.all(
+      pdfEvidence.pages.map(async (page) => {
+        const matches = matchesByPageNumber.get(page.pageNumber) ?? [];
 
-    if (matches.length === 0 || !sourceUrl) {
-      return [];
-    }
+        if (matches.length === 0) {
+          return null;
+        }
 
-    return [
-      {
-        page,
-        matches,
-        sourceUrl,
-      },
-    ];
-  });
+        const sourceUrl = await getFreshReferencePageImageSource({
+          page,
+          supabase,
+        });
+
+        if (!sourceUrl) {
+          return null;
+        }
+
+        return {
+          page,
+          matches,
+          sourceUrl,
+        };
+      }),
+    )
+  ).filter(
+    (
+      pageToRefresh,
+    ): pageToRefresh is {
+      page: (typeof pdfEvidence.pages)[number];
+      matches: PdfEvidenceMatch[];
+      sourceUrl: string;
+    } => Boolean(pageToRefresh),
+  );
 
   browserProcessLog.info('[Slot Review][Annotated Reference] Upload started', {
     templateId: input.templateId,
@@ -2916,89 +2967,120 @@ export function SlotReviewWorkspace() {
     );
   }, [payload, visibleItems]);
 
+  const saveTemplateWithName = async (templateName: string) => {
+    if (!payload) {
+      throw new Error('当前模板数据还未加载完成，请稍后再试。');
+    }
+
+    const nextExtractionResult = buildExtractionResultFromItems(
+      visibleItems,
+      payload.extractionResult,
+    );
+    const nextPayload = removeOrphanPdfEvidenceMatches({
+      ...payload,
+      templateName,
+      extractionResult: nextExtractionResult,
+    });
+    const savedTemplate = await saveTemplateMutation.mutateAsync({
+      templateId: payload.templateId,
+      templateName,
+      slotReviewPayload: nextPayload,
+      slotPreview: buildJsonPreviewPayload(visibleItems, nextPayload),
+    });
+    let annotatedPayload: SlotReviewSessionPayload = {
+      ...nextPayload,
+      templateId: savedTemplate.id,
+      templateName: savedTemplate.template_name,
+    };
+    let didSaveAnnotatedReferencePages = true;
+
+    try {
+      annotatedPayload = await uploadAnnotatedReferencePagesForTemplate({
+        templateId: savedTemplate.id,
+        payload: annotatedPayload,
+        pageNumbersToRefresh:
+          savedTemplate.annotated_reference_page_numbers_to_refresh,
+      });
+    } catch (error) {
+      didSaveAnnotatedReferencePages = false;
+      browserProcessLog.error(
+        '[Slot Review][Annotated Reference] Upload failed',
+        error,
+      );
+      notifications.show({
+        color: 'yellow',
+        title: '带定位参考图保存失败',
+        message:
+          error instanceof Error
+            ? error.message
+            : '模板已保存，但带定位参考图没有保存成功。后续回填可能缺少参考定位图。',
+      });
+    }
+
+    const savedPayload: SlotReviewSessionPayload = {
+      ...annotatedPayload,
+      templateId: savedTemplate.id,
+      templateName: savedTemplate.template_name,
+      uploadDocxName:
+        savedTemplate.upload_docx_name ??
+        nextPayload.uploadDocxName ??
+        nextPayload.fileName,
+    };
+
+    window.sessionStorage.setItem(
+      SLOT_REVIEW_SESSION_KEY,
+      JSON.stringify(savedPayload),
+    );
+    setWorkspaceState((currentState) => ({
+      ...currentState,
+      payload: savedPayload,
+    }));
+
+    notifications.show({
+      color: 'teal',
+      title: '模板已保存',
+      message: didSaveAnnotatedReferencePages
+        ? '模板名称、DOCX 原文件、当前 JSON 预览和带定位参考图都已保存。'
+        : '模板已保存，但带定位参考图需要稍后重新保存一次。',
+    });
+
+    await queryClient.invalidateQueries({ queryKey: ['saved-templates'] });
+    router.push('/home');
+  };
+
   const handleSaveTemplate = () => {
-    openSaveTemplateModal({
-      initialName: payload?.templateName ?? '',
-      onSave: async (templateName) => {
-        if (!payload) {
-          throw new Error('当前模板数据还未加载完成，请稍后再试。');
-        }
+    if (!payload) {
+      notifications.show({
+        color: 'yellow',
+        title: '模板数据未加载',
+        message: '当前模板数据还未加载完成，请稍后再试。',
+      });
+      return;
+    }
 
-        const nextExtractionResult = buildExtractionResultFromItems(
-          visibleItems,
-          payload.extractionResult,
-        );
-        const nextPayload = removeOrphanPdfEvidenceMatches({
-          ...payload,
-          templateName,
-          extractionResult: nextExtractionResult,
-        });
-        const savedTemplate = await saveTemplateMutation.mutateAsync({
+    const existingTemplateName = payload.templateName?.trim();
+
+    if (payload.templateId && existingTemplateName) {
+      void saveTemplateWithName(existingTemplateName).catch((error) => {
+        browserProcessLog.error('[Slot Review][Save Template] Save failed', {
           templateId: payload.templateId,
-          templateName,
-          slotReviewPayload: nextPayload,
-          slotPreview: buildJsonPreviewPayload(visibleItems, nextPayload),
+          error,
         });
-        let annotatedPayload: SlotReviewSessionPayload = {
-          ...nextPayload,
-          templateId: savedTemplate.id,
-          templateName: savedTemplate.template_name,
-        };
-        let didSaveAnnotatedReferencePages = true;
-
-        try {
-          annotatedPayload = await uploadAnnotatedReferencePagesForTemplate({
-            templateId: savedTemplate.id,
-            payload: annotatedPayload,
-            pageNumbersToRefresh:
-              savedTemplate.annotated_reference_page_numbers_to_refresh,
-          });
-        } catch (error) {
-          didSaveAnnotatedReferencePages = false;
-          browserProcessLog.error(
-            '[Slot Review][Annotated Reference] Upload failed',
-            error,
-          );
-          notifications.show({
-            color: 'yellow',
-            title: '带定位参考图保存失败',
-            message:
-              error instanceof Error
-                ? error.message
-                : '模板已保存，但带定位参考图没有保存成功。后续回填可能缺少参考定位图。',
-          });
-        }
-
-        const savedPayload: SlotReviewSessionPayload = {
-          ...annotatedPayload,
-          templateId: savedTemplate.id,
-          templateName: savedTemplate.template_name,
-          uploadDocxName:
-            savedTemplate.upload_docx_name ??
-            nextPayload.uploadDocxName ??
-            nextPayload.fileName,
-        };
-
-        window.sessionStorage.setItem(
-          SLOT_REVIEW_SESSION_KEY,
-          JSON.stringify(savedPayload),
-        );
-        setWorkspaceState((currentState) => ({
-          ...currentState,
-          payload: savedPayload,
-        }));
-
         notifications.show({
-          color: 'teal',
-          title: '模板已保存',
-          message: didSaveAnnotatedReferencePages
-            ? '模板名称、DOCX 原文件、当前 JSON 预览和带定位参考图都已保存。'
-            : '模板已保存，但带定位参考图需要稍后重新保存一次。',
+          color: 'red',
+          title: '模板保存失败',
+          message:
+            error instanceof Error
+              ? error.message
+              : '保存模板时发生未知错误，请稍后再试。',
         });
+      });
+      return;
+    }
 
-        await queryClient.invalidateQueries({ queryKey: ['saved-templates'] });
-        router.push('/home');
-      },
+    openSaveTemplateModal({
+      initialName: payload.templateName ?? '',
+      onSave: saveTemplateWithName,
     });
   };
 
