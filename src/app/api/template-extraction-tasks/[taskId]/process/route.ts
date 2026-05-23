@@ -5,15 +5,13 @@ import {
   logEvent,
 } from '@/src/lib/logging/log-event';
 import {
-  collectGeminiFilesFromVisionPages,
+  buildStoredPageImageProxyVisionPages,
   loadVisionPagesFromStoredAssets,
   type PdfPageImageAsset,
-  uploadStoredPageImagesToGeminiFileApi,
 } from '@/src/lib/generation-task-items/runtime';
-import { cleanupGeminiUploadedFiles } from '@/src/lib/llm/gemini-file-api';
-import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
 import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
+import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
@@ -170,10 +168,8 @@ async function resolvePdfVisionPages(input: {
     const llmConfig = getLlmRuntimeConfig('vision');
 
     if (llmConfig.provider === 'gemini') {
-      return uploadStoredPageImagesToGeminiFileApi({
-        admin: input.admin,
+      return buildStoredPageImageProxyVisionPages({
         pageImageAssets: storedAssets,
-        config: llmConfig,
         requestLabel: `template pdf evidence ${input.taskId} ${
           input.pdfFileName ?? 'unknown-pdf'
         }`,
@@ -192,54 +188,6 @@ async function resolvePdfVisionPages(input: {
   }
 
   return normalizePdfVisionPages(input.sourcePdfVisionPages);
-}
-
-async function cleanupTemplatePdfEvidenceGeminiFiles(input: {
-  admin: ReturnType<typeof createSupabaseAdminClient>;
-  taskId: string;
-  visionPages: PdfVisionPageInput[];
-}) {
-  const files = collectGeminiFilesFromVisionPages(input.visionPages);
-
-  if (files.length === 0) {
-    return;
-  }
-
-  const llmConfig = getLlmRuntimeConfig('vision');
-
-  if (llmConfig.provider !== 'gemini') {
-    return;
-  }
-
-  await appendProcessingTrace(
-    input.admin,
-    input.taskId,
-    `[Gemini File API][TemplatePdfEvidenceCleanupStart] ${JSON.stringify({
-      uploaded_file_count: files.length,
-    })}`,
-  );
-  const cleanupResults = await cleanupGeminiUploadedFiles({
-    config: llmConfig,
-    files,
-  });
-  await appendProcessingTrace(
-    input.admin,
-    input.taskId,
-    `[Gemini File API][TemplatePdfEvidenceCleanupComplete] ${JSON.stringify({
-      cleanup_results: cleanupResults.map((result) =>
-        result.status === 'fulfilled'
-          ? result.value
-          : {
-              deleted: false,
-              reason: 'cleanup_rejected',
-              error:
-                result.reason instanceof Error
-                  ? result.reason.message
-                  : String(result.reason),
-            },
-      ),
-    })}`,
-  );
 }
 
 export async function POST(
@@ -457,25 +405,17 @@ export async function POST(
       ReturnType<typeof buildTemplatePdfEvidence>
     > | null;
 
-    try {
-      pdfEvidence =
-        task.source_pdf_name && pdfVisionPages.length > 0
-          ? await buildTemplatePdfEvidence({
-              pdfFileName: task.source_pdf_name,
-              extractionResult: extractionResultWithSlotKeys,
-              visionPages: pdfVisionPages,
-              onTrace: async (entry) => {
-                await appendProcessingTrace(routeAdmin, task.id, entry.message);
-              },
-            })
-          : null;
-    } finally {
-      await cleanupTemplatePdfEvidenceGeminiFiles({
-        admin: routeAdmin,
-        taskId: task.id,
-        visionPages: pdfVisionPages,
-      });
-    }
+    pdfEvidence =
+      task.source_pdf_name && pdfVisionPages.length > 0
+        ? await buildTemplatePdfEvidence({
+            pdfFileName: task.source_pdf_name,
+            extractionResult: extractionResultWithSlotKeys,
+            visionPages: pdfVisionPages,
+            onTrace: async (entry) => {
+              await appendProcessingTrace(routeAdmin, task.id, entry.message);
+            },
+          })
+        : null;
     const pdfMappingFinishedAt = Date.now();
     await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_done', {
       pdf_page_image_count: pdfVisionPages.length,

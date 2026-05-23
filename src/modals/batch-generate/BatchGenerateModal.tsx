@@ -1134,8 +1134,8 @@ export function BatchGenerateModal({
         const directVisionRawMatch = traceLine.match(
           /^\[PDF Fill\]\[DirectVisionRaw\]\[([^\]]+)\] (.+)$/,
         );
-        const referenceUploadMatch = traceLine.match(
-          /^\[Gemini File API\]\[(ReferenceUploadStart|ReferenceUploadItem|ReferenceUploadComplete)\] (.+)$/,
+        const geminiImageProxyMatch = traceLine.match(
+          /^\[Gemini Image Proxy\]\[(StoragePipelineStart|StoragePipelinePageComplete|StoragePipelineComplete|SharedReferencePages|SlotFillSource)\] (.+)$/,
         );
         const referenceAlignmentPromptMatch = traceLine.match(
           /^\[PDF Fill\]\[ReferenceAlignmentPrompt\] (.+)$/,
@@ -1873,36 +1873,41 @@ export function BatchGenerateModal({
           return;
         }
 
-        if (referenceUploadMatch) {
-          const eventName = referenceUploadMatch[1] ?? 'ReferenceUpload';
-          const parsedUpload = parseTraceJson<Record<string, unknown>>(
-            referenceUploadMatch[2] ?? '{}',
-            `reference gemini upload ${eventName}`,
+        if (geminiImageProxyMatch) {
+          const eventName = geminiImageProxyMatch[1] ?? 'ImageProxy';
+          const parsedProxy = parseTraceJson<Record<string, unknown>>(
+            geminiImageProxyMatch[2] ?? '{}',
+            `gemini image proxy ${eventName}`,
           );
 
-          if (!parsedUpload) {
+          if (!parsedProxy) {
             return;
           }
 
-          if (eventName === 'ReferenceUploadComplete') {
-            const uploadDurationMs = parsedUpload.upload_duration_ms;
+          if (eventName === 'StoragePipelineStart') {
             console.info(
-              `[Batch Generate][${item.source_pdf_name}] 参考图片上传 Gemini File API 完成：${
-                typeof uploadDurationMs === 'number'
-                  ? formatDurationMs(uploadDurationMs)
-                  : '未记录'
-              }`,
-              parsedUpload,
+              `[Batch Generate][${item.source_pdf_name}] Gemini Image Proxy 开始准备图片 URL`,
+              parsedProxy,
             );
-          } else if (eventName === 'ReferenceUploadItem') {
+          } else if (eventName === 'StoragePipelinePageComplete') {
             console.info(
-              `[Batch Generate][${item.source_pdf_name}] 参考图片已上传 Gemini File API`,
-              parsedUpload,
+              `[Batch Generate][${item.source_pdf_name}] Gemini Image Proxy 图片 URL 已准备`,
+              parsedProxy,
+            );
+          } else if (eventName === 'StoragePipelineComplete') {
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}] Gemini Image Proxy 图片 URL 全部准备完成`,
+              parsedProxy,
+            );
+          } else if (eventName === 'SlotFillSource') {
+            console.info(
+              `[Batch Generate][${item.source_pdf_name}] 槽位回填图片来源：Gemini Image Proxy`,
+              parsedProxy,
             );
           } else {
             console.info(
-              `[Batch Generate][${item.source_pdf_name}] 开始上传参考图片到 Gemini File API`,
-              parsedUpload,
+              `[Batch Generate][${item.source_pdf_name}] 参考图片已改用 Gemini Image Proxy`,
+              parsedProxy,
             );
           }
 

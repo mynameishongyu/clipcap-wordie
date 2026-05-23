@@ -1,18 +1,13 @@
 import { NextResponse } from 'next/server';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
+import { createGeminiImageProxyFile } from '@/src/lib/gemini/image-proxy';
+import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import type {
   GenerationSlotSchemaItem,
   PdfPageInput,
   PdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
-import {
-  getGeminiFilePipelineConcurrency,
-  type GeminiFileApiDispatcher,
-  type UploadedGeminiFile,
-} from '@/src/lib/llm/gemini-file-api';
-import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
-import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
@@ -273,116 +268,65 @@ export async function loadVisionPagesFromStoredAssets(params: {
   );
 }
 
-async function runWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-) {
-  const results: R[] = new Array(items.length);
-  let nextIndex = 0;
-  const workerCount = Math.min(Math.max(1, concurrency), items.length || 1);
-
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < items.length) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        results[currentIndex] = await worker(items[currentIndex]!, currentIndex);
-      }
-    }),
-  );
-
-  return results;
-}
-
-export async function uploadStoredPageImagesToGeminiFileApi(params: {
-  admin: AdminClient;
+export async function buildStoredPageImageProxyVisionPages(params: {
   pageImageAssets: PdfPageImageAsset[];
-  config: LlmRuntimeConfig;
   requestLabel: string;
-  dispatcher?: GeminiFileApiDispatcher;
-  signal?: AbortSignal;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }): Promise<PdfVisionPageInput[]> {
   if (params.pageImageAssets.length === 0) {
     return [] as PdfVisionPageInput[];
   }
 
-  const pipelineConcurrency = getGeminiFilePipelineConcurrency();
   const startedAt = Date.now();
 
   await params.onTrace?.({
-    message: `[Gemini External URL][StoragePipelineStart] ${JSON.stringify({
+    message: `[Gemini Image Proxy][StoragePipelineStart] ${JSON.stringify({
       request_label: params.requestLabel,
-      model: params.config.model,
-      provider: params.config.provider,
       image_count: params.pageImageAssets.length,
-      pipeline_concurrency: pipelineConcurrency,
-      source: 'supabase_signed_url',
+      source: 'vercel_gemini_image_proxy',
     })}`,
   });
 
-  const pages = await runWithConcurrency(
-    params.pageImageAssets,
-    pipelineConcurrency,
-    async (asset, index) => {
-      const signStartedAt = Date.now();
-      const { data, error } = await params.admin.storage
-        .from('generation-pdfs')
-        .createSignedUrl(
-          asset.storage_path,
-          getSupabaseSignedUrlExpiresInSeconds(),
-        );
+  const pages: PdfVisionPageInput[] = [];
 
-      if (error || !data?.signedUrl) {
-        const errorMessage = error?.message ?? 'Missing signed URL';
+  for (const [index, asset] of params.pageImageAssets.entries()) {
+    const mimeType = getImageAssetMimeType(asset);
+    const geminiFile = createGeminiImageProxyFile({
+      storagePath: asset.storage_path,
+      mimeType,
+      sizeBytes: asset.size ?? 0,
+      displayName: `${params.requestLabel}-page-${asset.uploaded_page_number}`,
+    });
 
-        throw new Error(
-          `[Gemini External URL][StoragePipelineSignFailed] Unable to sign uploaded PDF page image URL: storage_path=${asset.storage_path}, uploaded_page=${asset.uploaded_page_number}, original_page=${asset.original_page_number}, error=${errorMessage}`,
-          error ? { cause: error } : undefined,
-        );
-      }
-
-      const mimeType = getImageAssetMimeType(asset);
-      const signDurationMs = Date.now() - signStartedAt;
-      const geminiFile = {
-        uri: data.signedUrl,
-        mimeType,
-        sizeBytes: asset.size ?? 0,
-        displayName: `${params.requestLabel}-page-${asset.uploaded_page_number}`,
-      } satisfies UploadedGeminiFile;
-
-      await params.onTrace?.({
-        message: `[Gemini External URL][StoragePipelinePageComplete] ${JSON.stringify({
-          request_label: params.requestLabel,
-          sequence_index: index + 1,
-          uploaded_page_number: asset.uploaded_page_number,
-          original_page_number: asset.original_page_number,
-          storage_path: asset.storage_path,
-          mime_type: mimeType,
-          image_size_bytes: asset.size ?? null,
-          file_uri: geminiFile.uri,
-          source: 'supabase_signed_url',
-          sign_duration_ms: signDurationMs,
-        })}`,
-      });
-
-      return {
-        page_number: asset.uploaded_page_number,
-        image_data_url: '',
+    await params.onTrace?.({
+      message: `[Gemini Image Proxy][StoragePipelinePageComplete] ${JSON.stringify({
+        request_label: params.requestLabel,
+        sequence_index: index + 1,
+        uploaded_page_number: asset.uploaded_page_number,
         original_page_number: asset.original_page_number,
-        gemini_file: geminiFile,
-      } satisfies PdfVisionPageInput;
-    },
-  );
+        storage_path: asset.storage_path,
+        mime_type: mimeType,
+        image_size_bytes: asset.size ?? null,
+        file_uri: geminiFile.uri,
+        source: 'vercel_gemini_image_proxy',
+      })}`,
+    });
+
+    pages.push({
+      page_number: asset.uploaded_page_number,
+      image_data_url: '',
+      original_page_number: asset.original_page_number,
+      gemini_file: geminiFile,
+    });
+  }
 
   const durationMs = Date.now() - startedAt;
 
   await params.onTrace?.({
-    message: `[Gemini External URL][StoragePipelineComplete] ${JSON.stringify({
+    message: `[Gemini Image Proxy][StoragePipelineComplete] ${JSON.stringify({
       request_label: params.requestLabel,
       image_count: pages.length,
-      source: 'supabase_signed_url',
+      source: 'vercel_gemini_image_proxy',
       duration_ms: durationMs,
       duration_seconds: Number((durationMs / 1000).toFixed(2)),
     })}`,
@@ -394,7 +338,7 @@ export async function uploadStoredPageImagesToGeminiFileApi(params: {
 export function collectGeminiFilesFromVisionPages(
   pages: PdfVisionPageInput[],
 ) {
-  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+  const filesByNameOrUri = new Map<string, GeminiVisionFile>();
 
   pages.forEach((page) => {
     const file = page.gemini_file;

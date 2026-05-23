@@ -9,20 +9,19 @@ import {
   generationTaskItemSelect,
   type GenerationTaskItemRecord,
   getErrorMessage,
+  buildStoredPageImageProxyVisionPages,
   loadVisionPagesFromStoredAssets,
   normalizePdfPageImageAssets,
   normalizeSelectedOriginalPageNumbers,
   normalizeVisionPages,
   recalculateTaskSummary,
-  uploadStoredPageImagesToGeminiFileApi,
 } from '@/src/lib/generation-task-items/runtime';
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import {
-  callGeminiFileApiChatCompletion,
-  cleanupGeminiUploadedFiles,
-  summarizeGeminiFileApiRequestForTrace,
-  type UploadedGeminiFile,
-} from '@/src/lib/llm/gemini-file-api';
+  callGeminiNativeChatCompletion,
+  summarizeGeminiNativeRequestForTrace,
+} from '@/src/lib/llm/gemini-native';
+import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
@@ -76,7 +75,7 @@ type PageFilterGeminiFileReference = {
 };
 
 function toPageFilterGeminiFileReference(
-  file: UploadedGeminiFile,
+  file: GeminiVisionFile,
   requestLabel: string,
 ): PageFilterGeminiFileReference {
   return {
@@ -101,16 +100,6 @@ function getPageFilterBatchSize() {
   }
 
   return Math.min(PAGE_FILTER_BATCH_SIZE_MAX, parsedValue);
-}
-
-function isGeminiExternalUrlFetchError(error: unknown) {
-  const message = getErrorMessage(error).toLowerCase();
-
-  return (
-    message.includes('cannot fetch content from the provided url') ||
-    (message.includes('gemini generatecontent request failed (400)') &&
-      message.includes('invalid_argument'))
-  );
 }
 
 function estimateDataUrlBytes(dataUrl: string) {
@@ -538,25 +527,17 @@ async function classifyVisionPagesForSlotFill(params: {
 
       if (llmConfig.provider === 'gemini') {
         const requestLabel = `page filter batch ${batchIndex + 1}/${batches.length}`;
-        const geminiResult = await callGeminiFileApiChatCompletion({
+        const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
           requestLabel,
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
-          cleanupUploadedFiles: false,
           onTrace: params.onTrace,
         });
-        const dropExampleFiles = geminiResult.uploadedFiles.slice(
-          0,
-          params.dropExamples.length,
-        );
-        const uploadedCandidateFiles = geminiResult.uploadedFiles.slice(
-          params.dropExamples.length,
-        );
 
-        batch.forEach((page, index) => {
-          const file = page.gemini_file ?? uploadedCandidateFiles[index];
+        batch.forEach((page) => {
+          const file = page.gemini_file;
 
           if (!file?.uri) {
             return;
@@ -568,56 +549,19 @@ async function classifyVisionPagesForSlotFill(params: {
           );
         });
 
-        if (dropExampleFiles.length > 0) {
-          await params.onTrace?.({
-            message: `[Gemini File API][DropExampleCleanupStart] ${JSON.stringify({
-              request_label: requestLabel,
-              uploaded_file_count: dropExampleFiles.length,
-            })}`,
-          });
-          const dropExampleCleanupResults = await cleanupGeminiUploadedFiles({
-            config: llmConfig,
-            files: dropExampleFiles,
-            dispatcher: llmFetchDispatcher,
-          });
-          await params.onTrace?.({
-            message: `[Gemini File API][DropExampleCleanupComplete] ${JSON.stringify({
-              request_label: requestLabel,
-              cleanup_results: dropExampleCleanupResults.map((result) =>
-                result.status === 'fulfilled'
-                  ? result.value
-                  : {
-                      deleted: false,
-                      reason: 'cleanup_rejected',
-                      error:
-                        result.reason instanceof Error
-                          ? result.reason.message
-                          : String(result.reason),
-                    },
-              ),
-            })}`,
-          });
-        }
-
         await params.onTrace?.({
-          message: `[PDF Fill][PageFilterGeminiFileApiRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
+          message: `[PDF Fill][PageFilterGeminiNativeRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
             {
               route: '/api/generation-task-items/[taskItemId]/page-preparation',
               config_scope: 'VISION_LLM',
               model: traceConfig.model,
               provider: traceConfig.provider,
               request_label: requestLabel,
-              request_mode: 'gemini_file_api_generate_content',
-              candidate_gemini_file_count:
-                batch.filter((page) => page.gemini_file).length +
-                uploadedCandidateFiles.length,
-              reused_candidate_gemini_file_count: batch.filter(
-                (page) => page.gemini_file,
-              ).length,
-              uploaded_candidate_gemini_file_count:
-                uploadedCandidateFiles.length,
+              request_mode: 'gemini_native_generate_content_proxy_url',
+              candidate_proxy_file_count: batch.filter((page) => page.gemini_file)
+                .length,
               retained_for_slot_fill_cleanup_later: true,
-              ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+              ...summarizeGeminiNativeRequestForTrace(geminiResult),
             },
           )}`,
         });
@@ -808,12 +752,9 @@ async function runGenerationTaskItemPagePreparation(params: {
           }));
         const pipelineVisionPages =
           precomputedVisionPages.length === 0 && llmConfig.provider === 'gemini'
-            ? await uploadStoredPageImagesToGeminiFileApi({
-                admin,
+            ? await buildStoredPageImageProxyVisionPages({
                 pageImageAssets,
-                config: llmConfig,
                 requestLabel: `page filter ${params.item.id}`,
-                dispatcher: llmFetchDispatcher,
                 onTrace: async ({ message }) => {
                   await appendProcessingTrace(admin, params.item.id, message);
                 },
@@ -839,64 +780,22 @@ async function runGenerationTaskItemPagePreparation(params: {
             ? precomputedVisionPagesForFilter
             : pipelineVisionPages.length > 0
               ? pipelineVisionPages
-            : await loadVisionPagesFromStoredAssets({
-                admin,
-                pageImageAssets,
-              });
+              : await loadVisionPagesFromStoredAssets({
+                  admin,
+                  pageImageAssets,
+                });
         await appendMemoryTrace(admin, params.item.id, 'page_filter_start', {
           source_pdf_name: params.item.source_pdf_name,
           page_count: visionPagesForFilter.length,
         });
-        let pageFilterResult;
-
-        try {
-          pageFilterResult = await classifyVisionPagesForSlotFill({
-            documentName: params.item.source_pdf_name,
-            visionPages: visionPagesForFilter,
-            dropExamples: pageFilterDropExamples,
-            onTrace: async ({ message }) => {
-              await appendProcessingTrace(admin, params.item.id, message);
-            },
-          });
-        } catch (filterError) {
-          if (
-            llmConfig.provider !== 'gemini' ||
-            !isGeminiExternalUrlFetchError(filterError) ||
-            pageImageAssets.length === 0
-          ) {
-            throw filterError;
-          }
-
-          await appendProcessingTrace(
-            admin,
-            params.item.id,
-            `[PDF Fill][PageFilter] Gemini cannot fetch Supabase signed URL images; retrying page filter by downloading images through Vercel and uploading them to Gemini File API. ${getErrorMessage(filterError)}`,
-          );
-          await appendMemoryTrace(
-            admin,
-            params.item.id,
-            'page_filter_signed_url_fetch_failed_retry_with_upload',
-            {
-              source_pdf_name: params.item.source_pdf_name,
-              page_count: pageImageAssets.length,
-              error_message: getErrorMessage(filterError),
-            },
-          );
-
-          const fallbackVisionPages = await loadVisionPagesFromStoredAssets({
-            admin,
-            pageImageAssets,
-          });
-
-          pageFilterResult = await classifyVisionPagesForSlotFill({
-            documentName: params.item.source_pdf_name,
-            visionPages: fallbackVisionPages,
-            dropExamples: pageFilterDropExamples,
-            onTrace: async ({ message }) => {
-              await appendProcessingTrace(admin, params.item.id, message);
-            },
-          });
-        }
+        const pageFilterResult = await classifyVisionPagesForSlotFill({
+          documentName: params.item.source_pdf_name,
+          visionPages: visionPagesForFilter,
+          dropExamples: pageFilterDropExamples,
+          onTrace: async ({ message }) => {
+            await appendProcessingTrace(admin, params.item.id, message);
+          },
+        });
         await appendMemoryTrace(admin, params.item.id, 'page_filter_done', {
           source_pdf_name: params.item.source_pdf_name,
           decision_count: pageFilterResult.decisions.length,

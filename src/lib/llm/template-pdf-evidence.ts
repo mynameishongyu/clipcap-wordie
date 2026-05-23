@@ -6,9 +6,9 @@ import type {
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import {
-  callGeminiFileApiChatCompletion,
-  summarizeGeminiFileApiRequestForTrace,
-} from '@/src/lib/llm/gemini-file-api';
+  callGeminiNativeChatCompletion,
+  summarizeGeminiNativeRequestForTrace,
+} from '@/src/lib/llm/gemini-native';
 import {
   buildChatCompletionHeaders,
   buildChatCompletionBody,
@@ -1277,16 +1277,13 @@ async function locateSlotsInPageBatch(input: {
     };
 
     if (llmConfig.provider === 'gemini') {
-      const geminiResult = await callGeminiFileApiChatCompletion({
+      const geminiResult = await callGeminiNativeChatCompletion({
         config: llmConfig,
         body: requestBody,
         requestLabel,
         dispatcher: visionLocateFetchDispatcher,
         signal: controller.signal,
-        onGenerateContentRequestBody: async ({
-          requestBody: geminiRequestBody,
-          uploadedFiles,
-        }) => {
+        onGenerateContentRequestBody: async ({ requestBody: geminiRequestBody }) => {
           await input.onTrace?.({
             message:
               `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
@@ -1296,10 +1293,9 @@ async function locateSlotsInPageBatch(input: {
                 model: llmConfig.model,
                 provider: traceConfig.provider,
                 request_label: requestLabel,
-                request_mode: 'gemini_file_api_generate_content',
-                ...summarizeGeminiFileApiRequestForTrace({
+                request_mode: 'gemini_native_generate_content_proxy_url',
+                ...summarizeGeminiNativeRequestForTrace({
                   requestBody: geminiRequestBody,
-                  uploadedFiles,
                 }),
               }),
           });

@@ -2,10 +2,10 @@ import { z } from 'zod';
 import { Agent, fetch as undiciFetch } from 'undici';
 import { getOptionalEnv, getVisionLlmModel } from '@/src/lib/llm/env';
 import {
-  callGeminiFileApiChatCompletion,
-  type UploadedGeminiFile,
-  summarizeGeminiFileApiRequestForTrace,
-} from '@/src/lib/llm/gemini-file-api';
+  callGeminiNativeChatCompletion,
+  summarizeGeminiNativeRequestForTrace,
+} from '@/src/lib/llm/gemini-native';
+import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
   buildChatCompletionBody,
   buildChatCompletionHeaders,
@@ -76,7 +76,7 @@ export interface PdfVisionPageInput {
   page_number: number;
   image_data_url: string;
   original_page_number?: number;
-  gemini_file?: UploadedGeminiFile;
+  gemini_file?: GeminiVisionFile;
 }
 
 export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
@@ -2581,8 +2581,8 @@ async function alignReferencePagesToVisionPages(input: {
       let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
-        requestMode = 'gemini_file_api_generate_content';
-        const geminiResult = await callGeminiFileApiChatCompletion({
+        requestMode = 'gemini_native_generate_content_proxy_url';
+        const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
           requestLabel: 'reference page alignment',
@@ -2599,8 +2599,8 @@ async function alignReferencePagesToVisionPages(input: {
               model: llmConfig.model,
               provider: visionTraceConfig.provider,
               request_label: 'reference page alignment',
-              request_mode: 'gemini_file_api_generate_content',
-              ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+              request_mode: requestMode,
+              ...summarizeGeminiNativeRequestForTrace(geminiResult),
             },
           )}`,
         });
@@ -3089,8 +3089,8 @@ async function extractSlotsFromVisionPageBatch(input: {
       let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
-        requestMode = 'gemini_file_api_generate_content';
-        const geminiResult = await callGeminiFileApiChatCompletion({
+        requestMode = 'gemini_native_generate_content_proxy_url';
+        const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
           requestLabel,
@@ -3107,8 +3107,8 @@ async function extractSlotsFromVisionPageBatch(input: {
               model: llmConfig.model,
               provider: visionTraceConfig.provider,
               request_label: requestLabel,
-              request_mode: 'gemini_file_api_generate_content',
-              ...summarizeGeminiFileApiRequestForTrace(geminiResult),
+              request_mode: requestMode,
+              ...summarizeGeminiNativeRequestForTrace(geminiResult),
             },
           )}`,
         });
