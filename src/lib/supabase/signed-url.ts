@@ -1,4 +1,4 @@
-const DEFAULT_SUPABASE_SIGNED_URL_EXPIRES_IN_SECONDS = 60 * 10;
+const DEFAULT_SUPABASE_SIGNED_URL_EXPIRES_IN_SECONDS = 60 * 60;
 
 export function getSupabaseSignedUrlExpiresInSeconds() {
   const parsedValue = Number(

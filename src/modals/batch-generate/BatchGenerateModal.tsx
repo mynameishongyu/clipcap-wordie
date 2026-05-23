@@ -9,7 +9,6 @@ import {
   Loader,
   Paper,
   Progress,
-  SimpleGrid,
   Stack,
   Text,
   Title,
@@ -47,10 +46,6 @@ interface UploadRow {
   parseError: string | null;
   forceVisionPageFill: boolean;
 }
-
-type PageFilterPage = NonNullable<
-  GenerationTaskItemSummary['pdf_page_filter_pages']
->[number];
 
 declare global {
   interface Window {
@@ -479,7 +474,7 @@ function getStatusLabel(status: string) {
     case 'page_preparing':
       return '处理中';
     case 'pdf_pages_ready':
-      return '待确认页面';
+      return '准备回填';
     case 'slot_filling':
       return '处理中';
     case 'review_pending':
@@ -491,91 +486,6 @@ function getStatusLabel(status: string) {
     default:
       return status;
   }
-}
-
-function getPageFilterPageLabel(page: PageFilterPage) {
-  return `第 ${page.originalPageNumber} 页`;
-}
-
-function PageFilterPageTile({
-  page,
-  retained,
-  onAction,
-}: {
-  page: PageFilterPage;
-  retained: boolean;
-  onAction: () => void;
-}) {
-  const pageLabel = getPageFilterPageLabel(page);
-  const statusLabel = retained ? '保留' : '已过滤';
-  const nextActionLabel = retained ? '过滤' : '保留';
-  const borderColor = retained
-    ? 'rgba(16, 185, 129, 0.62)'
-    : 'rgba(248, 113, 113, 0.62)';
-  const background = retained
-    ? 'rgba(16, 185, 129, 0.12)'
-    : 'rgba(248, 113, 113, 0.08)';
-
-  return (
-    <Box
-      role="button"
-      tabIndex={0}
-      title={page.filterReason ?? `${pageLabel}：${statusLabel}`}
-      onClick={onAction}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onAction();
-        }
-      }}
-      style={{
-        minHeight: 64,
-        border: `1px solid ${borderColor}`,
-        borderRadius: 8,
-        background,
-        cursor: 'pointer',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-        padding: '9px 10px',
-      }}
-    >
-      <Group justify="space-between" align="center" gap={8} wrap="nowrap">
-        <Text fw={700} size="xs">
-          {pageLabel}
-        </Text>
-        <Badge
-          color={retained ? 'red' : 'teal'}
-          radius="sm"
-          size="xs"
-          variant="light"
-        >
-          {nextActionLabel}
-        </Badge>
-      </Group>
-      <Group justify="space-between" align="center" gap={6} wrap="nowrap">
-        <Text c="dimmed" size="xs">
-          点击{nextActionLabel}
-        </Text>
-        {page.imageUrl ? (
-          <Button
-            radius="sm"
-            size="compact-xs"
-            variant="subtle"
-            onClick={(event) => {
-              event.stopPropagation();
-              window.open(page.imageUrl ?? '', '_blank', 'noopener,noreferrer');
-            }}
-            onKeyDown={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            查看
-          </Button>
-        ) : null}
-      </Group>
-    </Box>
-  );
 }
 
 function formatElapsedSeconds(
@@ -802,38 +712,6 @@ export function BatchGenerateModal({
       }),
       queryClient.invalidateQueries({ queryKey: ['saved-templates'] }),
     ]);
-  };
-  const removePageFromSlotFill = (
-    itemId: string,
-    fallbackPageNumbers: number[],
-    uploadedPageNumber: number,
-  ) => {
-    setConfirmedPageNumbersByItemId((current) => {
-      const currentPages = current[itemId] ?? fallbackPageNumbers;
-      const nextPageSet = new Set(currentPages);
-      nextPageSet.delete(uploadedPageNumber);
-
-      return {
-        ...current,
-        [itemId]: Array.from(nextPageSet).sort((left, right) => left - right),
-      };
-    });
-  };
-  const restorePageForSlotFill = (
-    itemId: string,
-    fallbackPageNumbers: number[],
-    uploadedPageNumber: number,
-  ) => {
-    setConfirmedPageNumbersByItemId((current) => {
-      const currentPages = current[itemId] ?? fallbackPageNumbers;
-      const nextPageSet = new Set(currentPages);
-      nextPageSet.add(uploadedPageNumber);
-
-      return {
-        ...current,
-        [itemId]: Array.from(nextPageSet).sort((left, right) => left - right),
-      };
-    });
   };
   const launchSlotFillForItem = useCallback(
     (
@@ -3191,20 +3069,6 @@ export function BatchGenerateModal({
                   clientStartedAt,
                 );
                 const isReviewed = item.status === 'reviewed';
-                const pageFilterPages = item.pdf_page_filter_pages ?? [];
-                const confirmedPageNumbers =
-                  confirmedPageNumbersByItemId[item.id] ??
-                  pageFilterPages
-                    .filter((page) => page.selectedForSlotFill !== false)
-                    .map((page) => page.uploadedPageNumber);
-                const confirmedPageNumberSet = new Set(confirmedPageNumbers);
-                const retainedPageFilterPages = pageFilterPages.filter((page) =>
-                  confirmedPageNumberSet.has(page.uploadedPageNumber),
-                );
-                const filteredPageFilterPages = pageFilterPages.filter(
-                  (page) =>
-                    !confirmedPageNumberSet.has(page.uploadedPageNumber),
-                );
                 return (
                   <Paper key={item.id} p="md" radius="xl" withBorder>
                     <Stack gap="sm">
@@ -3244,186 +3108,6 @@ export function BatchGenerateModal({
                           已完成 {item.slot_completed_count} 个槽位，待抽取{' '}
                           {getPendingSlotCount(item)} 个槽位
                         </Text>
-                      ) : null}
-
-                      {item.status === 'pdf_pages_ready' ? (
-                        <>
-                          <Divider />
-                          <Box
-                            style={{
-                              background: 'rgba(255,255,255,0.03)',
-                              border: '1px solid rgba(255,255,255,0.08)',
-                              borderRadius: 8,
-                              padding: 14,
-                            }}
-                          >
-                            <Stack gap="md">
-                              <Group justify="space-between" align="flex-start">
-                                <div>
-                                  <Text fw={700} size="sm">
-                                    页面过滤结果
-                                  </Text>
-                                  <Text c="dimmed" size="xs">
-                                    系统会自动使用保留页面进入回填。下方结果仅用于调试查看。
-                                  </Text>
-                                </div>
-                                <Button
-                                  disabled={
-                                    confirmedPageNumbers.length === 0 ||
-                                    startGenerationTaskItemSlotFillMutation.isPending
-                                  }
-                                  loading={
-                                    startGenerationTaskItemSlotFillMutation.isPending
-                                  }
-                                  radius="xl"
-                                  size="xs"
-                                  onClick={() => {
-                                    launchSlotFillForItem(
-                                      item,
-                                      'manual',
-                                      confirmedPageNumbers,
-                                    );
-                                  }}
-                                >
-                                  立即开始回填
-                                </Button>
-                              </Group>
-
-                              <SimpleGrid
-                                cols={{ base: 2, sm: 4 }}
-                                spacing="xs"
-                              >
-                                {[
-                                  {
-                                    label: '已保留',
-                                    value: `${retainedPageFilterPages.length} 页`,
-                                  },
-                                  {
-                                    label: '已过滤',
-                                    value: `${filteredPageFilterPages.length} 页`,
-                                  },
-                                  {
-                                    label: '共',
-                                    value: `${pageFilterPages.length} 页`,
-                                  },
-                                  {
-                                    label: '待回填',
-                                    value: `${getPendingSlotCount(item)} 个槽位`,
-                                  },
-                                ].map((metric) => (
-                                  <Box
-                                    key={metric.label}
-                                    style={{
-                                      border:
-                                        '1px solid rgba(255,255,255,0.07)',
-                                      borderRadius: 8,
-                                      padding: '8px 10px',
-                                    }}
-                                  >
-                                    <Text c="dimmed" size="xs">
-                                      {metric.label}
-                                    </Text>
-                                    <Text fw={700} size="sm">
-                                      {metric.value}
-                                    </Text>
-                                  </Box>
-                                ))}
-                              </SimpleGrid>
-
-                              {pageFilterPages.length > 0 ? (
-                                <>
-                                  <Stack gap="xs">
-                                    <Group
-                                      justify="space-between"
-                                      align="center"
-                                      gap="sm"
-                                    >
-                                      <Text fw={700} size="sm">
-                                        保留页面
-                                      </Text>
-                                      <Text c="dimmed" size="xs">
-                                        当前将使用{' '}
-                                        {retainedPageFilterPages.length}{' '}
-                                        页进行视觉回填
-                                      </Text>
-                                    </Group>
-                                    {retainedPageFilterPages.length > 0 ? (
-                                      <SimpleGrid
-                                        cols={{ base: 2, xs: 3, sm: 4, md: 6 }}
-                                        spacing="xs"
-                                      >
-                                        {retainedPageFilterPages.map((page) => (
-                                          <PageFilterPageTile
-                                            key={`${item.id}-retained-${page.uploadedPageNumber}`}
-                                            page={page}
-                                            retained
-                                            onAction={() =>
-                                              removePageFromSlotFill(
-                                                item.id,
-                                                confirmedPageNumbers,
-                                                page.uploadedPageNumber,
-                                              )
-                                            }
-                                          />
-                                        ))}
-                                      </SimpleGrid>
-                                    ) : (
-                                      <Text c="red" size="xs">
-                                        当前没有保留页面，请从已过滤页面中恢复至少一页。
-                                      </Text>
-                                    )}
-                                  </Stack>
-
-                                  <Stack gap="xs">
-                                    <Group gap="xs">
-                                      <Text fw={700} size="sm">
-                                        已过滤页面
-                                      </Text>
-                                      <Badge
-                                        color="red"
-                                        radius="sm"
-                                        size="sm"
-                                        variant="light"
-                                      >
-                                        {filteredPageFilterPages.length}
-                                      </Badge>
-                                    </Group>
-
-                                    {filteredPageFilterPages.length === 0 ? (
-                                      <Text c="dimmed" size="xs">
-                                        没有被过滤的页面。
-                                      </Text>
-                                    ) : (
-                                      <SimpleGrid
-                                        cols={{ base: 2, xs: 3, sm: 4, md: 6 }}
-                                        spacing="xs"
-                                      >
-                                        {filteredPageFilterPages.map((page) => (
-                                          <PageFilterPageTile
-                                            key={`${item.id}-filtered-${page.uploadedPageNumber}`}
-                                            page={page}
-                                            retained={false}
-                                            onAction={() =>
-                                              restorePageForSlotFill(
-                                                item.id,
-                                                confirmedPageNumbers,
-                                                page.uploadedPageNumber,
-                                              )
-                                            }
-                                          />
-                                        ))}
-                                      </SimpleGrid>
-                                    )}
-                                  </Stack>
-                                </>
-                              ) : (
-                                <Text c="dimmed" size="xs">
-                                  暂无页面过滤结果。可以刷新状态后重试。
-                                </Text>
-                              )}
-                            </Stack>
-                          </Box>
-                        </>
                       ) : null}
 
                       {['review_pending', 'reviewed'].includes(item.status) ? (

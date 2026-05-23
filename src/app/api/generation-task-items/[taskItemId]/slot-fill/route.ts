@@ -148,10 +148,20 @@ function buildReferenceAnnotationStoragePath(params: {
   pageNumber: number;
 }) {
   if (!params.templateId) {
-    return `${params.ownerId}/template-reference-pages/annotated/task/${params.taskItemId}/page-${params.pageNumber}.png`;
+    return `${params.ownerId}/template-reference-pages/annotated/task/${params.taskItemId}/page-${params.pageNumber}.jpg`;
   }
 
-  return `${params.ownerId}/template-reference-pages/annotated/${params.templateId}/page-${params.pageNumber}.png`;
+  return `${params.ownerId}/template-reference-pages/annotated/${params.templateId}/page-${params.pageNumber}.jpg`;
+}
+
+function isGeminiSignedUrlFetchError(error: unknown) {
+  const message = getErrorMessage(error);
+
+  return (
+    message.includes('Cannot fetch content from the provided URL') ||
+    (message.includes('INVALID_ARGUMENT') &&
+      message.includes('provided URL'))
+  );
 }
 
 async function createReferenceAnnotationSignedUrl(params: {
@@ -1241,32 +1251,27 @@ async function runGenerationTaskItemSlotFill(params: {
       llmConfig.provider === 'gemini'
         ? buildVisionPagesFromCachedGeminiFiles(pageImageAssets)
         : [];
-    const canReuseCachedGeminiFiles =
-      cachedGeminiVisionPages.length === pageImageAssets.length &&
-      pageImageAssets.length > 0;
+    const shouldUseFreshGeminiSignedUrls =
+      llmConfig.provider === 'gemini' && pageImageAssets.length > 0;
     const visionPages =
-      precomputedVisionPages.length > 0
-        ? precomputedVisionPages
-        : canReuseCachedGeminiFiles
-          ? cachedGeminiVisionPages
-          : llmConfig.provider === 'gemini' && pageImageAssets.length > 0
-            ? await uploadStoredPageImagesToGeminiFileApi({
-                admin,
-                pageImageAssets,
-                config: llmConfig,
-                requestLabel: `slot fill ${params.item.id}`,
-                onTrace: async ({ message }) => {
-                  await appendProcessingTrace(admin, params.item.id, message);
-                },
-              })
+      shouldUseFreshGeminiSignedUrls
+        ? await uploadStoredPageImagesToGeminiFileApi({
+            admin,
+            pageImageAssets,
+            config: llmConfig,
+            requestLabel: `slot fill ${params.item.id}`,
+            onTrace: async ({ message }) => {
+              await appendProcessingTrace(admin, params.item.id, message);
+            },
+          })
+        : precomputedVisionPages.length > 0
+          ? precomputedVisionPages
           : await loadVisionPagesFromStoredAssets({
               admin,
               pageImageAssets,
             });
     transientSlotFillGeminiFiles =
-      precomputedVisionPages.length === 0 &&
-      !canReuseCachedGeminiFiles &&
-      llmConfig.provider === 'gemini'
+      shouldUseFreshGeminiSignedUrls
         ? visionPages.flatMap((page) =>
             page.gemini_file?.name ? [page.gemini_file] : [],
           )
@@ -1275,17 +1280,16 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[Gemini File API][SlotFillReuse] ${JSON.stringify({
+      `[Gemini External URL][SlotFillSource] ${JSON.stringify({
         provider: llmConfig.provider,
-        reused_cached_page_file_count: canReuseCachedGeminiFiles
-          ? cachedGeminiVisionPages.length
+        reused_cached_page_file_count: 0,
+        fresh_signed_url_page_count: shouldUseFreshGeminiSignedUrls
+          ? visionPages.length
           : 0,
         fallback_to_supabase_download:
-          precomputedVisionPages.length === 0 &&
-          !canReuseCachedGeminiFiles &&
-          llmConfig.provider !== 'gemini',
-        uploaded_via_storage_pipeline_file_count:
-          transientSlotFillGeminiFiles.length,
+          !shouldUseFreshGeminiSignedUrls &&
+          precomputedVisionPages.length === 0,
+        signed_url_file_count: transientSlotFillGeminiFiles.length,
         cached_page_file_count: cachedGeminiVisionPages.length,
         required_page_count: pageImageAssets.length,
       })}`,
@@ -1420,11 +1424,15 @@ async function runGenerationTaskItemSlotFill(params: {
     });
 
     let lastLoggedCompletedSlots = -1;
-    const llmOutput = await fillSlotsFromVisionPages({
+    const runDirectVisionSlotFill = async (input: {
+      runVisionPages: PdfVisionPageInput[];
+      runReferencePages: ReferencePdfVisionPageInput[];
+    }) =>
+      fillSlotsFromVisionPages({
       pdfFileName: params.item.source_pdf_name,
       slots: slotSchema,
-      visionPages,
-      referenceExamplePages: referencePagesForSlotFill,
+      visionPages: input.runVisionPages,
+      referenceExamplePages: input.runReferencePages,
       processStartedAtMs,
       processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
       onTrace: async ({ message }) => {
@@ -1467,6 +1475,87 @@ async function runGenerationTaskItemSlotFill(params: {
         }
       },
     });
+
+    let llmOutput: Awaited<ReturnType<typeof fillSlotsFromVisionPages>>;
+
+    try {
+      llmOutput = await runDirectVisionSlotFill({
+        runVisionPages: visionPages,
+        runReferencePages: referencePagesForSlotFill,
+      });
+    } catch (error) {
+      if (
+        llmConfig.provider !== 'gemini' ||
+        !shouldUseFreshGeminiSignedUrls ||
+        !isGeminiSignedUrlFetchError(error)
+      ) {
+        throw error;
+      }
+
+      await appendProcessingTrace(
+        admin,
+        params.item.id,
+        `[Gemini External URL][SlotFillSignedUrlRefreshRetry] ${JSON.stringify({
+          document_name: params.item.source_pdf_name,
+          task_item_id: params.item.id,
+          reason: getErrorMessage(error),
+          retry: 'refresh_supabase_signed_urls_only',
+        })}`,
+      );
+      await appendMemoryTrace(
+        admin,
+        params.item.id,
+        'slot_fill_signed_url_refresh_retry_started',
+        {
+          source_pdf_name: params.item.source_pdf_name,
+          page_image_asset_count: pageImageAssets.length,
+          reference_page_count: referencePagesForSlotFill.length,
+        },
+      );
+
+      const refreshedVisionPages = await uploadStoredPageImagesToGeminiFileApi({
+        admin,
+        pageImageAssets,
+        config: llmConfig,
+        requestLabel: `slot fill ${params.item.id} refreshed signed url retry`,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+      });
+      const refreshedReferenceExamplePages =
+        await loadReferenceExamplePagesWithBbox({
+          admin,
+          taskItemId: params.item.id,
+          ownerId: params.item.owner_id,
+          templateId: params.item.template_id,
+          slots: slotSchema,
+        });
+      const refreshedReferencePagesForSlotFill =
+        await getSharedReferencePagesForSlotFill({
+          admin,
+          taskItemId: params.item.id,
+          taskId: params.item.task_id,
+          templateId: params.item.template_id,
+          pages: refreshedReferenceExamplePages.pages,
+        });
+
+      await appendMemoryTrace(
+        admin,
+        params.item.id,
+        'slot_fill_signed_url_refresh_retry_urls_ready',
+        {
+          vision_page_count: refreshedVisionPages.length,
+          reference_page_count: refreshedReferencePagesForSlotFill.length,
+        },
+      );
+
+      lastLoggedCompletedSlots = -1;
+      llmOutput = await runDirectVisionSlotFill({
+        runVisionPages: refreshedVisionPages,
+        runReferencePages: refreshedReferencePagesForSlotFill,
+      });
+    }
+
     await appendMemoryTrace(admin, params.item.id, 'vision_slot_fill_done', {
       extracted_item_count: llmOutput.extracted_items.length,
     });
