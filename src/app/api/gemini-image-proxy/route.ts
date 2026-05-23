@@ -6,7 +6,7 @@ import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-export async function GET(request: Request) {
+async function handleGeminiImageProxyRequest(request: Request) {
   try {
     const token = new URL(request.url).searchParams.get('token') ?? '';
     const payload = verifyGeminiImageProxyToken(token);
@@ -25,11 +25,20 @@ export async function GET(request: Request) {
       );
     }
 
+    const upstreamHeaders = new Headers();
+    const range = request.headers.get('range');
+
+    if (range) {
+      upstreamHeaders.set('range', range);
+    }
+
     const upstream = await fetch(data.signedUrl, {
+      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers: upstreamHeaders,
       cache: 'no-store',
     });
 
-    if (!upstream.ok || !upstream.body) {
+    if (!upstream.ok || (request.method !== 'HEAD' && !upstream.body)) {
       return NextResponse.json(
         {
           code: 'GEMINI_IMAGE_PROXY_FETCH_FAILED',
@@ -42,15 +51,22 @@ export async function GET(request: Request) {
     const headers = new Headers();
     headers.set('Content-Type', upstream.headers.get('content-type') ?? payload.mimeType);
     headers.set('Cache-Control', 'no-store');
+    headers.set('Accept-Ranges', upstream.headers.get('accept-ranges') ?? 'bytes');
+    headers.set('Content-Disposition', 'inline');
 
     const contentLength = upstream.headers.get('content-length');
+    const contentRange = upstream.headers.get('content-range');
 
     if (contentLength) {
       headers.set('Content-Length', contentLength);
     }
 
-    return new Response(upstream.body, {
-      status: 200,
+    if (contentRange) {
+      headers.set('Content-Range', contentRange);
+    }
+
+    return new Response(request.method === 'HEAD' ? null : upstream.body, {
+      status: upstream.status,
       headers,
     });
   } catch (error) {
@@ -62,4 +78,12 @@ export async function GET(request: Request) {
       { status: 401 },
     );
   }
+}
+
+export async function GET(request: Request) {
+  return handleGeminiImageProxyRequest(request);
+}
+
+export async function HEAD(request: Request) {
+  return handleGeminiImageProxyRequest(request);
 }

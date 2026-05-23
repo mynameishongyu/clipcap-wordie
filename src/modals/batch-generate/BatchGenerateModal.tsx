@@ -1119,6 +1119,12 @@ export function BatchGenerateModal({
         const pageFilterRawMatch = traceLine.match(
           /^\[PDF Fill\]\[PageFilterRaw\]\[([^\]]+)\] (.+)$/,
         );
+        const pageFilterGeminiNativeRequestMatch = traceLine.match(
+          /^\[PDF Fill\]\[PageFilterGeminiNativeRequest\]\[([^\]]+)\] (.+)$/,
+        );
+        const pageFilterGeminiProxyPreflightMatch = traceLine.match(
+          /^\[PDF Fill\]\[PageFilterGeminiProxyPreflight\]\[([^\]]+)\] (.+)$/,
+        );
         const pageFilterAutoSelectionMatch = traceLine.match(
           /^\[PDF Fill\]\[PageFilterAutoSelection\] (.+)$/,
         );
@@ -1386,6 +1392,48 @@ export function BatchGenerateModal({
           logConsoleTextChunks(
             `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM parsed result JSON (${label})`,
             JSON.stringify(parsedResult.parsed_results ?? parsedResult, null, 2),
+          );
+          return;
+        }
+
+        if (pageFilterGeminiNativeRequestMatch) {
+          const label = pageFilterGeminiNativeRequestMatch[1] ?? 'batch';
+          const parsedRequest = parseTraceJson<Record<string, unknown>>(
+            pageFilterGeminiNativeRequestMatch[2] ?? '{}',
+            `page filter Gemini Image Proxy request ${label}`,
+          );
+
+          if (!parsedRequest) {
+            return;
+          }
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter Gemini Image Proxy request (${label})`,
+            parsedRequest,
+          );
+          return;
+        }
+
+        if (pageFilterGeminiProxyPreflightMatch) {
+          const label = pageFilterGeminiProxyPreflightMatch[1] ?? 'batch';
+          const parsedPreflight = parseTraceJson<Record<string, unknown>>(
+            pageFilterGeminiProxyPreflightMatch[2] ?? '{}',
+            `page filter Gemini Image Proxy preflight ${label}`,
+          );
+
+          if (!parsedPreflight) {
+            return;
+          }
+
+          const failedCount =
+            typeof parsedPreflight.failed_url_count === 'number'
+              ? parsedPreflight.failed_url_count
+              : 0;
+          const logMethod = failedCount > 0 ? console.warn : console.info;
+
+          logMethod(
+            `[Batch Generate][${item.source_pdf_name}] 页面过滤 Gemini Image Proxy 预检 (${label})`,
+            parsedPreflight,
           );
           return;
         }

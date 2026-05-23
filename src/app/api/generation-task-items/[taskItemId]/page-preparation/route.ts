@@ -19,7 +19,6 @@ import {
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import {
   callGeminiNativeChatCompletion,
-  summarizeGeminiNativeRequestForTrace,
 } from '@/src/lib/llm/gemini-native';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
@@ -132,6 +131,95 @@ function formatBytes(bytes: number) {
   }
 
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function inspectGeminiImageProxyUrls(params: {
+  pages: PdfVisionPageInput[];
+  batchLabel: string;
+  signal: AbortSignal;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  const proxyFiles = params.pages.flatMap((page) =>
+    page.gemini_file?.uri
+      ? [
+          {
+            pageNumber: page.page_number,
+            originalPageNumber: page.original_page_number ?? page.page_number,
+            uri: page.gemini_file.uri,
+            expectedMimeType: page.gemini_file.mimeType,
+          },
+        ]
+      : [],
+  );
+
+  if (proxyFiles.length === 0) {
+    return;
+  }
+
+  const startedAt = Date.now();
+  const results = await Promise.all(
+    proxyFiles.map(async (file) => {
+      try {
+        const response = await undiciFetch(file.uri, {
+          method: 'HEAD',
+          dispatcher: llmFetchDispatcher,
+          signal: params.signal,
+        });
+        const contentType = response.headers.get('content-type');
+        const contentLength = response.headers.get('content-length');
+        const acceptRanges = response.headers.get('accept-ranges');
+
+        return {
+          page_number: file.pageNumber,
+          original_page_number: file.originalPageNumber,
+          ok: response.ok,
+          status: response.status,
+          status_text: response.statusText,
+          content_type: contentType,
+          content_length: contentLength,
+          accept_ranges: acceptRanges,
+          expected_mime_type: file.expectedMimeType,
+          is_image_content_type: Boolean(contentType?.startsWith('image/')),
+          url: file.uri,
+        };
+      } catch (error) {
+        return {
+          page_number: file.pageNumber,
+          original_page_number: file.originalPageNumber,
+          ok: false,
+          status: null,
+          status_text: null,
+          content_type: null,
+          content_length: null,
+          accept_ranges: null,
+          expected_mime_type: file.expectedMimeType,
+          is_image_content_type: false,
+          error_message: getErrorMessage(error),
+          url: file.uri,
+        };
+      }
+    }),
+  );
+  const failedResults = results.filter(
+    (result) => !result.ok || !result.is_image_content_type,
+  );
+
+  await params.onTrace?.({
+    message: `[PDF Fill][PageFilterGeminiProxyPreflight][${params.batchLabel}] ${JSON.stringify({
+      checked_url_count: results.length,
+      failed_url_count: failedResults.length,
+      duration_ms: Date.now() - startedAt,
+      results,
+    })}`,
+  });
+
+  if (failedResults.length > 0) {
+    throw new Error(
+      `Gemini image proxy preflight failed before page filtering: ${JSON.stringify(
+        failedResults,
+      )}`,
+    );
+  }
 }
 
 function getVercelMemoryUsageSnapshot(stage: string) {
@@ -527,12 +615,38 @@ async function classifyVisionPagesForSlotFill(params: {
 
       if (llmConfig.provider === 'gemini') {
         const requestLabel = `page filter batch ${batchIndex + 1}/${batches.length}`;
+        await inspectGeminiImageProxyUrls({
+          pages: batch,
+          batchLabel: `batch ${batchIndex + 1}/${batches.length}`,
+          signal: controller.signal,
+          onTrace: params.onTrace,
+        });
         const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
           requestLabel,
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
+          onGenerateContentRequestBody: async ({ requestBody: nativeRequestBody }) => {
+            await params.onTrace?.({
+              message: `[PDF Fill][PageFilterGeminiNativeRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
+                {
+                  route: '/api/generation-task-items/[taskItemId]/page-preparation',
+                  config_scope: 'VISION_LLM',
+                  model: traceConfig.model,
+                  provider: traceConfig.provider,
+                  request_label: requestLabel,
+                  request_mode: 'gemini_native_generate_content_proxy_url',
+                  candidate_proxy_file_count: batch.filter((page) => page.gemini_file)
+                    .length,
+                  proxy_file_uris: batch.flatMap((page) =>
+                    page.gemini_file?.uri ? [page.gemini_file.uri] : [],
+                  ),
+                  request_body: nativeRequestBody,
+                },
+              )}`,
+            });
+          },
           onTrace: params.onTrace,
         });
 
@@ -547,23 +661,6 @@ async function classifyVisionPagesForSlotFill(params: {
             page.page_number,
             toPageFilterGeminiFileReference(file, requestLabel),
           );
-        });
-
-        await params.onTrace?.({
-          message: `[PDF Fill][PageFilterGeminiNativeRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
-            {
-              route: '/api/generation-task-items/[taskItemId]/page-preparation',
-              config_scope: 'VISION_LLM',
-              model: traceConfig.model,
-              provider: traceConfig.provider,
-              request_label: requestLabel,
-              request_mode: 'gemini_native_generate_content_proxy_url',
-              candidate_proxy_file_count: batch.filter((page) => page.gemini_file)
-                .length,
-              retained_for_slot_fill_cleanup_later: true,
-              ...summarizeGeminiNativeRequestForTrace(geminiResult),
-            },
-          )}`,
         });
 
         payload = geminiResult.payload;
