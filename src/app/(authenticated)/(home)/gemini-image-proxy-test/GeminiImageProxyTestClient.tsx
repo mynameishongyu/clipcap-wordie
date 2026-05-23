@@ -23,7 +23,7 @@ const MIME_TYPE_OPTIONS = [
 ];
 
 export function GeminiImageProxyTestClient() {
-  const [storagePath, setStoragePath] = useState('');
+  const [storagePaths, setStoragePaths] = useState('');
   const [bucket, setBucket] = useState('generation-pdfs');
   const [mimeType, setMimeType] = useState('image/jpeg');
   const [isLoading, setIsLoading] = useState(false);
@@ -47,7 +47,10 @@ export function GeminiImageProxyTestClient() {
         },
         body: JSON.stringify({
           bucket,
-          storagePath,
+          storagePaths: storagePaths
+            .split(/\r?\n/)
+            .map((storagePath) => storagePath.trim())
+            .filter(Boolean),
           mimeType,
         }),
       });
@@ -77,7 +80,7 @@ export function GeminiImageProxyTestClient() {
         <Stack gap={4}>
           <Title order={2}>Gemini Image Proxy Test</Title>
           <Text c="dimmed" size="sm">
-            输入 Supabase Storage path，测试 Gemini 是否能读取 Vercel proxy URL。
+            输入一个或多个 Supabase Storage path，测试 Gemini 是否能在同一次请求中读取 Vercel proxy URL。
           </Text>
         </Stack>
 
@@ -90,11 +93,13 @@ export function GeminiImageProxyTestClient() {
             />
             <Textarea
               autosize
-              label="Storage path"
-              minRows={4}
-              placeholder="58166df4-.../fill-pdf-pages/.../page-3.jpg"
-              value={storagePath}
-              onChange={(event) => setStoragePath(event.currentTarget.value)}
+              label="Storage paths"
+              minRows={7}
+              placeholder={
+                '58166df4-.../fill-pdf-pages/.../page-1.jpg\n58166df4-.../fill-pdf-pages/.../page-2.jpg\n58166df4-.../fill-pdf-pages/.../page-3.jpg\n58166df4-.../fill-pdf-pages/.../page-4.jpg'
+              }
+              value={storagePaths}
+              onChange={(event) => setStoragePaths(event.currentTarget.value)}
             />
             <Select
               data={MIME_TYPE_OPTIONS}
@@ -104,7 +109,7 @@ export function GeminiImageProxyTestClient() {
             />
             <Group justify="flex-end">
               <Button
-                disabled={!storagePath.trim()}
+                disabled={!storagePaths.trim()}
                 loading={isLoading}
                 onClick={runTest}
               >

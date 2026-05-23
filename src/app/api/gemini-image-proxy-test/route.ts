@@ -84,17 +84,28 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     bucket?: string;
     storagePath?: string;
+    storagePaths?: string[];
     mimeType?: string;
   };
-  const storagePath = body.storagePath?.trim();
+  const storagePaths = (
+    Array.isArray(body.storagePaths)
+      ? body.storagePaths
+      : body.storagePath
+        ? body.storagePath.split(/\r?\n/)
+        : []
+  )
+    .map((storagePath) => storagePath.trim())
+    .filter(Boolean);
   const bucket = body.bucket?.trim() || DEFAULT_BUCKET;
-  const mimeType = body.mimeType?.trim() || (storagePath ? inferMimeType(storagePath) : '');
+  const mimeType =
+    body.mimeType?.trim() ||
+    (storagePaths[0] ? inferMimeType(storagePaths[0]) : '');
 
-  if (!storagePath) {
+  if (storagePaths.length === 0) {
     return NextResponse.json(
       {
         code: 'MISSING_STORAGE_PATH',
-        message: 'Storage path is required.',
+        message: 'At least one storage path is required.',
       },
       { status: 400 },
     );
@@ -121,35 +132,59 @@ export async function POST(request: Request) {
   }
 
   const llmConfig = getLlmRuntimeConfig('vision');
-  const proxyFile = createGeminiImageProxyFile({
-    bucket,
-    storagePath,
-    mimeType,
-    displayName: `gemini-image-proxy-test-${Date.now()}`,
-  });
-  const proxyFetch = await inspectProxyUrl(proxyFile.uri);
+  const proxyFiles = storagePaths.map((storagePath, index) =>
+    createGeminiImageProxyFile({
+      bucket,
+      storagePath,
+      mimeType: body.mimeType?.trim() || inferMimeType(storagePath),
+      displayName: `gemini-image-proxy-test-${index + 1}-${Date.now()}`,
+    }),
+  );
+  const proxyFetches = await Promise.all(
+    proxyFiles.map(async (proxyFile, index) => ({
+      index: index + 1,
+      storagePath: storagePaths[index],
+      proxyUrl: proxyFile.uri,
+      ...(await inspectProxyUrl(proxyFile.uri)),
+    })),
+  );
   const geminiStartedAt = Date.now();
 
   try {
+    const content: Array<
+      | { type: 'text'; text: string }
+      | {
+          type: 'gemini_file';
+          gemini_file: (typeof proxyFiles)[number];
+        }
+    > = [
+      {
+        type: 'text',
+        text: `Read these ${proxyFiles.length} image(s). Return compact JSON with {"can_read_all_images":true,"images":[{"index":1,"can_read_image":true,"brief_description":"..."}]}. If any image is not visible, mark can_read_image false for that index.`,
+      },
+    ];
+
+    proxyFiles.forEach((proxyFile, index) => {
+      content.push({
+        type: 'text',
+        text: `Image ${index + 1}, storage_path=${storagePaths[index]}`,
+      });
+      content.push({
+        type: 'gemini_file',
+        gemini_file: proxyFile,
+      });
+    });
+
     const requestBody = buildChatCompletionBody(llmConfig, {
       messages: [
         {
           role: 'system',
           content:
-            'You are testing whether an image URL can be fetched and read. Return compact JSON only.',
+            'You are testing whether image URLs can be fetched and read. Return compact JSON only.',
         },
         {
           role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: 'Read this image and return {"can_read_image":true,"brief_description":"..."} if visible. If not visible, return {"can_read_image":false,"brief_description":"..."}',
-            },
-            {
-              type: 'gemini_file',
-              gemini_file: proxyFile,
-            },
-          ],
+          content,
         },
       ],
     });
@@ -163,14 +198,18 @@ export async function POST(request: Request) {
     return NextResponse.json({
       input: {
         bucket,
-        storagePath,
+        storagePaths,
         mimeType,
+        imageCount: proxyFiles.length,
       },
-      proxy: {
+      proxies: proxyFiles.map((proxyFile, index) => ({
+        index: index + 1,
+        storagePath: storagePaths[index],
         url: proxyFile.uri,
         displayName: proxyFile.displayName,
-      },
-      proxyFetch,
+        mimeType: proxyFile.mimeType,
+      })),
+      proxyFetches,
       geminiFetch: {
         ok: true,
         model: llmConfig.model,
@@ -184,14 +223,18 @@ export async function POST(request: Request) {
     return NextResponse.json({
       input: {
         bucket,
-        storagePath,
+        storagePaths,
         mimeType,
+        imageCount: proxyFiles.length,
       },
-      proxy: {
+      proxies: proxyFiles.map((proxyFile, index) => ({
+        index: index + 1,
+        storagePath: storagePaths[index],
         url: proxyFile.uri,
         displayName: proxyFile.displayName,
-      },
-      proxyFetch,
+        mimeType: proxyFile.mimeType,
+      })),
+      proxyFetches,
       geminiFetch: {
         ok: false,
         model: llmConfig.model,
