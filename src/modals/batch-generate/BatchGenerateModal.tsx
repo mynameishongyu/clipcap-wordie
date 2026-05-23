@@ -3113,12 +3113,23 @@ export function BatchGenerateModal({
                       {['review_pending', 'reviewed'].includes(item.status) ? (
                         <>
                           <Divider />
-                          <Group justify="space-between" align="center">
-                            <Text c="dimmed" size="sm">
-                              {isReviewed
-                                ? '这个文件已经核查完毕，可以继续查看核查页或直接下载结果。'
-                                : '槽位结果已返回。可以先下载未核查结果，也可以进入核查页修改后再下载。'}
-                            </Text>
+                          <Group justify="space-between" align="flex-start">
+                            <Stack gap={4} style={{ flex: 1, minWidth: 260 }}>
+                              <Text
+                                c={isReviewed ? 'dimmed' : 'orange.8'}
+                                fw={isReviewed ? undefined : 600}
+                                size="sm"
+                              >
+                                {isReviewed
+                                  ? '这个文件已经核查完毕，可以继续查看核查页或直接下载结果。'
+                                  : '未核查下载有风险：当前内容尚未经过人工核查，可能存在填写不准确。'}
+                              </Text>
+                              {!isReviewed ? (
+                                <Text c="dimmed" size="sm">
+                                  建议先进入核查页确认；如需快速导出，也可以下载未核查结果。
+                                </Text>
+                              ) : null}
+                            </Stack>
                             <Group>
                               <Button
                                 radius="xl"
@@ -3154,7 +3165,6 @@ export function BatchGenerateModal({
                                     requestReviewedDocxDownload({
                                       taskItemId: item.id,
                                       defaultFileName: `${innerProps.templateName}-${item.source_pdf_name.replace(/\.pdf$/i, '')}-未核查结果.docx`,
-                                      requireUnreviewedWarning: true,
                                     });
                                   }}
                                 >
