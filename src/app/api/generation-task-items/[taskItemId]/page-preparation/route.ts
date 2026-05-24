@@ -21,6 +21,8 @@ import {
   callGeminiNativeChatCompletion,
 } from '@/src/lib/llm/gemini-native';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
+import { geminiPageFilterResponseSchema } from '@/src/lib/llm/gemini-json-schemas';
+import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
@@ -251,32 +253,17 @@ async function appendMemoryTrace(
   );
 }
 
-function normalizeJsonText(rawContent: string) {
-  const trimmed = rawContent.trim();
-  const withoutCodeFence = trimmed
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-  const firstBrace = withoutCodeFence.indexOf('{');
-  const lastBrace = withoutCodeFence.lastIndexOf('}');
-
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return withoutCodeFence.slice(firstBrace, lastBrace + 1);
-  }
-
-  return withoutCodeFence;
-}
-
 function parsePageFilterJson(rawContent: string) {
-  const parsed = JSON.parse(normalizeJsonText(rawContent)) as {
+  const parsed = parseModelJsonOutput<{
     pages?: Array<{
       page_number?: number | string;
       decision?: string;
       reason?: string;
       confidence?: number;
     }>;
-  };
+  }>(rawContent, {
+    context: 'Page filter JSON',
+  }).data;
 
   return (parsed.pages ?? [])
     .map((page): PageFilterDecision | null => {
@@ -627,6 +614,10 @@ async function classifyVisionPagesForSlotFill(params: {
           requestLabel,
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
+          structuredOutput: {
+            responseMimeType: 'application/json',
+            responseSchema: geminiPageFilterResponseSchema,
+          },
           onGenerateContentRequestBody: async ({ requestBody: nativeRequestBody }) => {
             await params.onTrace?.({
               message: `[PDF Fill][PageFilterGeminiNativeRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(

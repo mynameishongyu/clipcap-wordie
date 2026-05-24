@@ -6,6 +6,14 @@ import {
 } from '@/src/app/api/types/template-slot-extraction';
 import { getOptionalEnv, getTextLlmModel } from '@/src/lib/llm/env';
 import {
+  geminiTemplateSlotExtractionResponseSchema,
+  withGeminiOpenAiJsonResponseFormat,
+} from '@/src/lib/llm/gemini-json-schemas';
+import {
+  extractFirstCompleteJsonValue,
+  parseModelJsonOutput,
+} from '@/src/lib/llm/json-output';
+import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
@@ -259,25 +267,7 @@ function getRetryDelayMs(input: {
 }
 
 function normalizeJsonText(rawContent: string) {
-  const trimmed = rawContent.trim();
-  const withoutCodeFence = trimmed
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-
-  if (withoutCodeFence.startsWith('{') || withoutCodeFence.startsWith('[')) {
-    return withoutCodeFence;
-  }
-
-  const firstBrace = withoutCodeFence.indexOf('{');
-  const lastBrace = withoutCodeFence.lastIndexOf('}');
-
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return withoutCodeFence.slice(firstBrace, lastBrace + 1);
-  }
-
-  return withoutCodeFence;
+  return extractFirstCompleteJsonValue(rawContent);
 }
 
 function formatElapsedMs(ms: number) {
@@ -455,10 +445,18 @@ async function requestTextLlmJson(input: {
       const chatCompletionBody = buildChatCompletionBody(llmConfig, {
         messages,
       });
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        chatCompletionBody,
+        {
+          provider: llmConfig.provider,
+          name: 'template_slot_extraction',
+          schema: geminiTemplateSlotExtractionResponseSchema,
+        },
+      );
 
       await input.onTrace?.({
         message:
-          `[Template Extract][TextPrompt][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+          `[Template Extract][TextRequestBody][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
           stringifyTraceJson({
             route: '/api/template-extraction-tasks/[taskId]/process',
             config_scope: 'TEXT_LLM',
@@ -471,7 +469,7 @@ async function requestTextLlmJson(input: {
             paragraph_char_count: input.paragraphCharCount,
             attempt: attempt + 1,
             max_attempts: maxRetries + 1,
-            request_body: chatCompletionBody,
+            request_body: requestBody,
           }),
       });
 
@@ -483,7 +481,7 @@ async function requestTextLlmJson(input: {
         },
         dispatcher: templateExtractionFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify(chatCompletionBody),
+        body: JSON.stringify(requestBody),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -708,7 +706,9 @@ async function extractSlotsForParagraph(params: {
     concurrency: params.concurrency,
     onTrace: params.onTrace,
   });
-  const parsed = JSON.parse(rawJson);
+  const parsed = parseModelJsonOutput<unknown>(rawJson, {
+    context: 'Template slot extraction JSON',
+  }).data;
   const object = templateSlotExtractionResultSchema.parse(parsed);
   await params.onTrace?.({
     message:
@@ -806,7 +806,9 @@ async function extractSlotsForParagraphBatch(params: {
     concurrency: params.concurrency,
     onTrace: params.onTrace,
   });
-  const parsed = JSON.parse(rawJson);
+  const parsed = parseModelJsonOutput<unknown>(rawJson, {
+    context: 'Template slot extraction JSON',
+  }).data;
   const object = templateSlotExtractionResultSchema.parse(parsed);
   await params.onTrace?.({
     message:

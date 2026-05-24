@@ -138,40 +138,6 @@ function logTemplatePdfLocateLlmTrace(line: string) {
         ...(debugWindow.clipcapTemplatePdfLocatePrompts ?? []),
         payload,
       ];
-      browserProcessLog.info(label, payload);
-
-      const userPromptContent =
-        Array.isArray(payload.messages) &&
-        payload.messages.find(
-          (message) =>
-            !!message &&
-            typeof message === 'object' &&
-            (message as { role?: unknown }).role === 'user',
-        )
-          ? (
-              payload.messages.find(
-                (message) =>
-                  !!message &&
-                  typeof message === 'object' &&
-                  (message as { role?: unknown }).role === 'user',
-              ) as { content?: unknown }
-            ).content
-          : null;
-      const imageAttachmentList = formatVisionImageAttachmentList(
-        payload.image_placeholders,
-      );
-
-      if (imageAttachmentList) {
-        logConsoleTextChunks(
-          '[Template PDF Locate] VISION_LLM image attachments',
-          imageAttachmentList,
-        );
-      }
-
-      logConsoleTextChunks(
-        '[Template PDF Locate] VISION_LLM user prompt JSON',
-        JSON.stringify(userPromptContent, null, 2),
-      );
     } else if (line.includes(requestBodyMarker)) {
       debugWindow.clipcapTemplatePdfLocateActualRequestBodies = [
         ...(debugWindow.clipcapTemplatePdfLocateActualRequestBodies ?? []),
@@ -294,11 +260,13 @@ function formatTextLlmPromptPayload(payload: Record<string, unknown>) {
 
 function logTemplateExtractionLlmTrace(line: string) {
   const promptMarker = '[Template Extract][TextPrompt]';
+  const requestBodyMarker = '[Template Extract][TextRequestBody]';
   const rawMarker = '[Template Extract][LLM Raw Response]';
   const parsedMarker = '[Template Extract][LLM Parsed JSON]';
 
   if (
     !line.includes(promptMarker) &&
+    !line.includes(requestBodyMarker) &&
     !line.includes(rawMarker) &&
     !line.includes(parsedMarker)
   ) {
@@ -306,9 +274,11 @@ function logTemplateExtractionLlmTrace(line: string) {
   }
 
   const jsonStartIndex = line.indexOf('{');
-  const label = line.includes(promptMarker)
-    ? '[Template Extract][Text LLM Prompt]'
-    : line.includes(rawMarker)
+  const label = line.includes(requestBodyMarker)
+    ? '[Template Extract][Actual TEXT_LLM Request Body]'
+    : line.includes(promptMarker)
+      ? '[Template Extract][Text LLM Prompt]'
+      : line.includes(rawMarker)
       ? '[Template Extract][LLM Raw Response]'
       : '[Template Extract][LLM Parsed JSON]';
 
@@ -321,19 +291,30 @@ function logTemplateExtractionLlmTrace(line: string) {
     const payload = JSON.parse(line.slice(jsonStartIndex));
     const debugWindow = window as typeof window & {
       clipcapTemplateTextLlmPrompts?: unknown[];
+      clipcapTemplateTextLlmRequestBodies?: unknown[];
       clipcapTemplateTextLlmRawResponses?: unknown[];
       clipcapTemplateTextLlmParsedResults?: unknown[];
     };
 
-    if (line.includes(promptMarker)) {
+    if (line.includes(requestBodyMarker)) {
+      debugWindow.clipcapTemplateTextLlmRequestBodies = [
+        ...(debugWindow.clipcapTemplateTextLlmRequestBodies ?? []),
+        payload,
+      ];
+      browserProcessLog.info(label, payload);
+      logConsoleTextChunks(
+        '[Template Extract] Actual TEXT_LLM request body JSON',
+        JSON.stringify(
+          (payload as { request_body?: unknown }).request_body ?? payload,
+          null,
+          2,
+        ),
+      );
+    } else if (line.includes(promptMarker)) {
       debugWindow.clipcapTemplateTextLlmPrompts = [
         ...(debugWindow.clipcapTemplateTextLlmPrompts ?? []),
         payload,
       ];
-      logConsoleTextChunks(
-        '[Template Extract] TEXT_LLM prompt',
-        formatTextLlmPromptPayload(payload as Record<string, unknown>),
-      );
     } else if (line.includes(rawMarker)) {
       debugWindow.clipcapTemplateTextLlmRawResponses = [
         ...(debugWindow.clipcapTemplateTextLlmRawResponses ?? []),

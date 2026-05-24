@@ -5,6 +5,13 @@ import {
   callGeminiNativeChatCompletion,
   summarizeGeminiNativeRequestForTrace,
 } from '@/src/lib/llm/gemini-native';
+import {
+  geminiOcrPagesResponseSchema,
+  geminiPdfSlotFillResponseSchema,
+  geminiReferencePageAlignmentResponseSchema,
+  withGeminiOpenAiJsonResponseFormat,
+} from '@/src/lib/llm/gemini-json-schemas';
+import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
   buildChatCompletionBody,
@@ -237,28 +244,6 @@ function getDirectVisionPagesLlmConcurrency() {
   return Math.min(MAX_DIRECT_VISION_PAGES_LLM_CONCURRENCY, parsedValue);
 }
 
-function normalizeJsonText(rawContent: string) {
-  const trimmed = rawContent.trim();
-  const withoutCodeFence = trimmed
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-
-  if (withoutCodeFence.startsWith('{') || withoutCodeFence.startsWith('[')) {
-    return withoutCodeFence;
-  }
-
-  const firstBrace = withoutCodeFence.indexOf('{');
-  const lastBrace = withoutCodeFence.lastIndexOf('}');
-
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return withoutCodeFence.slice(firstBrace, lastBrace + 1);
-  }
-
-  return withoutCodeFence;
-}
-
 function repairCommonJsonBarewords(rawJson: string) {
   return rawJson
     .replace(
@@ -328,18 +313,10 @@ function escapeControlCharactersInsideJsonStrings(rawJson: string) {
 }
 
 function parseModelJson<T>(rawContent: string): T {
-  const normalized = normalizeJsonText(rawContent);
-  const repaired = escapeControlCharactersInsideJsonStrings(
-    repairCommonJsonBarewords(normalized),
-  );
-
-  try {
-    return JSON.parse(repaired) as T;
-  } catch (error) {
-    const preview = repaired.slice(0, 240);
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Model JSON parse failed: ${reason}. Snippet: ${preview}`);
-  }
+  return parseModelJsonOutput<T>(rawContent, {
+    context: 'Model JSON',
+    transformCandidate: repairCommonJsonBarewords,
+  }).data;
 }
 
 function normalizeSlotIdentifier(value: string | null | undefined) {
@@ -922,6 +899,59 @@ async function extractSlotWithTextModel(input: {
 
     try {
       const llmConfig = getLlmRuntimeConfig('vision');
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a PDF slot filling assistant. Extract only the current slot from the provided PDF text chunk. Return JSON only.',
+            },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                document_name: input.documentName,
+                slot_key: input.slot.slot_key,
+                slot_name: input.slot.field_category,
+                slot_source:
+                  input.slot.meaning_to_applicant ||
+                  getSlotSemanticHint(input.slot.field_category),
+                slot_hint:
+                  input.slot.meaning_to_applicant ||
+                  getSlotSemanticHint(input.slot.field_category),
+                reference_example_pdf_evidence: buildSlotReferencePromptData(
+                  input.slot,
+                ),
+                strict_requirement:
+                  'Return the exact same slot_key in results[0].slot_key. Use slot_source and reference_example_pdf_evidence as example clues from the reviewed template PDF, but extract final_value only from this new PDF text chunk. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
+                page_numbers: input.pageNumbers,
+                content: input.chunkText,
+                output_schema: {
+                  results: [
+                    {
+                      slot_key: input.slot.slot_key,
+                      slot_name: input.slot.field_category,
+                      final_value: 'final extracted value',
+                      matches: [
+                        {
+                          value: 'matched value',
+                          snippet: 'short supporting quote from the PDF text',
+                          page_number: 1,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }),
+            },
+          ],
+        }),
+        {
+          provider: llmConfig.provider,
+          name: 'pdf_slot_fill_text_single',
+          schema: geminiPdfSlotFillResponseSchema,
+        },
+      );
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
@@ -930,54 +960,7 @@ async function extractSlotWithTextModel(input: {
         },
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify(
-          buildChatCompletionBody(llmConfig, {
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a PDF slot filling assistant. Extract only the current slot from the provided PDF text chunk. Return JSON only.',
-              },
-              {
-                role: 'user',
-                content: JSON.stringify({
-                  document_name: input.documentName,
-                  slot_key: input.slot.slot_key,
-                  slot_name: input.slot.field_category,
-                  slot_source:
-                    input.slot.meaning_to_applicant ||
-                    getSlotSemanticHint(input.slot.field_category),
-                  slot_hint:
-                    input.slot.meaning_to_applicant ||
-                    getSlotSemanticHint(input.slot.field_category),
-                  reference_example_pdf_evidence: buildSlotReferencePromptData(
-                    input.slot,
-                  ),
-                  strict_requirement:
-                    'Return the exact same slot_key in results[0].slot_key. Use slot_source and reference_example_pdf_evidence as example clues from the reviewed template PDF, but extract final_value only from this new PDF text chunk. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
-                  page_numbers: input.pageNumbers,
-                  content: input.chunkText,
-                  output_schema: {
-                    results: [
-                      {
-                        slot_key: input.slot.slot_key,
-                        slot_name: input.slot.field_category,
-                        final_value: 'final extracted value',
-                        matches: [
-                          {
-                            value: 'matched value',
-                            snippet: 'short supporting quote from the PDF text',
-                            page_number: 1,
-                          },
-                        ],
-                      },
-                    ],
-                  },
-                }),
-              },
-            ],
-          }),
-        ),
+        body: JSON.stringify(requestBody),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -1224,6 +1207,38 @@ async function extractTextFromVisionPages(input: {
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are an OCR assistant for scanned PDF pages, screenshots, and financial system interfaces. Return JSON only. Be extremely careful with small digits, dates, amounts, identifiers, and table values. Never omit visible numeric content.',
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ],
+        }),
+        {
+          provider: llmConfig.provider,
+          name: 'pdf_fill_ocr_pages',
+          schema: geminiOcrPagesResponseSchema,
+        },
+      );
+      await input.onTrace?.({
+        message: `[PDF Fill][OcrRequestBody][${batchLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: llmConfig.provider,
+            request_label: `OCR ${batchLabel}`,
+            request_body: requestBody,
+          },
+        )}`,
+      });
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
@@ -1232,21 +1247,7 @@ async function extractTextFromVisionPages(input: {
         },
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify(
-          buildChatCompletionBody(llmConfig, {
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are an OCR assistant for scanned PDF pages, screenshots, and financial system interfaces. Return JSON only. Be extremely careful with small digits, dates, amounts, identifiers, and table values. Never omit visible numeric content.',
-              },
-              {
-                role: 'user',
-                content,
-              },
-            ],
-          }),
-        ),
+        body: JSON.stringify(requestBody),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -1896,34 +1897,6 @@ async function extractAllSlotsWithTextModel(input: {
         chunkText: input.chunkText,
       });
       const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
-      await input.onTrace?.({
-        message: `[PDF Fill][VisionPrompt][${requestLabel}] ${stringifyTraceJson(
-          {
-            route: '/api/generation-task-items/[taskItemId]/slot-fill',
-            config_scope: 'VISION_LLM',
-            model: getVisionLlmModel(),
-            provider: visionTraceConfig.provider,
-            model_env_name: visionTraceConfig.modelEnvName,
-            thinking_enabled_env_name: visionTraceConfig.thinkingEnabledEnvName,
-            thinking_enabled: visionTraceConfig.thinkingEnabled,
-            reasoning_effort_env_name: visionTraceConfig.reasoningEffortEnvName,
-            reasoning_effort: visionTraceConfig.reasoningEffort,
-            extra_body: visionTraceConfig.extraBody,
-            request_label: requestLabel,
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
-              },
-              {
-                role: 'user',
-                content: promptPayload,
-              },
-            ],
-          },
-        )}`,
-      });
       const requestStartedMessage =
         `[PDF Fill][Vision] Starting ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix(
@@ -1976,6 +1949,68 @@ async function extractAllSlotsWithTextModel(input: {
       }, 15000);
 
       const llmConfig = getLlmRuntimeConfig('vision');
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
+            },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                document_name: input.documentName,
+                slot_names: input.slots.map((slot) => slot.field_category),
+                slot_definitions: input.slots.map((slot) =>
+                  buildSlotDefinitionForPrompt(slot),
+                ),
+                strict_requirement:
+                  'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+                page_numbers: input.pageNumbers,
+                content: input.chunkText,
+                output_schema: {
+                  results: input.slots.map((slot) => ({
+                    slot_key: slot.slot_key,
+                    slot_name: slot.field_category,
+                    final_value: 'final extracted value',
+                    matches: [
+                      {
+                        value: 'matched value',
+                        snippet: 'short supporting quote from the PDF text',
+                        page_number: 1,
+                      },
+                    ],
+                  })),
+                },
+              }),
+            },
+          ],
+        }),
+        {
+          provider: llmConfig.provider,
+          name: 'pdf_slot_fill_text_batch',
+          schema: geminiPdfSlotFillResponseSchema,
+        },
+      );
+      await input.onTrace?.({
+        message: `[PDF Fill][VisionRequestBody][${requestLabel}] ${stringifyTraceJson(
+          {
+            route: '/api/generation-task-items/[taskItemId]/slot-fill',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: visionTraceConfig.provider,
+            model_env_name: visionTraceConfig.modelEnvName,
+            thinking_enabled_env_name: visionTraceConfig.thinkingEnabledEnvName,
+            thinking_enabled: visionTraceConfig.thinkingEnabled,
+            reasoning_effort_env_name: visionTraceConfig.reasoningEffortEnvName,
+            reasoning_effort: visionTraceConfig.reasoningEffort,
+            extra_body: visionTraceConfig.extraBody,
+            request_label: requestLabel,
+            request_body: requestBody,
+          },
+        )}`,
+      });
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
         headers: {
@@ -1984,45 +2019,7 @@ async function extractAllSlotsWithTextModel(input: {
         },
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
-        body: JSON.stringify(
-          buildChatCompletionBody(llmConfig, {
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a PDF slot filling assistant. Extract slot values from the provided PDF text chunk. Return JSON only.',
-              },
-              {
-                role: 'user',
-                content: JSON.stringify({
-                  document_name: input.documentName,
-                  slot_names: input.slots.map((slot) => slot.field_category),
-                  slot_definitions: input.slots.map((slot) =>
-                    buildSlotDefinitionForPrompt(slot),
-                  ),
-                  strict_requirement:
-                    'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
-                  page_numbers: input.pageNumbers,
-                  content: input.chunkText,
-                  output_schema: {
-                    results: input.slots.map((slot) => ({
-                      slot_key: slot.slot_key,
-                      slot_name: slot.field_category,
-                      final_value: 'final extracted value',
-                      matches: [
-                        {
-                          value: 'matched value',
-                          snippet: 'short supporting quote from the PDF text',
-                          page_number: 1,
-                        },
-                      ],
-                    })),
-                  },
-                }),
-              },
-            ],
-          }),
-        ),
+        body: JSON.stringify(requestBody),
       } as UndiciFetchInit);
 
       if (!upstream.ok) {
@@ -2588,6 +2585,10 @@ async function alignReferencePagesToVisionPages(input: {
           requestLabel: 'reference page alignment',
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
+          structuredOutput: {
+            responseMimeType: 'application/json',
+            responseSchema: geminiReferencePageAlignmentResponseSchema,
+          },
           onTrace: input.onTrace,
         });
 
@@ -3096,6 +3097,10 @@ async function extractSlotsFromVisionPageBatch(input: {
           requestLabel,
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
+          structuredOutput: {
+            responseMimeType: 'application/json',
+            responseSchema: geminiPdfSlotFillResponseSchema,
+          },
           onTrace: input.onTrace,
         });
 

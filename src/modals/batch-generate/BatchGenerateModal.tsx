@@ -94,6 +94,16 @@ declare global {
       label: string;
       data: Record<string, unknown>;
     }>;
+    clipcapPageFilterRequestBodies?: Array<{
+      fileName: string;
+      label: string;
+      data: Record<string, unknown>;
+    }>;
+    clipcapOcrRequestBodies?: Array<{
+      fileName: string;
+      label: string;
+      data: Record<string, unknown>;
+    }>;
     clipcapPageFilterResults?: Array<{
       fileName: string;
       label: string;
@@ -1095,6 +1105,12 @@ export function BatchGenerateModal({
         const slotFillPromptMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextPrompt\]\[([^\]]+)\] (.+)$/,
         );
+        const slotFillVisionRequestBodyMatch = traceLine.match(
+          /^(?:\[PDF Fill\])?\[VisionRequestBody\]\[([^\]]+)\] (.+)$/,
+        );
+        const ocrRequestBodyMatch = traceLine.match(
+          /^\[PDF Fill\]\[OcrRequestBody\]\[([^\]]+)\] (.+)$/,
+        );
         const slotFillPromptPreviewMatch = traceLine.match(
           /^(?:\[PDF Fill\])?\[TextPromptPreview\]\[([^\]]+)\] (.+)$/,
         );
@@ -1276,69 +1292,14 @@ export function BatchGenerateModal({
             return left.fileName.localeCompare(right.fileName);
           });
 
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM prompt (${label})`,
-            parsedPrompt,
-          );
-
-          const userPromptContent =
-            Array.isArray(parsedPrompt.messages) &&
-            parsedPrompt.messages.find(
-              (message) =>
-                !!message &&
-                typeof message === 'object' &&
-                (message as { role?: unknown }).role === 'user',
-            )
-              ? (
-                  parsedPrompt.messages.find(
-                    (message) =>
-                      !!message &&
-                      typeof message === 'object' &&
-                      (message as { role?: unknown }).role === 'user',
-                  ) as { content?: unknown }
-                ).content
-              : null;
-
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM user prompt content (${label})`,
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter prompt metadata stored (${label}); actual Gemini request body is logged separately.`,
             {
               route: parsedPrompt.route,
               model: parsedPrompt.model,
               provider: parsedPrompt.provider,
               requestLabel: parsedPrompt.request_label,
-              imagePayload: parsedPrompt.image_payload,
-              imagePlaceholders: parsedPrompt.image_placeholders,
-              dropExamples: parsedPrompt.drop_examples,
-              prompt: userPromptContent,
             },
-          );
-
-          const imageAttachmentList = formatVisionImageAttachmentList(
-            parsedPrompt.image_placeholders,
-          );
-
-          if (imageAttachmentList) {
-            logConsoleTextChunks(
-              `[Batch Generate][${item.source_pdf_name}] PDF page filter candidate image attachments (${label})`,
-              imageAttachmentList,
-            );
-          }
-
-          const dropExampleAttachmentList =
-            formatPageFilterDropExampleAttachmentList(
-              parsedPrompt.drop_examples,
-            );
-
-          if (dropExampleAttachmentList) {
-            logConsoleTextChunks(
-              `[Batch Generate][${item.source_pdf_name}] PDF page filter drop example attachments (${label})`,
-              dropExampleAttachmentList,
-            );
-          }
-
-          logConsoleTextChunks(
-            `[Batch Generate][${item.source_pdf_name}] PDF page filter VISION_LLM user prompt JSON (${label})`,
-            JSON.stringify(userPromptContent, null, 2),
           );
           return;
         }
@@ -1407,9 +1368,36 @@ export function BatchGenerateModal({
             return;
           }
 
+          const currentEntries = window.clipcapPageFilterRequestBodies ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedRequest,
+          });
+          window.clipcapPageFilterRequestBodies = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.label.localeCompare(right.label);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
           console.log(
             `[Batch Generate][${item.source_pdf_name}] PDF page filter Gemini Image Proxy request (${label})`,
             parsedRequest,
+          );
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] PDF page filter actual Gemini request body JSON (${label})`,
+            JSON.stringify(parsedRequest.request_body ?? parsedRequest, null, 2),
           );
           return;
         }
@@ -1490,55 +1478,14 @@ export function BatchGenerateModal({
             },
           );
 
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] Reference page alignment prompt`,
-            parsedPrompt,
-          );
-
-          const userPromptContent =
-            Array.isArray(parsedPrompt.messages) &&
-            parsedPrompt.messages.find(
-              (message) =>
-                !!message &&
-                typeof message === 'object' &&
-                (message as { role?: unknown }).role === 'user',
-            )
-              ? (
-                  parsedPrompt.messages.find(
-                    (message) =>
-                      !!message &&
-                      typeof message === 'object' &&
-                      (message as { role?: unknown }).role === 'user',
-                  ) as { content?: unknown }
-                ).content
-              : null;
-
-          const imageAttachmentList = formatVisionImageAttachmentList(
-            parsedPrompt.image_placeholders,
-          );
-
-          if (imageAttachmentList) {
-            logConsoleTextChunks(
-              `[Batch Generate][${item.source_pdf_name}] Reference page alignment new PDF image attachments`,
-              imageAttachmentList,
-            );
-          }
-
-          const referenceImageAttachmentList =
-            formatReferenceImageAttachmentList(
-              parsedPrompt.reference_image_placeholders,
-            );
-
-          if (referenceImageAttachmentList) {
-            logConsoleTextChunks(
-              `[Batch Generate][${item.source_pdf_name}] Reference page alignment reference image attachments`,
-              referenceImageAttachmentList,
-            );
-          }
-
-          logConsoleTextChunks(
-            `[Batch Generate][${item.source_pdf_name}] Reference page alignment user prompt JSON`,
-            JSON.stringify(userPromptContent, null, 2),
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Reference page alignment prompt metadata stored; actual Gemini request body is logged separately.`,
+            {
+              route: parsedPrompt.route,
+              model: parsedPrompt.model,
+              provider: parsedPrompt.provider,
+              requestLabel: parsedPrompt.request_label,
+            },
           );
           return;
         }
@@ -1813,65 +1760,13 @@ export function BatchGenerateModal({
             return left.fileName.localeCompare(right.fileName);
           });
 
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill prompt (${label})`,
-            parsedPrompt,
-          );
-          const userPromptContent = parsedPrompt.messages?.find(
-            (message) => message.role === 'user',
-          )?.content;
-          const slotDefinitionCount =
-            userPromptContent &&
-            typeof userPromptContent === 'object' &&
-            !Array.isArray(userPromptContent) &&
-            Array.isArray(
-              (userPromptContent as { slot_definitions?: unknown })
-                .slot_definitions,
-            )
-              ? (userPromptContent as { slot_definitions: unknown[] })
-                  .slot_definitions.length
-              : null;
-
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill user prompt content (${label})`,
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill prompt metadata stored (${label}); actual Gemini request body is logged separately.`,
             {
               route: parsedPrompt.route,
               model: parsedPrompt.model,
               requestLabel: parsedPrompt.request_label,
-              slotDefinitionCount,
-              imagePayload: parsedPrompt.image_payload,
-              imagePlaceholders: parsedPrompt.image_placeholders,
-              referenceImagePlaceholders:
-                parsedPrompt.reference_image_placeholders,
-              prompt: userPromptContent,
             },
-          );
-          const imageAttachmentList = formatVisionImageAttachmentList(
-            parsedPrompt.image_placeholders,
-          );
-
-          if (imageAttachmentList) {
-            logConsoleTextChunks(
-              `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill image attachments (${label})`,
-              imageAttachmentList,
-            );
-          }
-
-          const referenceImageAttachmentList =
-            formatReferenceImageAttachmentList(
-              parsedPrompt.reference_image_placeholders,
-            );
-
-          if (referenceImageAttachmentList) {
-            logConsoleTextChunks(
-              `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill reference image attachments (${label})`,
-              referenceImageAttachmentList,
-            );
-          }
-
-          logConsoleTextChunks(
-            `[Batch Generate][${item.source_pdf_name}] Direct VISION slot-fill user prompt JSON (${label})`,
-            JSON.stringify(userPromptContent, null, 2),
           );
           return;
         }
@@ -2149,6 +2044,103 @@ export function BatchGenerateModal({
           return;
         }
 
+        if (slotFillVisionRequestBodyMatch) {
+          const label = slotFillVisionRequestBodyMatch[1] ?? 'Full';
+          const parsedRequestBody = parseTraceJson<Record<string, unknown>>(
+            slotFillVisionRequestBodyMatch[2] ?? '{}',
+            `slot fill vision request body ${label}`,
+          );
+
+          if (!parsedRequestBody) {
+            return;
+          }
+
+          const currentEntries =
+            window.clipcapSlotFillActualRequestBodies ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedRequestBody,
+          });
+          window.clipcapSlotFillActualRequestBodies = nextEntries.sort(
+            (left, right) => {
+              if (left.fileName === right.fileName) {
+                return left.label.localeCompare(right.label);
+              }
+
+              return left.fileName.localeCompare(right.fileName);
+            },
+          );
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill actual Gemini request body (${label})`,
+            parsedRequestBody,
+          );
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill actual Gemini request body JSON (${label})`,
+            JSON.stringify(
+              parsedRequestBody.request_body ?? parsedRequestBody,
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+
+        if (ocrRequestBodyMatch) {
+          const label = ocrRequestBodyMatch[1] ?? 'batch';
+          const parsedRequestBody = parseTraceJson<Record<string, unknown>>(
+            ocrRequestBodyMatch[2] ?? '{}',
+            `OCR request body ${label}`,
+          );
+
+          if (!parsedRequestBody) {
+            return;
+          }
+
+          const currentEntries = window.clipcapOcrRequestBodies ?? [];
+          const nextEntries = currentEntries.filter(
+            (entry) =>
+              !(
+                entry.fileName === item.source_pdf_name && entry.label === label
+              ),
+          );
+
+          nextEntries.push({
+            fileName: item.source_pdf_name,
+            label,
+            data: parsedRequestBody,
+          });
+          window.clipcapOcrRequestBodies = nextEntries.sort((left, right) => {
+            if (left.fileName === right.fileName) {
+              return left.label.localeCompare(right.label);
+            }
+
+            return left.fileName.localeCompare(right.fileName);
+          });
+
+          console.log(
+            `[Batch Generate][${item.source_pdf_name}] OCR actual Gemini request body (${label})`,
+            parsedRequestBody,
+          );
+          logConsoleTextChunks(
+            `[Batch Generate][${item.source_pdf_name}] OCR actual Gemini request body JSON (${label})`,
+            JSON.stringify(
+              parsedRequestBody.request_body ?? parsedRequestBody,
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+
         if (slotFillPromptMatch) {
           const label = slotFillPromptMatch[1] ?? 'Full';
           const parsedPrompt = JSON.parse(slotFillPromptMatch[2] ?? '{}') as {
@@ -2182,12 +2174,15 @@ export function BatchGenerateModal({
             return left.fileName.localeCompare(right.fileName);
           });
 
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill prompt via ${
-              parsedPrompt.route ??
-              '/api/generation-task-items/[taskItemId]/slot-fill'
-            } (${label})`,
-            parsedPrompt,
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill prompt metadata stored (${label}); actual Gemini request body is logged separately.`,
+            {
+              route:
+                parsedPrompt.route ??
+                '/api/generation-task-items/[taskItemId]/slot-fill',
+              model: parsedPrompt.model,
+              requestLabel: parsedPrompt.request_label,
+            },
           );
           return;
         }
@@ -2206,12 +2201,15 @@ export function BatchGenerateModal({
             }>;
           };
 
-          console.log(
-            `[Batch Generate][${item.source_pdf_name}] Slot fill prompt preview via ${
-              parsedPrompt.route ??
-              '/api/generation-task-items/[taskItemId]/slot-fill'
-            } (${label})`,
-            parsedPrompt,
+          console.info(
+            `[Batch Generate][${item.source_pdf_name}] Slot fill prompt preview metadata stored (${label}); actual Gemini request body is logged separately.`,
+            {
+              route:
+                parsedPrompt.route ??
+                '/api/generation-task-items/[taskItemId]/slot-fill',
+              requestLabel: parsedPrompt.request_label,
+              documentName: parsedPrompt.document_name,
+            },
           );
           return;
         }

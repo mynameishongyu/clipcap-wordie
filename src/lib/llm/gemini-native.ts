@@ -27,6 +27,52 @@ interface GeminiNativeChatCompletionBody {
   }>;
 }
 
+interface GeminiNativeStructuredOutputConfig {
+  responseMimeType: 'application/json';
+  responseSchema?: unknown;
+}
+
+function toGeminiResponseSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map((item) => toGeminiResponseSchema(item));
+  }
+
+  if (!schema || typeof schema !== 'object') {
+    return schema;
+  }
+
+  const source = schema as Record<string, unknown>;
+  const converted: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(source)) {
+    if (key === 'type') {
+      const rawType = Array.isArray(value)
+        ? value.find((entry) => entry !== 'null')
+        : value;
+
+      converted.type =
+        typeof rawType === 'string' ? rawType.toUpperCase() : rawType;
+      continue;
+    }
+
+    if (key === 'properties' && value && typeof value === 'object') {
+      converted.properties = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(
+          ([propertyKey, propertySchema]) => [
+            propertyKey,
+            toGeminiResponseSchema(propertySchema),
+          ],
+        ),
+      );
+      continue;
+    }
+
+    converted[key] = toGeminiResponseSchema(value);
+  }
+
+  return converted;
+}
+
 function resolveGeminiGenerateBaseUrl(config: LlmRuntimeConfig) {
   const url = new URL(config.baseUrl || 'https://generativelanguage.googleapis.com');
 
@@ -50,7 +96,10 @@ function parseDataImageUrl(url: string) {
   };
 }
 
-function buildGeminiNativeRequestBody(body: GeminiNativeChatCompletionBody) {
+function buildGeminiNativeRequestBody(
+  body: GeminiNativeChatCompletionBody,
+  structuredOutput?: GeminiNativeStructuredOutputConfig,
+) {
   const systemTexts: string[] = [];
   const contents = body.messages
     .flatMap((message) => {
@@ -114,6 +163,20 @@ function buildGeminiNativeRequestBody(body: GeminiNativeChatCompletionBody) {
       ? { system_instruction: { parts: [{ text: systemTexts.join('\n\n') }] } }
       : {}),
     contents,
+    ...(structuredOutput
+      ? {
+          generationConfig: {
+            response_mime_type: structuredOutput.responseMimeType,
+            ...(structuredOutput.responseSchema
+              ? {
+                  response_schema: toGeminiResponseSchema(
+                    structuredOutput.responseSchema,
+                  ),
+                }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -125,6 +188,7 @@ export async function callGeminiNativeChatCompletion(params: {
   requestLabel?: string;
   dispatcher?: GeminiNativeDispatcher;
   signal?: AbortSignal;
+  structuredOutput?: GeminiNativeStructuredOutputConfig;
   onGenerateContentRequestBody?: (entry: {
     requestBody: GeminiNativeRequestBody;
   }) => Promise<void> | void;
@@ -132,7 +196,10 @@ export async function callGeminiNativeChatCompletion(params: {
 }) {
   const requestLabel = params.requestLabel ?? 'gemini native vision request';
   const callStartedAt = Date.now();
-  const requestBody = buildGeminiNativeRequestBody(params.body);
+  const requestBody = buildGeminiNativeRequestBody(
+    params.body,
+    params.structuredOutput,
+  );
 
   await params.onGenerateContentRequestBody?.({ requestBody });
   await params.onTrace?.({
@@ -140,6 +207,12 @@ export async function callGeminiNativeChatCompletion(params: {
       request_label: requestLabel,
       model: params.config.model,
       content_count: requestBody.contents.length,
+      structured_output: params.structuredOutput
+        ? {
+            response_mime_type: params.structuredOutput.responseMimeType,
+            has_response_schema: Boolean(params.structuredOutput.responseSchema),
+          }
+        : null,
     })}`,
   });
 

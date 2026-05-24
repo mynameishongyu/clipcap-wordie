@@ -10,6 +10,14 @@ import {
   summarizeGeminiNativeRequestForTrace,
 } from '@/src/lib/llm/gemini-native';
 import {
+  geminiTemplatePdfLocateResponseSchema,
+  withGeminiOpenAiJsonResponseFormat,
+} from '@/src/lib/llm/gemini-json-schemas';
+import {
+  buildJsonParseCandidates,
+  extractFirstCompleteJsonValue,
+} from '@/src/lib/llm/json-output';
+import {
   buildChatCompletionHeaders,
   buildChatCompletionBody,
   getLlmRuntimeConfig,
@@ -251,13 +259,6 @@ function splitPagesByConcurrency<T>(items: T[], concurrency: number) {
   return chunks;
 }
 
-function normalizeJsonText(rawContent: string) {
-  const trimmed = rawContent.trim();
-  const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-
-  return fencedMatch?.[1]?.trim() ?? trimmed;
-}
-
 function tryParseJson<T>(rawContent: string) {
   try {
     return {
@@ -272,94 +273,12 @@ function tryParseJson<T>(rawContent: string) {
   }
 }
 
-function extractJsonObjectCandidate(rawContent: string) {
-  const firstBraceIndex = rawContent.indexOf('{');
-  const lastBraceIndex = rawContent.lastIndexOf('}');
-
-  if (
-    firstBraceIndex < 0 ||
-    lastBraceIndex < 0 ||
-    lastBraceIndex <= firstBraceIndex
-  ) {
-    return rawContent;
-  }
-
-  return rawContent.slice(firstBraceIndex, lastBraceIndex + 1);
-}
-
-function balanceJsonClosers(rawContent: string) {
-  let inString = false;
-  let escaped = false;
-  const stack: Array<'}' | ']'> = [];
-
-  for (const character of rawContent) {
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (character === '\\') {
-      escaped = true;
-      continue;
-    }
-
-    if (character === '"') {
-      inString = !inString;
-      continue;
-    }
-
-    if (inString) {
-      continue;
-    }
-
-    if (character === '{') {
-      stack.push('}');
-      continue;
-    }
-
-    if (character === '[') {
-      stack.push(']');
-      continue;
-    }
-
-    if (character === '}' || character === ']') {
-      const expected = stack.at(-1);
-
-      if (expected === character) {
-        stack.pop();
-      }
-    }
-  }
-
-  const withoutDanglingSeparator = rawContent.replace(/[\s,\uFF0C]+$/u, '');
-
-  return `${withoutDanglingSeparator}${stack.reverse().join('')}`;
-}
-
 function buildLocalJsonRepairCandidates(rawContent: string) {
-  const normalized = normalizeJsonText(rawContent);
-  const extracted = extractJsonObjectCandidate(normalized);
-  const normalizedPunctuation = extracted
-    .replace(/\uFF0C/gu, ',')
-    .replace(/\uFF1A/gu, ':');
-  const withoutTrailingCommas = normalizedPunctuation.replace(
-    /,\s*([}\]])/gu,
-    '$1',
-  );
-
-  return Array.from(
-    new Set([
-      normalized,
-      extracted,
-      normalizedPunctuation,
-      withoutTrailingCommas,
-      balanceJsonClosers(withoutTrailingCommas),
-    ]),
-  );
+  return buildJsonParseCandidates(rawContent);
 }
 
 function buildJsonParseFailureMessage(error: unknown, rawContent: string) {
-  const preview = normalizeJsonText(rawContent).slice(0, 240);
+  const preview = extractFirstCompleteJsonValue(rawContent).slice(0, 240);
   const reason = error instanceof Error ? error.message : String(error);
 
   return `Vision location JSON parse failed: ${reason}. Snippet: ${preview}`;
@@ -402,32 +321,38 @@ async function repairVisionLocationJsonWithLlm(input: {
   await input.onTrace?.({ message: startedMessage });
 
   try {
+    const requestBody = withGeminiOpenAiJsonResponseFormat(
+      buildChatCompletionBody(llmConfig, {
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You repair malformed JSON. Return compact valid JSON only. Do not add markdown, comments, explanations, or fields that were not implied by the input.',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              task: 'Repair this malformed vision-location response into JSON that can be parsed by JSON.parse. Preserve all valid matches. If a trailing match is incomplete, drop only that incomplete match. Output exactly {"matches":[...]} and nothing else.',
+              parse_error: input.parseError.message,
+              required_schema:
+                '{"matches":[{"slot_key":"string","page_number":number,"bbox_target":"text|cell","bbox":{"x":number,"y":number,"width":number,"height":number},"box_2d":[number,number,number,number],"bbox_2d":[number,number,number,number],"evidence_text":"string","confidence":number}]}',
+              malformed_json: input.rawContent,
+            }),
+          },
+        ],
+      }),
+      {
+        provider: llmConfig.provider,
+        name: 'template_pdf_locate_json_repair',
+        schema: geminiTemplatePdfLocateResponseSchema,
+      },
+    );
     const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
       method: 'POST',
       headers: buildChatCompletionHeaders(llmConfig),
       dispatcher: visionLocateFetchDispatcher,
       signal: controller.signal,
-      body: JSON.stringify(
-        buildChatCompletionBody(llmConfig, {
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You repair malformed JSON. Return compact valid JSON only. Do not add markdown, comments, explanations, or fields that were not implied by the input.',
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                task: 'Repair this malformed vision-location response into JSON that can be parsed by JSON.parse. Preserve all valid matches. If a trailing match is incomplete, drop only that incomplete match. Output exactly {"matches":[...]} and nothing else.',
-                parse_error: input.parseError.message,
-                required_schema:
-                  '{"matches":[{"slot_key":"string","page_number":number,"bbox_target":"text|cell","bbox":{"x":number,"y":number,"width":number,"height":number},"box_2d":[number,number,number,number],"bbox_2d":[number,number,number,number],"evidence_text":"string","confidence":number}]}',
-                malformed_json: input.rawContent,
-              }),
-            },
-          ],
-        }),
-      ),
+      body: JSON.stringify(requestBody),
     } as UndiciFetchInit);
 
     if (!upstream.ok) {
@@ -1283,6 +1208,10 @@ async function locateSlotsInPageBatch(input: {
         requestLabel,
         dispatcher: visionLocateFetchDispatcher,
         signal: controller.signal,
+        structuredOutput: {
+          responseMimeType: 'application/json',
+          responseSchema: geminiTemplatePdfLocateResponseSchema,
+        },
         onGenerateContentRequestBody: async ({ requestBody: geminiRequestBody }) => {
           await input.onTrace?.({
             message:
