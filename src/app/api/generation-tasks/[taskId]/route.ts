@@ -18,6 +18,7 @@ type GenerationTaskItemListRecord = {
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;
+  updated_at?: string | null;
   reviewed_at?: string | null;
   output_docx_path?: string | null;
   error_message?: string | null;
@@ -145,7 +146,7 @@ export async function GET(
     }
 
     const itemSelect =
-      'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, reviewed_at, output_docx_path, error_message, llm_input';
+      'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input';
 
     let { data: items, error: itemsError } = await supabase
       .from('generation_task_items')

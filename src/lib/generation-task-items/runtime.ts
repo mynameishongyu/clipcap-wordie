@@ -57,6 +57,7 @@ export type GenerationTaskItemRecord = {
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;
+  updated_at?: string | null;
   reviewed_at?: string | null;
   output_docx_path?: string | null;
   error_message?: string | null;
@@ -92,7 +93,7 @@ export type GenerationTaskItemRecord = {
 };
 
 export const generationTaskItemSelect =
-  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, reviewed_at, output_docx_path, error_message, llm_input';
+  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input';
 
 export const GENERATION_TASK_ITEM_RUNNING_STATUSES = [
   'uploaded',
@@ -429,15 +430,25 @@ export async function markTimedOutGenerationTaskItems(params: {
     elapsed_seconds: number;
     started_at?: string | null;
     finished_at?: string | null;
+    updated_at?: string | null;
   }>;
 }) {
   const now = Date.now();
   const timedOutItems = params.items.filter((item) => {
-    if (!isGenerationTaskItemRunningStatus(item.status) || !item.started_at) {
+    if (!isGenerationTaskItemRunningStatus(item.status)) {
       return false;
     }
 
-    const startedAtMs = Date.parse(item.started_at);
+    const timeoutAnchor =
+      item.status === 'slot_filling' || item.status === 'page_preparing'
+        ? item.updated_at ?? item.started_at
+        : item.started_at ?? item.updated_at;
+
+    if (!timeoutAnchor) {
+      return false;
+    }
+
+    const startedAtMs = Date.parse(timeoutAnchor);
 
     if (!Number.isFinite(startedAtMs)) {
       return false;

@@ -13,6 +13,7 @@ export const generationTaskItemSummarySchema = z.object({
   created_at: z.string(),
   started_at: z.string().nullable().optional(),
   finished_at: z.string().nullable().optional(),
+  updated_at: z.string().nullable().optional(),
   reviewed_at: z.string().nullable().optional(),
   output_docx_path: z.string().nullable().optional(),
   error_message: z.string().nullable().optional(),

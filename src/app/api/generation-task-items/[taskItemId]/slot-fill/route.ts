@@ -583,6 +583,7 @@ async function runGenerationTaskItemSlotFill(params: {
         error_message: null,
         started_at: pipelineStartedAt.toISOString(),
         finished_at: null,
+        updated_at: startedAt.toISOString(),
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
       })
@@ -1058,6 +1059,8 @@ export async function POST(
       });
     });
 
+    const phaseStartedAt = new Date().toISOString();
+
     return NextResponse.json(
       {
         data: {
@@ -1065,6 +1068,7 @@ export async function POST(
             ...nextItem,
             status: 'slot_filling',
             error_message: null,
+            updated_at: phaseStartedAt,
           },
         },
       },

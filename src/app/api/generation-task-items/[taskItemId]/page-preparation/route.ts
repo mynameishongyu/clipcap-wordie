@@ -767,6 +767,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         error_message: null,
         started_at: params.item.started_at ?? startedAt.toISOString(),
         finished_at: null,
+        updated_at: startedAt.toISOString(),
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
         processing_trace: '',
@@ -1008,6 +1009,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         },
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', params.item.id)
       .select('id, status')
@@ -1236,6 +1238,8 @@ export async function POST(
       });
     });
 
+    const phaseStartedAt = new Date().toISOString();
+
     return NextResponse.json(
       {
         data: {
@@ -1248,6 +1252,7 @@ export async function POST(
             slot_completed_count: 0,
             processing_trace: '',
             error_message: null,
+            updated_at: phaseStartedAt,
           },
         },
       },
