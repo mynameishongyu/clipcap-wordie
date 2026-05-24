@@ -125,14 +125,10 @@ function buildGeminiNativeRequestBody(
     ...(structuredOutput
       ? {
           generationConfig: {
-            responseFormat: {
-              text: {
-                mimeType: structuredOutput.responseMimeType,
-                ...(structuredOutput.responseSchema
-                  ? { schema: structuredOutput.responseSchema }
-                  : {}),
-              },
-            },
+            responseMimeType: structuredOutput.responseMimeType,
+            ...(structuredOutput.responseSchema
+              ? { responseJsonSchema: structuredOutput.responseSchema }
+              : {}),
           },
         }
       : {}),
@@ -168,7 +164,7 @@ export async function callGeminiNativeChatCompletion(params: {
       content_count: requestBody.contents.length,
       structured_output: params.structuredOutput
         ? {
-            response_format: 'generationConfig.responseFormat.text',
+            response_format: 'generationConfig.responseMimeType/responseJsonSchema',
             mime_type: params.structuredOutput.responseMimeType,
             has_schema: Boolean(params.structuredOutput.responseSchema),
           }
