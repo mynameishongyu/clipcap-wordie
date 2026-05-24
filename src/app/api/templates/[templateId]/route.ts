@@ -1,8 +1,16 @@
 import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { getUserTemplateById } from '@/src/lib/data/templates-repository';
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
+
+type StorageBucket = ReturnType<SupabaseClient['storage']['from']>;
+type StorageListEntry = {
+  id?: string | null;
+  name: string;
+  metadata?: unknown | null;
+};
 
 function createUnauthorizedResponse() {
   return NextResponse.json(
@@ -21,6 +29,93 @@ async function getAuthenticatedUser() {
   } = await supabase.auth.getUser();
 
   return { supabase, user };
+}
+
+function isStorageFolder(entry: StorageListEntry) {
+  return !entry.id && entry.metadata === null;
+}
+
+async function listStorageObjectPathsByPrefix(
+  bucket: StorageBucket,
+  prefix: string,
+) {
+  const normalizedPrefix = prefix.replace(/\/+$/, '');
+  const paths: string[] = [];
+
+  async function visit(folderPath: string) {
+    const limit = 100;
+    let offset = 0;
+
+    while (true) {
+      const { data, error } = await bucket.list(folderPath, {
+        limit,
+        offset,
+        sortBy: {
+          column: 'name',
+          order: 'asc',
+        },
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      const entries = (data ?? []) as StorageListEntry[];
+
+      for (const entry of entries) {
+        const entryPath = `${folderPath}/${entry.name}`;
+
+        if (isStorageFolder(entry)) {
+          await visit(entryPath);
+        } else {
+          paths.push(entryPath);
+        }
+      }
+
+      if (entries.length < limit) {
+        break;
+      }
+
+      offset += limit;
+    }
+  }
+
+  await visit(normalizedPrefix);
+
+  return paths;
+}
+
+async function removeTemplateReferencePageStorage(input: {
+  admin: SupabaseClient;
+  ownerId: string;
+  templateId: string;
+}) {
+  const bucket = input.admin.storage.from('generation-pdfs');
+  const prefixes = [
+    `${input.ownerId}/template-reference-pages/original/${input.templateId}`,
+    `${input.ownerId}/template-reference-pages/annotated/${input.templateId}`,
+  ];
+  const storagePaths = Array.from(
+    new Set(
+      (
+        await Promise.all(
+          prefixes.map((prefix) => listStorageObjectPathsByPrefix(bucket, prefix)),
+        )
+      ).flat(),
+    ),
+  );
+
+  if (storagePaths.length === 0) {
+    return 0;
+  }
+
+  const { error } = await bucket.remove(storagePaths);
+
+  if (error) {
+    throw error;
+  }
+
+  return storagePaths.length;
 }
 
 export async function GET(
@@ -98,6 +193,13 @@ export async function DELETE(
       return createUnauthorizedResponse();
     }
 
+    const templateReferenceStoragePathCount =
+      await removeTemplateReferencePageStorage({
+        admin,
+        ownerId: user.id,
+        templateId,
+      });
+
     const { data: relatedTasks, error: relatedTasksError } = await admin
       .from('generation_tasks')
       .select('id')
@@ -173,6 +275,7 @@ export async function DELETE(
       payload: {
         templateName: template.template_name ?? null,
         relatedTaskCount: taskIds.length,
+        templateReferenceStoragePathCount,
       },
     });
 
