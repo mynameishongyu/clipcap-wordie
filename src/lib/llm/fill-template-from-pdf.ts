@@ -7,6 +7,7 @@ import {
 } from '@/src/lib/llm/gemini-native';
 import {
   geminiOcrPagesResponseSchema,
+  geminiPdfSlotExtractionResponseSchema,
   geminiPdfSlotFillResponseSchema,
   geminiReferencePageAlignmentResponseSchema,
   withGeminiOpenAiJsonResponseFormat,
@@ -383,6 +384,53 @@ function findResultForSlot(
   }
 
   return null;
+}
+
+function hasMisplacedSlotExtractionFields(result: ModelResultCandidate) {
+  const slotName = result.slot_name?.trim() ?? '';
+
+  return /(?:final_value|matches|evidence_text|source_reason|new_pdf_bbox|layout_match_score|confidence)\s*[:：]/i.test(
+    slotName,
+  );
+}
+
+function assertSlotExtractionResultQuality(params: {
+  documentName: string;
+  requestLabel: string;
+  slots: GenerationSlotSchemaItem[];
+  results?: ModelResultCandidate[];
+}) {
+  const results = params.results ?? [];
+
+  if (results.length === 0) {
+    throw new Error(
+      `PDF slot extraction returned no results for ${params.documentName} (${params.requestLabel}).`,
+    );
+  }
+
+  const malformedResult = results.find(hasMisplacedSlotExtractionFields);
+
+  if (malformedResult) {
+    throw new Error(
+      `PDF slot extraction returned malformed field packing for ${params.documentName} (${params.requestLabel}); slot_key=${malformedResult.slot_key ?? 'unknown'} placed result fields inside slot_name.`,
+    );
+  }
+
+  const expectedSlotKeys = new Set(params.slots.map((slot) => slot.slot_key));
+  const returnedSlotKeys = new Set(
+    results
+      .map((result) => result.slot_key)
+      .filter((slotKey): slotKey is string => Boolean(slotKey)),
+  );
+  const missingSlotKeys = [...expectedSlotKeys].filter(
+    (slotKey) => !returnedSlotKeys.has(slotKey),
+  );
+
+  if (missingSlotKeys.length > 0) {
+    throw new Error(
+      `PDF slot extraction missed ${missingSlotKeys.length}/${expectedSlotKeys.size} slot result(s) for ${params.documentName} (${params.requestLabel}): ${missingSlotKeys.slice(0, 8).join(', ')}`,
+    );
+  }
 }
 
 function formatElapsedMs(ms: number) {
@@ -2246,9 +2294,8 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, prefer the candidate whose page, section, nearby label, and visual region best match slot_source and the reference box when available. Leave final_value empty if the source cannot be distinguished.',
       'Return a final_value only if it is visible or strongly inferable from the provided new PDF images.',
       'For dates, normalize visible dates to Chinese date format when possible, such as 2026年3月30日. For money amounts, preserve decimals and units when visible.',
-      'matches[0].value must equal final_value. matches[0].evidence_text must include the visible source value and nearby label/context. matches[0].source_reason must briefly explain why this source was selected.',
+      'matches[0].value must equal final_value. matches[0].evidence_text must include the visible source value and nearby label/context.',
       'matches[0].matched_reference_label should equal reference_example_pdf_evidence.example_annotation_label only when a reference box was used; otherwise return null or an empty string.',
-      'matches[0].new_pdf_bbox must tightly enclose the actual visible final_value on the chosen new PDF image. If the value is inferred, calculated, copied from context, not visible inside the box, or cannot be localized precisely, return new_pdf_bbox=null. Do not invent or approximate boxes.',
     ],
     output_schema: {
       results: [
@@ -2260,17 +2307,10 @@ function buildDirectVisionSlotFillPromptPayload(input: {
             {
               value: 'same as final_value, or empty string',
               evidence_text: 'visible source value plus nearby label/context',
-              source_reason:
-                'brief reason; mention matched reference label/region when used',
               matched_reference_label:
                 'reference label such as slot_key when a reference box was used, otherwise null',
-              new_pdf_bbox:
-                'tight Gemini [y0,x0,y1,x1] bbox around visible final_value, or null',
-              layout_match_score:
-                '0-1 confidence that chosen source matches slot_source/reference layout',
               page_number:
                 'uploaded page number from New PDF uploaded page N, or null when not found',
-              confidence: '0-1 extraction confidence',
             },
           ],
         },
@@ -3123,7 +3163,7 @@ async function extractSlotsFromVisionPageBatch(input: {
           signal: controller.signal,
           structuredOutput: {
             responseMimeType: 'application/json',
-            responseSchema: geminiPdfSlotFillResponseSchema,
+            responseSchema: geminiPdfSlotExtractionResponseSchema,
           },
           onTrace: input.onTrace,
         });
@@ -3209,6 +3249,12 @@ async function extractSlotsFromVisionPageBatch(input: {
         results?: ModelResultCandidate[];
         extracted_items?: Array<z.infer<typeof generationExtractedItemSchema>>;
       }>(rawContent);
+      assertSlotExtractionResultQuality({
+        documentName: input.documentName,
+        requestLabel,
+        slots: input.slots,
+        results: normalized.results,
+      });
       const parsedExtractedItems = generationPdfFillResultSchema.safeParse({
         document_summary: '',
         extracted_items: normalized.extracted_items ?? [],

@@ -24,6 +24,40 @@ const modelMatchSchema = {
   },
 } as const;
 
+const slotExtractionMatchSchema = {
+  type: 'object',
+  properties: {
+    value: nullableString,
+    evidence_text: nullableString,
+    matched_reference_label: nullableString,
+    page_number: { type: ['integer', 'string', 'null'] },
+  },
+  required: ['value', 'evidence_text', 'matched_reference_label', 'page_number'],
+} as const;
+
+export const geminiPdfSlotExtractionResponseSchema = {
+  type: 'object',
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          slot_key: { type: 'string' },
+          slot_name: { type: 'string' },
+          final_value: nullableString,
+          matches: {
+            type: 'array',
+            items: slotExtractionMatchSchema,
+          },
+        },
+        required: ['slot_key', 'slot_name', 'final_value', 'matches'],
+      },
+    },
+  },
+  required: ['results'],
+} as const;
+
 export const geminiPdfSlotFillResponseSchema = {
   type: 'object',
   properties: {
