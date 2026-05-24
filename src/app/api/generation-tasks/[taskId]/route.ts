@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { markTimedOutGenerationTaskItems } from '@/src/lib/generation-task-items/runtime';
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
@@ -15,6 +16,8 @@ type GenerationTaskItemListRecord = {
   slot_completed_count: number;
   processing_trace: string | null;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
   reviewed_at?: string | null;
   output_docx_path?: string | null;
   error_message?: string | null;
@@ -141,11 +144,12 @@ export async function GET(
       );
     }
 
-    const { data: items, error: itemsError } = await supabase
+    const itemSelect =
+      'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, reviewed_at, output_docx_path, error_message, llm_input';
+
+    let { data: items, error: itemsError } = await supabase
       .from('generation_task_items')
-      .select(
-        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input',
-      )
+      .select(itemSelect)
       .eq('task_id', taskId)
       .order('created_at', { ascending: true })
       .returns<GenerationTaskItemListRecord[]>();
@@ -155,8 +159,44 @@ export async function GET(
     }
 
     const admin = createSupabaseAdminClient();
+    let nextTask = task;
+    let nextItems = items ?? [];
+    const timeoutResult = await markTimedOutGenerationTaskItems({
+      admin,
+      taskId,
+      items: nextItems,
+    });
+
+    if (timeoutResult.updated) {
+      const { data: refreshedTask, error: refreshedTaskError } = await admin
+        .from('generation_tasks')
+        .select(
+          'id, owner_id, template_id, template_name_snapshot, status, total_items, succeeded_items, failed_items, created_at',
+        )
+        .eq('id', taskId)
+        .single();
+
+      if (refreshedTaskError || !refreshedTask) {
+        throw refreshedTaskError ?? new Error('Failed to refresh generation task.');
+      }
+
+      const { data: refreshedItems, error: refreshedItemsError } = await admin
+        .from('generation_task_items')
+        .select(itemSelect)
+        .eq('task_id', taskId)
+        .order('created_at', { ascending: true })
+        .returns<GenerationTaskItemListRecord[]>();
+
+      if (refreshedItemsError) {
+        throw refreshedItemsError;
+      }
+
+      nextTask = refreshedTask;
+      nextItems = refreshedItems ?? [];
+    }
+
     const itemsWithPageFilters = await Promise.all(
-      (items ?? []).map(async (item) => ({
+      nextItems.map(async (item) => ({
         ...item,
         pdf_page_filter_pages: await buildPageFilterPages({ admin, item }),
         llm_input: undefined,
@@ -165,7 +205,7 @@ export async function GET(
 
     return NextResponse.json({
       data: {
-        task,
+        task: nextTask,
         items: itemsWithPageFilters,
       },
     });

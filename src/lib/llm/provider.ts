@@ -36,6 +36,10 @@ export interface LlmRuntimeTraceConfig {
   extraBody: Record<string, unknown>;
 }
 
+export interface LlmRuntimeConfigOptions {
+  reasoningEffortEnvName?: string;
+}
+
 const KIMI_K25_INSTANT_THINKING_CONFIG = {
   type: 'disabled',
 } as const;
@@ -237,9 +241,31 @@ function getRoleThinkingEnabled(role: LlmRole) {
   );
 }
 
-function getGeminiReasoningEffort(role: LlmRole): GeminiReasoningEffort {
-  const rawValue =
-    getOptionalEnv(getRoleReasoningEffortEnvName(role)) ?? 'medium';
+function getReasoningEffortRawValue(
+  role: LlmRole,
+  options?: LlmRuntimeConfigOptions,
+) {
+  return (
+    (options?.reasoningEffortEnvName
+      ? getOptionalEnv(options.reasoningEffortEnvName)
+      : undefined) ??
+    getOptionalEnv(getRoleReasoningEffortEnvName(role)) ??
+    'medium'
+  );
+}
+
+function getReasoningEffortEnvName(
+  role: LlmRole,
+  options?: LlmRuntimeConfigOptions,
+) {
+  return options?.reasoningEffortEnvName ?? getRoleReasoningEffortEnvName(role);
+}
+
+function getGeminiReasoningEffort(
+  role: LlmRole,
+  options?: LlmRuntimeConfigOptions,
+): GeminiReasoningEffort {
+  const rawValue = getReasoningEffortRawValue(role, options);
   const normalizedValue = rawValue.trim().toLowerCase();
 
   if (
@@ -249,13 +275,15 @@ function getGeminiReasoningEffort(role: LlmRole): GeminiReasoningEffort {
   }
 
   throw new Error(
-    `${getRoleReasoningEffortEnvName(role)} must be one of: ${GEMINI_REASONING_EFFORTS.join(', ')}.`,
+    `${getReasoningEffortEnvName(role, options)} must be one of: ${GEMINI_REASONING_EFFORTS.join(', ')}.`,
   );
 }
 
-function getDoubaoReasoningEffort(role: LlmRole): DoubaoReasoningEffort {
-  const rawValue =
-    getOptionalEnv(getRoleReasoningEffortEnvName(role)) ?? 'medium';
+function getDoubaoReasoningEffort(
+  role: LlmRole,
+  options?: LlmRuntimeConfigOptions,
+): DoubaoReasoningEffort {
+  const rawValue = getReasoningEffortRawValue(role, options);
   const normalizedValue = rawValue.trim().toLowerCase();
 
   if (
@@ -267,7 +295,7 @@ function getDoubaoReasoningEffort(role: LlmRole): DoubaoReasoningEffort {
   }
 
   throw new Error(
-    `${getRoleReasoningEffortEnvName(role)} must be one of: ${DOUBAO_REASONING_EFFORTS.join(', ')} for doubao models.`,
+    `${getReasoningEffortEnvName(role, options)} must be one of: ${DOUBAO_REASONING_EFFORTS.join(', ')} for doubao models.`,
   );
 }
 
@@ -275,6 +303,7 @@ function getProviderExtraBody(
   role: LlmRole,
   provider: LlmProvider,
   model: string,
+  options?: LlmRuntimeConfigOptions,
 ) {
   const normalizedModel = normalizeModelName(model);
   const thinkingEnabled = getRoleThinkingEnabled(role);
@@ -282,7 +311,7 @@ function getProviderExtraBody(
   if (provider === 'gemini') {
     return {
       reasoning_effort: thinkingEnabled
-        ? getGeminiReasoningEffort(role)
+        ? getGeminiReasoningEffort(role, options)
         : 'none',
     };
   }
@@ -305,14 +334,17 @@ function getProviderExtraBody(
 
   if (provider === 'doubao' && thinkingEnabled) {
     return {
-      reasoning_effort: getDoubaoReasoningEffort(role),
+      reasoning_effort: getDoubaoReasoningEffort(role, options),
     };
   }
 
   return {};
 }
 
-export function getLlmRuntimeConfig(role: LlmRole): LlmRuntimeConfig {
+export function getLlmRuntimeConfig(
+  role: LlmRole,
+  options?: LlmRuntimeConfigOptions,
+): LlmRuntimeConfig {
   const model = getRoleModel(role);
   const provider =
     normalizeProviderName(getOptionalEnv(getRoleProviderEnvName(role))) ??
@@ -325,12 +357,15 @@ export function getLlmRuntimeConfig(role: LlmRole): LlmRuntimeConfig {
     apiKey: getProviderApiKey(role, provider),
     baseUrl,
     chatCompletionsUrl: resolveChatCompletionsUrl(baseUrl),
-    extraBody: getProviderExtraBody(role, provider, model),
+    extraBody: getProviderExtraBody(role, provider, model, options),
   };
 }
 
-export function getLlmRuntimeTraceConfig(role: LlmRole): LlmRuntimeTraceConfig {
-  const config = getLlmRuntimeConfig(role);
+export function getLlmRuntimeTraceConfig(
+  role: LlmRole,
+  options?: LlmRuntimeConfigOptions,
+): LlmRuntimeTraceConfig {
+  const config = getLlmRuntimeConfig(role, options);
 
   return {
     provider: config.provider,
@@ -338,8 +373,8 @@ export function getLlmRuntimeTraceConfig(role: LlmRole): LlmRuntimeTraceConfig {
     model: config.model,
     thinkingEnabledEnvName: getRoleThinkingEnabledEnvName(role),
     thinkingEnabled: getRoleThinkingEnabled(role),
-    reasoningEffortEnvName: getRoleReasoningEffortEnvName(role),
-    reasoningEffort: getOptionalEnv(getRoleReasoningEffortEnvName(role)) ?? null,
+    reasoningEffortEnvName: getReasoningEffortEnvName(role, options),
+    reasoningEffort: getReasoningEffortRawValue(role, options),
     extraBody: config.extraBody,
   };
 }

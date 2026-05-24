@@ -216,6 +216,11 @@ const PROCESS_HARD_TIMEOUT_MS = 300000;
 const PROCESS_OCR_SLOT_FILL_RESERVE_MS = 60000;
 const LLM_CONNECT_TIMEOUT_MS = 60000;
 const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
+const PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV =
+  'PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT';
+const PDF_SLOT_EXTRACTION_LLM_OPTIONS = {
+  reasoningEffortEnvName: PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV,
+} as const;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
   connect: {
@@ -898,7 +903,10 @@ async function extractSlotWithTextModel(input: {
     );
 
     try {
-      const llmConfig = getLlmRuntimeConfig('vision');
+      const llmConfig = getLlmRuntimeConfig(
+        'vision',
+        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+      );
       const requestBody = withGeminiOpenAiJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
@@ -1035,8 +1043,10 @@ async function extractSlotWithTextModel(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('vision').model,
-        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
+        model: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
+          .model,
+        baseUrl: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
+          .baseUrl,
         attempt,
       });
       const shouldRetry =
@@ -1896,7 +1906,10 @@ async function extractAllSlotsWithTextModel(input: {
         pageNumbers: input.pageNumbers,
         chunkText: input.chunkText,
       });
-      const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+      const visionTraceConfig = getLlmRuntimeTraceConfig(
+        'vision',
+        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+      );
       const requestStartedMessage =
         `[PDF Fill][Vision] Starting ${requestLabel} for ${input.documentName} ` +
         `(attempt ${attempt}/${MAX_TEXT_REQUEST_RETRIES}, slots: ${input.slots.length}, pages: ${input.pageNumbers.length}, char count: ${input.chunkText.length}, timeout: ${formatElapsedMs(requestTimeoutMs)}${formatProcessBudgetSuffix(
@@ -1948,7 +1961,10 @@ async function extractAllSlotsWithTextModel(input: {
         void input.onTrace?.({ message: heartbeatMessage });
       }, 15000);
 
-      const llmConfig = getLlmRuntimeConfig('vision');
+      const llmConfig = getLlmRuntimeConfig(
+        'vision',
+        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+      );
       const requestBody = withGeminiOpenAiJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
@@ -2112,8 +2128,10 @@ async function extractAllSlotsWithTextModel(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('vision').model,
-        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
+        model: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
+          .model,
+        baseUrl: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
+          .baseUrl,
         attempt,
       });
       const requestLabel = input.requestLabel ?? 'full-text slot request';
@@ -2898,7 +2916,10 @@ async function extractSlotsFromVisionPageBatch(input: {
         pageNumbers,
         referencePageNumbers,
       });
-      const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+      const visionTraceConfig = getLlmRuntimeTraceConfig(
+        'vision',
+        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+      );
 
       await input.onTrace?.({
         message: `[PDF Fill][DirectVisionPrompt][${requestLabel}] ${stringifyTraceJson(
@@ -3064,7 +3085,10 @@ async function extractSlotsFromVisionPageBatch(input: {
         }
       });
 
-      const llmConfig = getLlmRuntimeConfig('vision');
+      const llmConfig = getLlmRuntimeConfig(
+        'vision',
+        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+      );
       const requestBody = buildChatCompletionBody(llmConfig, {
         messages: [
           {
@@ -3308,8 +3332,10 @@ async function extractSlotsFromVisionPageBatch(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('vision').model,
-        baseUrl: getLlmRuntimeConfig('vision').baseUrl,
+        model: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
+          .model,
+        baseUrl: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
+          .baseUrl,
         attempt,
       });
       const shouldRetry =

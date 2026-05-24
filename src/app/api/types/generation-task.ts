@@ -11,6 +11,8 @@ export const generationTaskItemSummarySchema = z.object({
   slot_completed_count: z.number().int().default(0),
   processing_trace: z.string().default(''),
   created_at: z.string(),
+  started_at: z.string().nullable().optional(),
+  finished_at: z.string().nullable().optional(),
   reviewed_at: z.string().nullable().optional(),
   output_docx_path: z.string().nullable().optional(),
   error_message: z.string().nullable().optional(),
@@ -104,8 +106,6 @@ export const generationTaskItemDetailSchema = generationTaskItemSummarySchema.ex
   template_preview_document: z.any().nullable().optional(),
   template_preview_slots: z.any().nullable().optional(),
   template_preview_upload_text: z.string().nullable().optional(),
-  started_at: z.string().nullable().optional(),
-  finished_at: z.string().nullable().optional(),
 });
 
 export const generationTaskItemDetailResponseSchema = z.object({

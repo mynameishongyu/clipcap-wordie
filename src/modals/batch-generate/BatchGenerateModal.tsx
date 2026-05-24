@@ -498,27 +498,50 @@ function getStatusLabel(status: string) {
   }
 }
 
+const activeProcessingStatuses = [
+  'uploaded',
+  'running',
+  'pending',
+  'page_preparing',
+  'ocr_running',
+  'slot_filling',
+];
+
+const taskPollingStatuses = [...activeProcessingStatuses, 'pdf_pages_ready'];
+
+function isActiveProcessingStatus(status: string) {
+  return activeProcessingStatuses.includes(status);
+}
+
+function isTaskPollingStatus(status: string) {
+  return taskPollingStatuses.includes(status);
+}
+
 function formatElapsedSeconds(
   item: GenerationTaskItemSummary,
   now: number,
   startedAt: number | null,
 ) {
-  if (
-    [
-      'uploaded',
-      'running',
-      'pending',
-      'page_preparing',
-      'ocr_running',
-      'pdf_pages_ready',
-      'slot_filling',
-    ].includes(item.status) &&
-    startedAt
-  ) {
+  if (isActiveProcessingStatus(item.status) && startedAt) {
     return Math.max(item.elapsed_seconds, Math.floor((now - startedAt) / 1000));
   }
 
   return item.elapsed_seconds;
+}
+
+function getElapsedStatusText(
+  item: GenerationTaskItemSummary,
+  elapsedSeconds: number,
+) {
+  if (isActiveProcessingStatus(item.status)) {
+    return `处理中 ${elapsedSeconds} 秒`;
+  }
+
+  if (item.status === 'failed') {
+    return `已停止 ${elapsedSeconds} 秒`;
+  }
+
+  return `耗时 ${elapsedSeconds} 秒`;
 }
 
 function formatDurationMs(durationMs: number) {
@@ -866,15 +889,7 @@ export function BatchGenerateModal({
 
   const taskItems = taskQuery.data?.items ?? [];
   const hasRunningItems = taskItems.some((item) =>
-    [
-      'uploaded',
-      'running',
-      'pending',
-      'page_preparing',
-      'ocr_running',
-      'pdf_pages_ready',
-      'slot_filling',
-    ].includes(item.status),
+    isTaskPollingStatus(item.status),
   );
   const succeededCount = taskItems.filter((item) =>
     ['review_pending', 'reviewed'].includes(item.status),
@@ -3113,7 +3128,12 @@ export function BatchGenerateModal({
 
             <Stack gap="md">
               {taskItems.map((item, index) => {
-                const clientStartedAt = itemStartedAtById[item.id] ?? null;
+                const serverStartedAt = item.started_at
+                  ? Date.parse(item.started_at)
+                  : NaN;
+                const clientStartedAt = Number.isFinite(serverStartedAt)
+                  ? serverStartedAt
+                  : (itemStartedAtById[item.id] ?? null);
                 const elapsedSeconds = formatElapsedSeconds(
                   item,
                   tick,
@@ -3136,7 +3156,9 @@ export function BatchGenerateModal({
                           >
                             {getStatusLabel(item.status)}
                           </Badge>
-                          <Text size="sm">处理中 {elapsedSeconds} 秒</Text>
+                          <Text size="sm">
+                            {getElapsedStatusText(item, elapsedSeconds)}
+                          </Text>
                         </Group>
                       </Group>
 
@@ -3146,15 +3168,8 @@ export function BatchGenerateModal({
                         </Text>
                       ) : null}
 
-                      {[
-                        'uploaded',
-                        'running',
-                        'pending',
-                        'page_preparing',
-                        'ocr_running',
-                        'pdf_pages_ready',
-                        'slot_filling',
-                      ].includes(item.status) && item.slot_total_count > 0 ? (
+                      {isTaskPollingStatus(item.status) &&
+                      item.slot_total_count > 0 ? (
                         <Text c="dimmed" size="sm">
                           已完成 {item.slot_completed_count} 个槽位，待抽取{' '}
                           {getPendingSlotCount(item)} 个槽位

@@ -94,6 +94,21 @@ export type GenerationTaskItemRecord = {
 export const generationTaskItemSelect =
   'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, reviewed_at, output_docx_path, error_message, llm_input';
 
+export const GENERATION_TASK_ITEM_RUNNING_STATUSES = [
+  'uploaded',
+  'running',
+  'pending',
+  'page_preparing',
+  'ocr_running',
+  'slot_filling',
+] as const;
+
+export const VERCEL_FUNCTION_TIMEOUT_SECONDS = 300;
+export const GENERATION_TASK_ITEM_TIMEOUT_GRACE_SECONDS = 5;
+
+const GENERATION_TASK_ITEM_TIMEOUT_MESSAGE =
+  '处理超时：Vercel 函数最长运行 300 秒，任务已停止，请减少页数或槽位后重试。';
+
 export function createUnauthorizedResponse() {
   return NextResponse.json(
     {
@@ -397,6 +412,78 @@ export async function recalculateTaskSummary(admin: AdminClient, taskId: string)
       finished_at: hasRunningItems ? null : new Date().toISOString(),
     })
     .eq('id', taskId);
+}
+
+export function isGenerationTaskItemRunningStatus(status: string) {
+  return GENERATION_TASK_ITEM_RUNNING_STATUSES.some(
+    (runningStatus) => runningStatus === status,
+  );
+}
+
+export async function markTimedOutGenerationTaskItems(params: {
+  admin: AdminClient;
+  taskId: string;
+  items: Array<{
+    id: string;
+    status: string;
+    elapsed_seconds: number;
+    started_at?: string | null;
+    finished_at?: string | null;
+  }>;
+}) {
+  const now = Date.now();
+  const timedOutItems = params.items.filter((item) => {
+    if (!isGenerationTaskItemRunningStatus(item.status) || !item.started_at) {
+      return false;
+    }
+
+    const startedAtMs = Date.parse(item.started_at);
+
+    if (!Number.isFinite(startedAtMs)) {
+      return false;
+    }
+
+    const elapsedSeconds = Math.floor((now - startedAtMs) / 1000);
+
+    return (
+      elapsedSeconds >=
+      VERCEL_FUNCTION_TIMEOUT_SECONDS + GENERATION_TASK_ITEM_TIMEOUT_GRACE_SECONDS
+    );
+  });
+
+  if (timedOutItems.length === 0) {
+    return { updated: false, timedOutItemIds: [] as string[] };
+  }
+
+  const finishedAt = new Date().toISOString();
+  const timedOutItemIds = timedOutItems.map((item) => item.id);
+
+  const { error } = await params.admin
+    .from('generation_task_items')
+    .update({
+      status: 'failed',
+      error_message: GENERATION_TASK_ITEM_TIMEOUT_MESSAGE,
+      elapsed_seconds: VERCEL_FUNCTION_TIMEOUT_SECONDS,
+      finished_at: finishedAt,
+    })
+    .in('id', timedOutItemIds);
+
+  if (error) {
+    throw error;
+  }
+
+  await Promise.all(
+    timedOutItemIds.map((taskItemId) =>
+      appendProcessingTrace(
+        params.admin,
+        taskItemId,
+        `[Vercel Runtime Timeout] Task exceeded ${VERCEL_FUNCTION_TIMEOUT_SECONDS} seconds and was marked as failed during status refresh.`,
+      ),
+    ),
+  );
+  await recalculateTaskSummary(params.admin, params.taskId);
+
+  return { updated: true, timedOutItemIds };
 }
 
 export async function updateSlotProgress(
