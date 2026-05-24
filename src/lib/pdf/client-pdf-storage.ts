@@ -5,11 +5,9 @@ import type {
   PdfVisionPageCrop,
   PdfVisionPageInput,
 } from '@/src/lib/pdf/client-pdf';
+import { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
-
-const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
-const MAX_PDF_STORAGE_UPLOAD_CONCURRENCY = 8;
 
 export interface StoredPdfVisionPageAsset {
   pageNumber: number;
@@ -138,21 +136,6 @@ function getPdfVisionPageImageExtension(
   }
 
   return 'img';
-}
-
-function getPdfStorageUploadConcurrency() {
-  const parsedValue = Number(
-    process.env.NEXT_PUBLIC_PDF_STORAGE_UPLOAD_CONCURRENCY,
-  );
-
-  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-    return DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY;
-  }
-
-  return Math.min(
-    MAX_PDF_STORAGE_UPLOAD_CONCURRENCY,
-    Math.max(1, Math.floor(parsedValue)),
-  );
 }
 
 async function runWithConcurrency<T>(

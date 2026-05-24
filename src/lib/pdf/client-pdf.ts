@@ -1,5 +1,7 @@
 'use client';
 
+export { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
+
 export interface ParsedPdfPage {
   pageNumber: number;
   text: string;
@@ -43,9 +45,7 @@ const DEFAULT_PDF_RENDER_JPEG_BACKGROUND_WHITE_THRESHOLD = 246;
 const DEFAULT_PDF_RENDER_JPEG_BACKGROUND_INK_THRESHOLD = 190;
 const DEFAULT_PDF_RENDER_JPEG_CONTRAST = 1.04;
 const DEFAULT_PDF_VISION_RENDER_CONCURRENCY = 3;
-const MAX_PDF_VISION_RENDER_CONCURRENCY = 8;
-const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
-const MAX_PDF_STORAGE_UPLOAD_CONCURRENCY = 8;
+const MAX_PDF_VISION_RENDER_CONCURRENCY = 30;
 const DEFAULT_PDF_AUTO_ROTATE_PAGES = true;
 const PDF_AUTO_CROP_WHITE_MARGIN = true;
 const PDF_CROP_WHITE_THRESHOLD = 245;
@@ -230,21 +230,6 @@ export function getPdfVisionRenderConcurrency() {
 
   return Math.min(
     MAX_PDF_VISION_RENDER_CONCURRENCY,
-    Math.max(1, Math.floor(parsedValue)),
-  );
-}
-
-export function getPdfStorageUploadConcurrency() {
-  const parsedValue = Number(
-    process.env.NEXT_PUBLIC_PDF_STORAGE_UPLOAD_CONCURRENCY,
-  );
-
-  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-    return DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY;
-  }
-
-  return Math.min(
-    MAX_PDF_STORAGE_UPLOAD_CONCURRENCY,
     Math.max(1, Math.floor(parsedValue)),
   );
 }

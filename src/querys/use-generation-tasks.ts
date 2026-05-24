@@ -3,10 +3,8 @@
 import { useMutation } from '@tanstack/react-query';
 import type { CreateGenerationTaskResponse } from '@/src/app/api/types/generation-task';
 import type { PdfVisionPageInput } from '@/src/lib/pdf/client-pdf';
+import { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
-
-const DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY = 3;
-const MAX_PDF_STORAGE_UPLOAD_CONCURRENCY = 8;
 
 export interface CreateGenerationTaskFileInput {
   file: File;
@@ -116,21 +114,6 @@ function getPdfVisionPageImageExtension(
   }
 
   return 'img';
-}
-
-function getPdfStorageUploadConcurrency() {
-  const parsedValue = Number(
-    process.env.NEXT_PUBLIC_PDF_STORAGE_UPLOAD_CONCURRENCY,
-  );
-
-  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-    return DEFAULT_PDF_STORAGE_UPLOAD_CONCURRENCY;
-  }
-
-  return Math.min(
-    MAX_PDF_STORAGE_UPLOAD_CONCURRENCY,
-    Math.max(1, Math.floor(parsedValue)),
-  );
 }
 
 function formatDurationMs(durationMs: number) {
