@@ -184,7 +184,9 @@ function buildLlmTraceConfigPayload(
   return {
     [traceConfig.modelEnvName]: traceConfig.model,
     [traceConfig.thinkingEnabledEnvName]: traceConfig.thinkingEnabled,
-    [traceConfig.reasoningEffortEnvName]: traceConfig.reasoningEffort,
+    ...(traceConfig.reasoningEffortEnvName
+      ? { [traceConfig.reasoningEffortEnvName]: traceConfig.reasoningEffort }
+      : {}),
     provider: traceConfig.provider,
     effective_extra_body: traceConfig.extraBody,
   };

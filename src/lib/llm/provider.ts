@@ -31,7 +31,7 @@ export interface LlmRuntimeTraceConfig {
   model: string;
   thinkingEnabledEnvName: string;
   thinkingEnabled: boolean;
-  reasoningEffortEnvName: string;
+  reasoningEffortEnvName: string | null;
   reasoningEffort: string | null;
   extraBody: Record<string, unknown>;
 }
@@ -139,9 +139,7 @@ function getRoleThinkingEnabledEnvName(role: LlmRole) {
 }
 
 function getRoleReasoningEffortEnvName(role: LlmRole) {
-  return role === 'text'
-    ? 'TEXT_LLM_REASONING_EFFORT'
-    : 'VISION_LLM_REASONING_EFFORT';
+  return role === 'text' ? 'TEXT_LLM_REASONING_EFFORT' : null;
 }
 
 function getRoleProviderEnvName(role: LlmRole) {
@@ -245,11 +243,15 @@ function getReasoningEffortRawValue(
   role: LlmRole,
   options?: LlmRuntimeConfigOptions,
 ) {
+  const roleReasoningEffortEnvName = getRoleReasoningEffortEnvName(role);
+
   return (
     (options?.reasoningEffortEnvName
       ? getOptionalEnv(options.reasoningEffortEnvName)
       : undefined) ??
-    getOptionalEnv(getRoleReasoningEffortEnvName(role)) ??
+    (roleReasoningEffortEnvName
+      ? getOptionalEnv(roleReasoningEffortEnvName)
+      : undefined) ??
     'medium'
   );
 }
@@ -274,8 +276,9 @@ function getGeminiReasoningEffort(
     return normalizedValue as GeminiReasoningEffort;
   }
 
+  const envName = getReasoningEffortEnvName(role, options);
   throw new Error(
-    `${getReasoningEffortEnvName(role, options)} must be one of: ${GEMINI_REASONING_EFFORTS.join(', ')}.`,
+    `${envName ?? 'reasoning effort'} must be one of: ${GEMINI_REASONING_EFFORTS.join(', ')}.`,
   );
 }
 
@@ -294,8 +297,9 @@ function getDoubaoReasoningEffort(
     return normalizedValue as DoubaoReasoningEffort;
   }
 
+  const envName = getReasoningEffortEnvName(role, options);
   throw new Error(
-    `${getReasoningEffortEnvName(role, options)} must be one of: ${DOUBAO_REASONING_EFFORTS.join(', ')} for doubao models.`,
+    `${envName ?? 'reasoning effort'} must be one of: ${DOUBAO_REASONING_EFFORTS.join(', ')} for doubao models.`,
   );
 }
 

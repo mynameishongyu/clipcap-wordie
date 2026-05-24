@@ -81,6 +81,11 @@ const TEMPLATE_PDF_LOCATE_JSON_REPAIR_TIMEOUT_MS = 90_000;
 const TEMPLATE_PDF_LOCATE_RAW_RESPONSE_TRACE_CHUNK_SIZE = 8000;
 const DEFAULT_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 1;
 const MAX_TEMPLATE_PDF_LOCATION_LLM_CONCURRENCY = 8;
+const PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV =
+  'PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT';
+const PDF_SLOT_EXTRACTION_LLM_OPTIONS = {
+  reasoningEffortEnvName: PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV,
+};
 const TEMPLATE_PDF_LOCATE_MODEL_BUSY_MESSAGE = '模型繁忙，稍后再试。';
 
 function getErrorMessage(error: unknown) {
@@ -118,7 +123,9 @@ function buildLlmTraceConfigPayload(
   return {
     [traceConfig.modelEnvName]: traceConfig.model,
     [traceConfig.thinkingEnabledEnvName]: traceConfig.thinkingEnabled,
-    [traceConfig.reasoningEffortEnvName]: traceConfig.reasoningEffort,
+    ...(traceConfig.reasoningEffortEnvName
+      ? { [traceConfig.reasoningEffortEnvName]: traceConfig.reasoningEffort }
+      : {}),
     provider: traceConfig.provider,
     effective_extra_body: traceConfig.extraBody,
     ...extra,
@@ -1082,7 +1089,10 @@ async function locateSlotsInPageBatch(input: {
   targetMode: PdfBboxTargetMode;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
-  const llmConfig = getLlmRuntimeConfig('vision');
+  const llmConfig = getLlmRuntimeConfig(
+    'vision',
+    PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+  );
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
     controller.abort();
@@ -1121,7 +1131,10 @@ async function locateSlotsInPageBatch(input: {
       slots: input.slots,
     });
     const requestLabel = `visual location batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}`;
-    const traceConfig = getLlmRuntimeTraceConfig('vision');
+    const traceConfig = getLlmRuntimeTraceConfig(
+      'vision',
+      PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+    );
 
     await input.onTrace?.({
       message:
@@ -1329,8 +1342,14 @@ export async function buildTemplatePdfEvidence(input: {
 }): Promise<TemplatePdfEvidenceResult> {
   const slots = buildLocateSlots(input.extractionResult);
   const targetMode = getTemplatePdfBboxTargetMode();
-  const visionConfig = getLlmRuntimeConfig('vision');
-  const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+  const visionConfig = getLlmRuntimeConfig(
+    'vision',
+    PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+  );
+  const visionTraceConfig = getLlmRuntimeTraceConfig(
+    'vision',
+    PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+  );
   const visionProvider = visionConfig.provider;
   const llmConcurrency = getTemplatePdfLocateLlmConcurrency();
   const pageBatches = splitPagesByConcurrency(
