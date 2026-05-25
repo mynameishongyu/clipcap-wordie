@@ -40,6 +40,8 @@ let lastTemplateExtractionRequestStartedAt = 0;
 
 const MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE =
   'meaning_to_applicant must be derived from the nearby label, field name, sentence, or description around original_value in the same paragraph. Do not infer meaning from original_value alone, and do not use distant or unrelated context. original_doc_position should include the nearby wording that supports this meaning.';
+const TEMPLATE_STATIC_TEXT_EXCLUSION_RULE =
+  '除非用户额外抽取要求明确点名，否则不要抽取模板固定文本、文书标题、合同名称、机构名称、法院/仲裁委名称、法律依据、管辖/仲裁条款、引号中的固定合同条款正文、落款说明、提示性说明文字。例如不要抽取“金穗信用卡合同”“石家庄仲裁委员会”“本合同履行中发生争议，提交石家庄仲裁委员会按其仲裁规则进行仲裁”“仲裁依据”等固定文本。不要抽取与目标主体无关的申请人/原告/银行/机构及其负责人、统一社会信用代码、地址、电话等信息；只有被申请人/被告/借款人/乙方/客户等目标主体或需要回填变化的案件事实字段才作为槽位。';
 
 const EXTRACTION_SYSTEM_PROMPT = `
 你是中文法律文书模板槽位抽取助手。
@@ -58,6 +60,7 @@ const EXTRACTION_SYSTEM_PROMPT = `
 6. 同一段中如果出现多个不同含义的日期、金额、百分比、利率等，必须分别抽取，不能合并，也不能遗漏。
 7. field_category 必须返回中文，不要返回 vehicle_plate_number、vehicle_brand 这种英文字段名。
 8. 除非用户明确要求，否则忽略与目标主体无关的申请人、法院、仲裁委、代理人等主体信息。
+9. ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}
 
 ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}
 固定 JSON 结构：
@@ -693,6 +696,7 @@ async function extractSlotsForParagraph(params: {
     `当前段落序号：${params.paragraph.paragraph_index}`,
     '请只从下面这个段落中抽取槽位。',
     MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE,
+    TEMPLATE_STATIC_TEXT_EXCLUSION_RULE,
     params.paragraph.paragraph_text,
   ].join('\n\n');
 
@@ -769,7 +773,7 @@ async function extractSlotsForParagraphBatch(params: {
   const promptPayload = {
     document_name: params.fileName,
     extra_extraction_requirement: params.prompt || null,
-    strict_requirement: `Process each paragraph independently. Return JSON only. Return extraction_result as an array with one entry per paragraph that has extracted items. Copy paragraph_index exactly from the input paragraph. ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}`,
+    strict_requirement: `Process each paragraph independently. Return JSON only. Return extraction_result as an array with one entry per paragraph that has extracted items. Copy paragraph_index exactly from the input paragraph. ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE} ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}`,
     paragraphs: params.paragraphs.map((paragraph) => ({
       paragraph_index: paragraph.paragraph_index,
       paragraph_text: paragraph.paragraph_text,

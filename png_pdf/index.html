@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supabase PNG 转 PDF</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #111;
+        color: #f4f4f5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #111;
+      }
+
+      main {
+        width: min(1040px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+        font-weight: 750;
+      }
+
+      p {
+        margin: 0;
+        color: #a1a1aa;
+        line-height: 1.6;
+      }
+
+      form {
+        display: grid;
+        gap: 18px;
+        margin-top: 24px;
+        padding: 20px;
+        border: 1px solid #303036;
+        border-radius: 8px;
+        background: #18181b;
+      }
+
+      label {
+        display: grid;
+        gap: 8px;
+        color: #e4e4e7;
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid #3f3f46;
+        border-radius: 6px;
+        background: #0f0f10;
+        color: #fafafa;
+        font: inherit;
+        padding: 11px 12px;
+        outline: none;
+      }
+
+      textarea {
+        min-height: 108px;
+        resize: vertical;
+        font-family:
+          "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+        font-size: 13px;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: #10b981;
+        box-shadow: 0 0 0 2px rgb(16 185 129 / 18%);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        justify-content: flex-start;
+      }
+
+      button {
+        border: 0;
+        border-radius: 6px;
+        background: #059669;
+        color: white;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 750;
+        padding: 11px 18px;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.55;
+      }
+
+      .hint {
+        color: #a1a1aa;
+        font-size: 13px;
+        font-weight: 400;
+      }
+
+      .result {
+        display: none;
+        margin-top: 20px;
+        padding: 16px;
+        border: 1px solid #303036;
+        border-radius: 8px;
+        background: #18181b;
+      }
+
+      .result.visible {
+        display: block;
+      }
+
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      a {
+        color: #34d399;
+      }
+
+      .links a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        padding: 7px 10px;
+        border: 1px solid #3f3f46;
+        border-radius: 6px;
+        text-decoration: none;
+      }
+
+      pre {
+        max-height: 360px;
+        overflow: auto;
+        margin: 16px 0 0;
+        padding: 14px;
+        border-radius: 6px;
+        background: #09090b;
+        color: #e4e4e7;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      @media (max-width: 760px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Supabase PNG 转 PDF</h1>
+      <p>
+        输入 Storage 里的 PNG 文件夹 prefix，例如到
+        <code>865e18aa-...</code> 这一层，生成的 PDF 会保存到
+        <code>png_pdf/output</code>。
+      </p>
+
+      <form id="convert-form">
+        <label>
+          PNG 文件夹 prefix
+          <textarea
+            id="prefix"
+            placeholder="58166df4-.../template-extraction-pages/task/865e18aa-1094-4d20-8bb6-..."
+            required
+          ></textarea>
+          <span class="hint">可以带或不带开头的 generation-pdfs/。</span>
+        </label>
+
+        <div class="grid">
+          <label>
+            Bucket
+            <input id="bucket" value="generation-pdfs" />
+          </label>
+          <label>
+            页面宽度 pt
+            <input id="page-width" type="number" min="1" placeholder="默认图片宽度" />
+          </label>
+          <label>
+            页面高度 pt
+            <input id="page-height" type="number" min="1" placeholder="默认图片高度" />
+          </label>
+        </div>
+
+        <label>
+          可选：上传合成 PDF 到 Storage path
+          <input id="upload-path" placeholder="user-id/png-pdf-tests/rebuilt.pdf" />
+        </label>
+
+        <div class="actions">
+          <button id="submit-button" type="submit">生成 PDF</button>
+          <span id="status" class="hint"></span>
+        </div>
+      </form>
+
+      <section id="result" class="result">
+        <strong id="result-title"></strong>
+        <div id="links" class="links"></div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
