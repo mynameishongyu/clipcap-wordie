@@ -7,7 +7,6 @@ import type {
 } from '@/src/lib/pdf/client-pdf';
 import { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
-import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 export interface StoredPdfVisionPageAsset {
   pageNumber: number;
@@ -235,10 +234,9 @@ export async function uploadPdfVisionPagesToSupabase(input: {
         );
       }
 
-      const { data: signedUrlData, error: signedUrlError } =
-        await supabase.storage
-          .from('generation-pdfs')
-          .createSignedUrl(storagePath, getSupabaseSignedUrlExpiresInSeconds());
+      const signedUrl = localPreviewUrl ?? '';
+      const signedUrlData = { signedUrl };
+      const signedUrlError = null as Error | null;
 
       if (signedUrlError || !signedUrlData?.signedUrl) {
         throw new Error(
@@ -250,7 +248,7 @@ export async function uploadPdfVisionPagesToSupabase(input: {
         pageNumber: visionPage.pageNumber,
         originalPageNumber: visionPage.pageNumber,
         storagePath,
-        previewUrl: signedUrlData.signedUrl,
+        previewUrl: signedUrl,
         ...(localPreviewUrl ? { localPreviewUrl } : {}),
         contentType,
         size: blob.size,
