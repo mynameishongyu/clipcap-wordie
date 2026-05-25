@@ -1426,8 +1426,10 @@ async function getFreshReferencePageImageSource(input: {
   page: NonNullable<SlotReviewSessionPayload['pdfEvidence']>['pages'][number];
   supabase: ReturnType<typeof getSupabaseBrowserClient>;
 }) {
-  if (input.page.imageDataUrl) {
-    return input.page.imageDataUrl;
+  const existingImageSource = getReferencePageImageSource(input.page);
+
+  if (existingImageSource) {
+    return existingImageSource;
   }
 
   const storagePath = input.page.storagePath?.trim();
