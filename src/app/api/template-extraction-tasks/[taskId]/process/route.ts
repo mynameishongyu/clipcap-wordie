@@ -194,6 +194,7 @@ export async function POST(
   _request: Request,
   context: { params: Promise<{ taskId: string }> },
 ) {
+  debugger;
   const { taskId } = await context.params;
   let ownerId: string | null = null;
   let actorEmail: string | null = null;

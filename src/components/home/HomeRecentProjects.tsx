@@ -112,18 +112,11 @@ export function HomeRecentProjects() {
   const deleteGenerationTaskItemMutation = useDeleteGenerationTaskItem();
   const deleteTemplateMutation = useDeleteTemplate();
 
-  if (!isAuthLoading && !isAuthenticated) {
-    return (
-      <Card padding="xl" radius="xl" withBorder>
-        <Stack gap="sm">
-          <Title order={3}>已保存模板</Title>
-          <Text c="dimmed">请先登录后再继续。</Text>
-        </Stack>
-      </Card>
-    );
+  if (isAuthLoading || !isAuthenticated) {
+    return null;
   }
 
-  if (isAuthLoading || templatesQuery.isLoading) {
+  if (templatesQuery.isLoading) {
     return (
       <Stack gap="lg">
         <Group justify="space-between">

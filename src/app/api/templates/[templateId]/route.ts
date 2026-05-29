@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createUnauthorizedResponse } from '@/src/lib/api/responses';
 import { getUserTemplateById } from '@/src/lib/data/templates-repository';
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
@@ -12,15 +13,6 @@ type StorageListEntry = {
   metadata?: unknown | null;
 };
 
-function createUnauthorizedResponse() {
-  return NextResponse.json(
-    {
-      code: 'UNAUTHORIZED',
-      message: '请先登录后再继续。',
-    },
-    { status: 401 },
-  );
-}
 
 async function getAuthenticatedUser() {
   const supabase = await createSupabaseServerClient();
@@ -136,7 +128,7 @@ export async function GET(
       return NextResponse.json(
         {
           code: 'TEMPLATE_NOT_FOUND',
-          message: '未找到该模板，可能已被删除。',
+          message: '未找到该模板，可能已经被删除。',
         },
         { status: 404 },
       );
@@ -183,7 +175,7 @@ export async function DELETE(
       return NextResponse.json(
         {
           code: 'TEMPLATE_NOT_FOUND',
-          message: '未找到该模板，可能已被删除。',
+          message: '未找到该模板，可能已经被删除。',
         },
         { status: 404 },
       );

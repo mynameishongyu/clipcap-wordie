@@ -7,10 +7,9 @@ import {
   AUTH_SYNC_EVENT_TYPE,
   AUTH_SYNC_STORAGE_KEY,
 } from '@/src/lib/auth/auth-sync';
-import { logClientRequestError } from '@/src/lib/network/client-request-error';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
-export type RegistrationStatus = 'anonymous' | 'pending' | 'completed';
+export type RegistrationStatus = 'anonymous' | 'authenticated';
 
 export interface RegistrationProfile {
   id: string;
@@ -90,51 +89,54 @@ export function RegistrationGateStoreProvider({ children }: RegistrationGateStor
         return;
       }
 
-      try {
-        const response = await fetch('/api/profile', {
-          cache: 'no-store',
-        });
-
-        if (!response.ok) {
-          setProfile(null);
-          setIsLoading(false);
-          return;
-        }
-
-        const payload = (await response.json()) as {
-          data: {
-            id: string;
-            email: string | null;
-            display_name: string | null;
-            organization_name: string | null;
-            use_case: string | null;
-            registration_status: 'pending' | 'completed';
-            onboarded_at: string | null;
-          };
-        };
-
-        setProfile({
-          id: payload.data.id,
-          displayName: payload.data.display_name ?? '',
-          email: payload.data.email,
-          organizationName: payload.data.organization_name ?? '',
-          useCase: payload.data.use_case ?? '',
-          onboardedAt: payload.data.onboarded_at,
-        });
-      } catch (error) {
-        logClientRequestError({
-          label: '[Profile] Sync request failed',
-          route: '/api/profile',
-          method: 'GET',
-          error,
-          extra: {
-            hasAuthenticatedUser: Boolean(currentUser),
-          },
-        });
-        setProfile(null);
-      } finally {
-        setIsLoading(false);
-      }
+      // 暂停读取业务资料：当前只用 Supabase Auth 判断是否已登录。
+      // try {
+      //   const response = await fetch('/api/profile', {
+      //     cache: 'no-store',
+      //   });
+      //
+      //   if (!response.ok) {
+      //     setProfile(null);
+      //     setIsLoading(false);
+      //     return;
+      //   }
+      //
+      //   const payload = (await response.json()) as {
+      //     data: {
+      //       id: string;
+      //       email: string | null;
+      //       display_name: string | null;
+      //       organization_name: string | null;
+      //       use_case: string | null;
+      //       registration_status: 'pending' | 'completed';
+      //       onboarded_at: string | null;
+      //     };
+      //   };
+      //
+      //   setProfile({
+      //     id: payload.data.id,
+      //     displayName: payload.data.display_name ?? '',
+      //     email: payload.data.email,
+      //     organizationName: payload.data.organization_name ?? '',
+      //     useCase: payload.data.use_case ?? '',
+      //     onboardedAt: payload.data.onboarded_at,
+      //   });
+      // } catch (error) {
+      //   logClientRequestError({
+      //     label: '[Profile] Sync request failed',
+      //     route: '/api/profile',
+      //     method: 'GET',
+      //     error,
+      //     extra: {
+      //       hasAuthenticatedUser: Boolean(currentUser),
+      //     },
+      //   });
+      //   setProfile(null);
+      // } finally {
+      //   setIsLoading(false);
+      // }
+      setProfile(null);
+      setIsLoading(false);
     };
 
     let externalSyncRetryTimers: number[] = [];
@@ -214,7 +216,7 @@ export function RegistrationGateStoreProvider({ children }: RegistrationGateStor
       isLoading,
       isAuthenticated: Boolean(user),
       profile,
-      registrationStatus: !user ? 'anonymous' : profile?.organizationName && profile?.useCase ? 'completed' : 'pending',
+      registrationStatus: !user ? 'anonymous' : 'authenticated',
       user,
       setProfile: (nextProfile) => {
         setProfile(nextProfile);

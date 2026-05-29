@@ -3,21 +3,13 @@ import {
   templatePdfEvidenceResultSchema,
   templateSlotExtractionResultSchema,
 } from '@/src/app/api/types/template-slot-extraction';
+import { createUnauthorizedResponse } from '@/src/lib/api/responses';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import { logErrorEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
 
-function createUnauthorizedResponse() {
-  return NextResponse.json(
-    {
-      code: 'UNAUTHORIZED',
-      message: '请先登录后再继续。',
-    },
-    { status: 401 },
-  );
-}
 
 export async function GET(
   _request: Request,

@@ -1,6 +1,6 @@
 import { Container, Stack } from '@mantine/core';
-import { HomeHero } from '@/src/app/(authenticated)/(home)/home/_components/HomeHero';
-import { HomeRecentProjects } from '@/src/app/(authenticated)/(home)/home/_components/HomeRecentProjects';
+import { HomeHero } from '@/src/components/home/HomeHero';
+import { HomeRecentProjects } from '@/src/components/home/HomeRecentProjects';
 
 export default function LandingPage() {
   return (

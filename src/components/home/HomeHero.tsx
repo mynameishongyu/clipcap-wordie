@@ -851,6 +851,7 @@ export function HomeHero() {
   const hasUploadedDocx = Boolean(selectedDocxFile);
   const canStartSlotDetection = hasUploadedDocx;
 
+  // 读取登录回调写在 URL hash 里的错误信息，例如 magic link 过期。
   useEffect(() => {
     if (typeof window === 'undefined') {
       return;
@@ -891,6 +892,7 @@ export function HomeHero() {
     };
   }, []);
 
+  // 模板处理中启动计时器，每秒更新一次处理耗时。
   useEffect(() => {
     if (!isProcessingTemplate) {
       return;
@@ -905,6 +907,7 @@ export function HomeHero() {
     };
   }, [isProcessingTemplate]);
 
+  // 根据当前处理阶段和耗时，持续刷新模板抽取的 loading 通知。
   useEffect(() => {
     if (!isProcessingTemplate) {
       return;
@@ -933,15 +936,7 @@ export function HomeHero() {
   ]);
 
   const requireRegistration = (sourceAction: string, onReady?: () => void) => {
-    if (sourceAction.includes('DOCX')) {
-      onReady?.();
-      return;
-    }
-
-    if (
-      canUseProtectedActions &&
-      (registrationStatus === 'completed' || registrationStatus === 'pending')
-    ) {
+    if (canUseProtectedActions && registrationStatus === 'authenticated') {
       onReady?.();
       return;
     }
@@ -1085,6 +1080,7 @@ export function HomeHero() {
     [resetExtractionTaskState, router],
   );
 
+  // 监听任务处理日志，只把新增的 trace 行分类打印到浏览器日志。
   useEffect(() => {
     const nextTrace = activeExtractionTask?.processing_trace ?? '';
     const previousTrace = lastExtractionTraceRef.current;
@@ -1157,6 +1153,7 @@ export function HomeHero() {
     lastExtractionTraceRef.current = nextTrace;
   }, [activeExtractionTask?.processing_trace]);
 
+  // 轮询当前抽取任务状态，并在完成或失败时更新通知和页面状态。
   useEffect(() => {
     if (!activeExtractionTask) {
       return;
@@ -1242,16 +1239,6 @@ export function HomeHero() {
           color: 'yellow',
           title: '请先上传 DOCX 模板',
           message: '开始识别槽位前，需要先上传一个 DOCX 模板来定义槽位结构。',
-        });
-        return;
-      }
-
-      if (!selectedPdfFile && selectedPdfName === '__never_require_pdf__') {
-        notifications.show({
-          color: 'yellow',
-          title: '请先上传扫描 PDF 证据',
-          message:
-            '开始识别槽位前，需要同时上传 PDF 扫描件，用于把 DOCX 槽位关联到 PDF 页面。',
         });
         return;
       }

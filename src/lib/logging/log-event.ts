@@ -217,6 +217,7 @@ export async function logErrorEvent(
 }
 
 export async function logEvent(input: LogEventInput): Promise<LogEventResult> {
+  // debugger;
   try {
     const consoleMethod =
       input.level === 'error'
