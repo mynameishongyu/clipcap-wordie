@@ -378,71 +378,77 @@ export async function POST(
       })}`,
     );
 
-    await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_start', {
-      pdf_file_name: task.source_pdf_name ?? null,
-    });
-    const pdfVisionPages = await resolvePdfVisionPages({
-      admin: routeAdmin,
-      sourcePdfVisionPages: task.source_pdf_vision_pages,
-      taskId: task.id,
-      pdfFileName: task.source_pdf_name,
-      onTrace: async (entry) => {
-        await appendProcessingTrace(routeAdmin, task.id, entry.message);
-      },
-    });
-    await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_done', {
-      pdf_page_image_count: pdfVisionPages.length,
-    });
-    const pdfMappingStartedAt = Date.now();
-    await appendMemoryTrace(
-      routeAdmin,
-      task.id,
-      'slot_pdf_page_mapping_start',
-      {
-        pdf_page_image_count: pdfVisionPages.length,
-      },
-    );
     let pdfEvidence = null as Awaited<
       ReturnType<typeof buildTemplatePdfEvidence>
     > | null;
+    const hasPdfEvidence =
+      Boolean(task.source_pdf_name) ||
+      normalizePdfVisionPageAssets(task.source_pdf_vision_pages).length > 0;
 
-    pdfEvidence =
-      task.source_pdf_name && pdfVisionPages.length > 0
-        ? await buildTemplatePdfEvidence({
-            pdfFileName: task.source_pdf_name,
-            extractionResult: extractionResultWithSlotKeys,
-            visionPages: pdfVisionPages,
-            onTrace: async (entry) => {
-              await appendProcessingTrace(routeAdmin, task.id, entry.message);
-            },
-          })
-        : null;
-    const pdfMappingFinishedAt = Date.now();
-    await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_done', {
-      pdf_page_image_count: pdfVisionPages.length,
-      matched_slot_count: pdfEvidence?.matches.length ?? 0,
-    });
-    await appendProcessingTrace(
-      routeAdmin,
-      task.id,
-      `[Template Extract][Timing] ${JSON.stringify({
-        stage: 'slot_pdf_page_mapping',
-        document_name: task.source_docx_name,
+    if (hasPdfEvidence) {
+      await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_start', {
         pdf_file_name: task.source_pdf_name ?? null,
-        started_at: new Date(pdfMappingStartedAt).toISOString(),
-        finished_at: new Date(pdfMappingFinishedAt).toISOString(),
-        duration_ms: pdfMappingFinishedAt - pdfMappingStartedAt,
-        duration_text: formatDurationMs(
-          pdfMappingFinishedAt - pdfMappingStartedAt,
-        ),
+      });
+      const pdfVisionPages = await resolvePdfVisionPages({
+        admin: routeAdmin,
+        sourcePdfVisionPages: task.source_pdf_vision_pages,
+        taskId: task.id,
+        pdfFileName: task.source_pdf_name,
+        onTrace: async (entry) => {
+          await appendProcessingTrace(routeAdmin, task.id, entry.message);
+        },
+      });
+      await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_done', {
         pdf_page_image_count: pdfVisionPages.length,
-        slot_count: result.extraction_result.reduce(
-          (sum, paragraph) => sum + paragraph.items.length,
-          0,
-        ),
+      });
+      const pdfMappingStartedAt = Date.now();
+      await appendMemoryTrace(
+        routeAdmin,
+        task.id,
+        'slot_pdf_page_mapping_start',
+        {
+          pdf_page_image_count: pdfVisionPages.length,
+        },
+      );
+
+      pdfEvidence =
+        task.source_pdf_name && pdfVisionPages.length > 0
+          ? await buildTemplatePdfEvidence({
+              pdfFileName: task.source_pdf_name,
+              extractionResult: extractionResultWithSlotKeys,
+              visionPages: pdfVisionPages,
+              onTrace: async (entry) => {
+                await appendProcessingTrace(routeAdmin, task.id, entry.message);
+              },
+            })
+          : null;
+      const pdfMappingFinishedAt = Date.now();
+      await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_done', {
+        pdf_page_image_count: pdfVisionPages.length,
         matched_slot_count: pdfEvidence?.matches.length ?? 0,
-      })}`,
-    );
+      });
+      await appendProcessingTrace(
+        routeAdmin,
+        task.id,
+        `[Template Extract][Timing] ${JSON.stringify({
+          stage: 'slot_pdf_page_mapping',
+          document_name: task.source_docx_name,
+          pdf_file_name: task.source_pdf_name ?? null,
+          started_at: new Date(pdfMappingStartedAt).toISOString(),
+          finished_at: new Date(pdfMappingFinishedAt).toISOString(),
+          duration_ms: pdfMappingFinishedAt - pdfMappingStartedAt,
+          duration_text: formatDurationMs(
+            pdfMappingFinishedAt - pdfMappingStartedAt,
+          ),
+          pdf_page_image_count: pdfVisionPages.length,
+          slot_count: result.extraction_result.reduce(
+            (sum, paragraph) => sum + paragraph.items.length,
+            0,
+          ),
+          matched_slot_count: pdfEvidence?.matches.length ?? 0,
+        })}`,
+      );
+    }
 
     const partialCompletionMessage =
       result.failedParagraphs > 0

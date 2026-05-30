@@ -39,7 +39,7 @@ let templateExtractionRequestQueue = Promise.resolve();
 let lastTemplateExtractionRequestStartedAt = 0;
 
 const MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE =
-  'meaning_to_applicant must be derived from the nearby label, field name, sentence, or description around original_value in the same paragraph. Do not infer meaning from original_value alone, and do not use distant or unrelated context. original_doc_position should include the nearby wording that supports this meaning.';
+  'meaning_to_applicant 必须根据同一段落中 original_value 附近的标签、字段名、句子或描述得出。不要只根据 original_value 本身推断含义，也不要使用距离较远或无关的上下文。original_doc_position 应包含能支撑该含义的附近原文。';
 const TEMPLATE_STATIC_TEXT_EXCLUSION_RULE =
   '除非用户额外抽取要求明确点名，否则不要抽取模板固定文本、文书标题、合同名称、机构名称、法院/仲裁委名称、法律依据、管辖/仲裁条款、引号中的固定合同条款正文、落款说明、提示性说明文字。例如不要抽取“金穗信用卡合同”“石家庄仲裁委员会”“本合同履行中发生争议，提交石家庄仲裁委员会按其仲裁规则进行仲裁”“仲裁依据”等固定文本。不要抽取与目标主体无关的申请人/原告/银行/机构及其负责人、统一社会信用代码、地址、电话等信息；只有被申请人/被告/借款人/乙方/客户等目标主体或需要回填变化的案件事实字段才作为槽位。';
 
@@ -195,10 +195,51 @@ function buildLlmTraceConfigPayload(
   };
 }
 
+function getParagraphRequestLabel(input: {
+  paragraphDisplayIndex: number;
+  totalParagraphs: number;
+  batchParagraphCount?: number;
+}) {
+  const position = `${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}`;
+
+  return input.batchParagraphCount && input.batchParagraphCount > 1
+    ? `paragraph batch at ${position}`
+    : `paragraph ${position}`;
+}
+
+function getParagraphRequestTraceLabel(input: {
+  paragraphDisplayIndex: number;
+  totalParagraphs: number;
+  batchParagraphCount?: number;
+}) {
+  const position = `${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}`;
+
+  return input.batchParagraphCount && input.batchParagraphCount > 1
+    ? `ParagraphBatch ${position}`
+    : `Paragraph ${position}`;
+}
+
+function getParagraphRequestDetails(input: {
+  paragraphIndex: number;
+  batchParagraphCount?: number;
+  sourceParagraphIndices?: number[];
+}) {
+  if (!input.batchParagraphCount || input.batchParagraphCount <= 1) {
+    return `source_paragraph_index: ${input.paragraphIndex}`;
+  }
+
+  const sourceParagraphIndices = input.sourceParagraphIndices?.length
+    ? input.sourceParagraphIndices
+    : [input.paragraphIndex];
+
+  return `batch paragraphs: ${input.batchParagraphCount}, source paragraph indexes: ${sourceParagraphIndices.join(',')}`;
+}
+
 async function waitForTemplateExtractionRequestSlot(input: {
   fileName: string;
   paragraphDisplayIndex: number;
   totalParagraphs: number;
+  batchParagraphCount?: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   const requestIntervalMs = getTemplateExtractionRequestIntervalMs();
@@ -215,7 +256,7 @@ async function waitForTemplateExtractionRequestSlot(input: {
 
     if (waitMs > 0) {
       const waitMessage =
-        `[Template Extract][LLM] Rate limit spacing before paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
+        `[Template Extract][LLM] Rate limit spacing before ${getParagraphRequestLabel(input)} ` +
         `for ${input.fileName}: waiting ${formatElapsedMs(waitMs)} (request_interval: ${formatElapsedMs(requestIntervalMs)}).`;
       console.info(waitMessage);
       await input.onTrace?.({ message: waitMessage });
@@ -399,11 +440,16 @@ async function requestTextLlmJson(input: {
   paragraphDisplayIndex: number;
   totalParagraphs: number;
   paragraphCharCount: number;
+  batchParagraphCount?: number;
+  sourceParagraphIndices?: number[];
   concurrency: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
   let lastError: unknown = null;
   const maxRetries = getTemplateExtractionMaxRetries();
+  const paragraphRequestLabel = getParagraphRequestLabel(input);
+  const paragraphRequestTraceLabel = getParagraphRequestTraceLabel(input);
+  const paragraphRequestDetails = getParagraphRequestDetails(input);
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     const controller = new AbortController();
@@ -416,14 +462,14 @@ async function requestTextLlmJson(input: {
 
     try {
       const startedMessage =
-        `[Template Extract][LLM] Starting paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
-        `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}, source_paragraph_index: ${input.paragraphIndex}, paragraph_char_count: ${input.paragraphCharCount}, timeout: ${formatElapsedMs(EXTRACTION_TIMEOUT_MS)}).`;
+        `[Template Extract][LLM] Starting ${paragraphRequestLabel} ` +
+        `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}, ${paragraphRequestDetails}, paragraph_char_count: ${input.paragraphCharCount}, timeout: ${formatElapsedMs(EXTRACTION_TIMEOUT_MS)}).`;
       console.log(startedMessage);
       await input.onTrace?.({ message: startedMessage });
       heartbeatIntervalId = setInterval(() => {
         const waitingMessage =
-          `[Template Extract][LLM] Waiting on paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
-          `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}, source_paragraph_index: ${input.paragraphIndex}, elapsed: ${formatElapsedMs(Date.now() - requestStartedAt)} / timeout: ${formatElapsedMs(EXTRACTION_TIMEOUT_MS)}, paragraph_char_count: ${input.paragraphCharCount}).`;
+          `[Template Extract][LLM] Waiting on ${paragraphRequestLabel} ` +
+          `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}, ${paragraphRequestDetails}, elapsed: ${formatElapsedMs(Date.now() - requestStartedAt)} / timeout: ${formatElapsedMs(EXTRACTION_TIMEOUT_MS)}, paragraph_char_count: ${input.paragraphCharCount}).`;
         console.log(waitingMessage);
         void input.onTrace?.({ message: waitingMessage });
       }, EXTRACTION_WAIT_HEARTBEAT_MS);
@@ -433,6 +479,7 @@ async function requestTextLlmJson(input: {
         fileName: input.fileName,
         paragraphDisplayIndex: input.paragraphDisplayIndex,
         totalParagraphs: input.totalParagraphs,
+        batchParagraphCount: input.batchParagraphCount,
         onTrace: input.onTrace,
       });
       const messages: Parameters<
@@ -461,7 +508,7 @@ async function requestTextLlmJson(input: {
 
       await input.onTrace?.({
         message:
-          `[Template Extract][TextRequestBody][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+          `[Template Extract][TextRequestBody][${paragraphRequestTraceLabel}] ` +
           stringifyTraceJson({
             route: '/api/template-extraction-tasks/[taskId]/process',
             config_scope: 'TEXT_LLM',
@@ -469,8 +516,12 @@ async function requestTextLlmJson(input: {
             model: llmConfig.model,
             file_name: input.fileName,
             source_paragraph_index: input.paragraphIndex,
+            source_paragraph_indices: input.sourceParagraphIndices ?? [
+              input.paragraphIndex,
+            ],
             paragraph_display_index: input.paragraphDisplayIndex,
             total_paragraphs: input.totalParagraphs,
+            batch_paragraph_count: input.batchParagraphCount ?? 1,
             paragraph_char_count: input.paragraphCharCount,
             attempt: attempt + 1,
             max_attempts: maxRetries + 1,
@@ -504,13 +555,13 @@ async function requestTextLlmJson(input: {
             attempt,
           });
           const failedMessage =
-            `[Template Extract][LLM] Failed paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
-            `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, retrying in ${formatElapsedMs(retryDelayMs)}, reason: Text LLM request failed (${upstream.status}): ${details}`;
+            `[Template Extract][LLM] Failed ${paragraphRequestLabel} ` +
+            `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}, ${paragraphRequestDetails}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, retrying in ${formatElapsedMs(retryDelayMs)}, reason: Text LLM request failed (${upstream.status}): ${details}`;
           console.error(failedMessage);
           await input.onTrace?.({ message: failedMessage });
           await input.onTrace?.({
             message:
-              `[Template Extract][LLM][ErrorDetails][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+              `[Template Extract][LLM][ErrorDetails][${paragraphRequestTraceLabel}] ` +
               stringifyTraceJson(
                 buildTraceErrorDetails(
                   new Error(
@@ -519,8 +570,12 @@ async function requestTextLlmJson(input: {
                   {
                     fileName: input.fileName,
                     paragraphIndex: input.paragraphIndex,
+                    sourceParagraphIndices: input.sourceParagraphIndices ?? [
+                      input.paragraphIndex,
+                    ],
                     paragraphDisplayIndex: input.paragraphDisplayIndex,
                     totalParagraphs: input.totalParagraphs,
+                    batchParagraphCount: input.batchParagraphCount ?? 1,
                     retryDelayMs,
                   },
                 ),
@@ -550,19 +605,23 @@ async function requestTextLlmJson(input: {
 
       await input.onTrace?.({
         message:
-          `[Template Extract][LLM Raw Response][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+          `[Template Extract][LLM Raw Response][${paragraphRequestTraceLabel}] ` +
           stringifyTraceJson({
             file_name: input.fileName,
             source_paragraph_index: input.paragraphIndex,
+            source_paragraph_indices: input.sourceParagraphIndices ?? [
+              input.paragraphIndex,
+            ],
             paragraph_display_index: input.paragraphDisplayIndex,
             total_paragraphs: input.totalParagraphs,
+            batch_paragraph_count: input.batchParagraphCount ?? 1,
             raw_response: rawContent,
           }),
       });
 
       const completedMessage =
-        `[Template Extract][LLM] Completed paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
-        `for ${input.fileName} (attempt ${attempt + 1}, concurrency: ${input.concurrency}) in ${formatElapsedMs(Date.now() - requestStartedAt)}.`;
+        `[Template Extract][LLM] Completed ${paragraphRequestLabel} ` +
+        `for ${input.fileName} (attempt ${attempt + 1}, concurrency: ${input.concurrency}, ${paragraphRequestDetails}) in ${formatElapsedMs(Date.now() - requestStartedAt)}.`;
       console.log(completedMessage);
       await input.onTrace?.({ message: completedMessage });
 
@@ -572,19 +631,23 @@ async function requestTextLlmJson(input: {
         error instanceof DOMException && error.name === 'AbortError';
       lastError = error;
       const failedMessage =
-        `[Template Extract][LLM] Failed paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs} ` +
-        `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, reason: ${describeNetworkError(error)}`;
+        `[Template Extract][LLM] Failed ${paragraphRequestLabel} ` +
+        `for ${input.fileName} (attempt ${attempt + 1}/${maxRetries + 1}, concurrency: ${input.concurrency}, ${paragraphRequestDetails}) after ${formatElapsedMs(Date.now() - requestStartedAt)}, reason: ${describeNetworkError(error)}`;
       console.error(failedMessage, error);
       await input.onTrace?.({ message: failedMessage });
       await input.onTrace?.({
         message:
-          `[Template Extract][LLM][ErrorDetails][Paragraph ${input.paragraphDisplayIndex + 1}/${input.totalParagraphs}] ` +
+          `[Template Extract][LLM][ErrorDetails][${paragraphRequestTraceLabel}] ` +
           stringifyTraceJson(
             buildTraceErrorDetails(error, {
               fileName: input.fileName,
               paragraphIndex: input.paragraphIndex,
+              sourceParagraphIndices: input.sourceParagraphIndices ?? [
+                input.paragraphIndex,
+              ],
               paragraphDisplayIndex: input.paragraphDisplayIndex,
               totalParagraphs: input.totalParagraphs,
+              batchParagraphCount: input.batchParagraphCount ?? 1,
             }),
           ),
       });
@@ -679,6 +742,7 @@ function chunkParagraphsByConcurrency(
   return batches;
 }
 
+/*
 async function extractSlotsForParagraph(params: {
   fileName: string;
   prompt: string;
@@ -746,6 +810,8 @@ async function extractSlotsForParagraph(params: {
   };
 }
 
+*/
+
 async function extractSlotsForParagraphBatch(params: {
   fileName: string;
   prompt: string;
@@ -755,6 +821,7 @@ async function extractSlotsForParagraphBatch(params: {
   concurrency: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }): Promise<ExtractedParagraphResult[]> {
+  /*
   if (params.paragraphs.length === 1) {
     const paragraph = params.paragraphs[0]!;
     const result = await extractSlotsForParagraph({
@@ -769,11 +836,12 @@ async function extractSlotsForParagraphBatch(params: {
 
     return result ? [result] : [];
   }
+  */
 
   const promptPayload = {
     document_name: params.fileName,
     extra_extraction_requirement: params.prompt || null,
-    strict_requirement: `Process each paragraph independently. Return JSON only. Return extraction_result as an array with one entry per paragraph that has extracted items. Copy paragraph_index exactly from the input paragraph. ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE} ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}`,
+    strict_requirement: `请逐段独立处理。只返回 JSON。extraction_result 只输出包含已抽取 items 的段落；不要输出 items 为空的段落。paragraph_index 必须原样复制输入段落的 paragraph_index。${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE} ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}`,
     paragraphs: params.paragraphs.map((paragraph) => ({
       paragraph_index: paragraph.paragraph_index,
       paragraph_text: paragraph.paragraph_text,
@@ -782,20 +850,22 @@ async function extractSlotsForParagraphBatch(params: {
       document_info: {
         document_name: params.fileName,
       },
-      extraction_result: params.paragraphs.map((paragraph) => ({
-        paragraph_index: paragraph.paragraph_index,
-        items: [
-          {
-            sequence: 1,
-            paragraph_index: paragraph.paragraph_index,
-            field_category: 'Chinese field category',
-            original_value: 'exact value from paragraph text',
-            meaning_to_applicant:
-              'meaning derived from the nearby label, field name, sentence, or description around original_value',
-            original_doc_position: 'short quote that locates the value',
-          },
-        ],
-      })),
+      extraction_result: [
+        {
+          paragraph_index: '从输入段落复制 paragraph_index',
+          items: [
+            {
+              sequence: 1,
+              paragraph_index: '与外层 paragraph_index 相同',
+              field_category: '中文字段类别',
+              original_value: '段落原文中的精确值',
+              meaning_to_applicant:
+                '根据 original_value 附近标签、字段名、句子或描述得到的槽位含义',
+              original_doc_position: '能定位该值的原文短句',
+            },
+          ],
+        },
+      ],
     },
   };
   const rawJson = await requestTextLlmJson({
@@ -804,6 +874,10 @@ async function extractSlotsForParagraphBatch(params: {
     paragraphIndex: params.paragraphs[0]?.paragraph_index ?? 0,
     paragraphDisplayIndex: params.firstParagraphDisplayIndex,
     totalParagraphs: params.totalParagraphs,
+    batchParagraphCount: params.paragraphs.length,
+    sourceParagraphIndices: params.paragraphs.map(
+      (paragraph) => paragraph.paragraph_index,
+    ),
     paragraphCharCount: params.paragraphs.reduce(
       (sum, paragraph) =>
         sum + countMeaningfulCharacters(paragraph.paragraph_text),

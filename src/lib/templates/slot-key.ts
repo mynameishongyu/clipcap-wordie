@@ -7,15 +7,13 @@ import type {
 export function createSlotKeyFromPosition(input: {
   paragraphIndex: number;
   itemIndex: number;
-  sequence: number;
 }) {
-  return `${input.paragraphIndex}-${input.itemIndex}-${input.sequence}`;
+  return `${input.paragraphIndex}-${input.itemIndex}`;
 }
 
 export function createManualSlotKey(input: {
   paragraphIndex: number;
   itemIndex: number;
-  sequence: number;
 }) {
   return createSlotKeyFromPosition(input);
 }
@@ -35,7 +33,6 @@ export function getExtractionItemSlotKey(
   return createSlotKeyFromPosition({
     paragraphIndex,
     itemIndex,
-    sequence: item.sequence,
   });
 }
 

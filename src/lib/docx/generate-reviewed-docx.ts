@@ -165,7 +165,7 @@ function normalizeTemplateOriginalSlots(value: ExtractionParagraph[]): TemplateO
         : undefined;
 
     return paragraph.items.map((item, itemIndex) => ({
-      slot_key: item.slot_key ?? `${paragraphIndex}-${itemIndex}-${item.sequence}`,
+      slot_key: item.slot_key ?? `${paragraphIndex}-${itemIndex}`,
       field_category: item.field_category,
       meaning_to_applicant: item.meaning_to_applicant,
       original_value: item.original_value,

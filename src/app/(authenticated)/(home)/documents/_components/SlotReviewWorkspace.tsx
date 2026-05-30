@@ -277,7 +277,6 @@ function createManualSlotKeyForNewItem(input: {
       return createManualSlotKey({
         paragraphIndex,
         itemIndex,
-        sequence: input.draftItem.sequence,
       });
     }
   }
@@ -285,7 +284,6 @@ function createManualSlotKeyForNewItem(input: {
   return createManualSlotKey({
     paragraphIndex: draftExtractionResult.length,
     itemIndex: 0,
-    sequence: input.draftItem.sequence,
   });
 }
 
@@ -1131,7 +1129,7 @@ function parseSlotItemIdentity(item: EditableExtractionItem) {
   if (
     !Number.isInteger(paragraphResultIndex) ||
     !Number.isInteger(itemIndex) ||
-    !Number.isInteger(sequence)
+    (sequenceRaw !== undefined && !Number.isInteger(sequence))
   ) {
     return null;
   }
@@ -1139,7 +1137,7 @@ function parseSlotItemIdentity(item: EditableExtractionItem) {
   return {
     paragraphResultIndex,
     itemIndex,
-    sequence,
+    sequence: sequenceRaw !== undefined ? sequence : item.sequence,
   };
 }
 
