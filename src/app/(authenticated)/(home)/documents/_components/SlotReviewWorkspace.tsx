@@ -3724,31 +3724,39 @@ export function SlotReviewWorkspace() {
                                       currentState.activeItemId === item.id
                                         ? nextVisibleItemId
                                         : currentState.activeItemId;
-                                    const nextPayload = currentState.payload
-                                      ? removeOrphanPdfEvidenceMatches({
-                                          ...currentState.payload,
-                                          extractionResult:
-                                            buildExtractionResultFromItems(
-                                              nextItems,
-                                              currentState.payload
-                                                .extractionResult,
-                                            ),
-                                          pdfEvidence: currentState.payload
-                                            .pdfEvidence
-                                            ? {
-                                                ...currentState.payload
-                                                  .pdfEvidence,
-                                                matches:
-                                                  currentState.payload.pdfEvidence.matches.filter(
-                                                    (match) =>
-                                                      getPdfEvidenceMatchSlotKey(
-                                                        match,
-                                                      ) !== removedSlotKey,
-                                                  ),
-                                              }
-                                            : undefined,
-                                        })
-                                      : currentState.payload;
+                                    const nextPayload = (() => {
+                                      const currentPayload =
+                                        currentState.payload;
+
+                                      if (!currentPayload) {
+                                        return currentPayload;
+                                      }
+
+                                      const nextExtractionResult =
+                                        buildExtractionResultFromItems(
+                                          nextItems,
+                                          currentPayload.extractionResult,
+                                        );
+                                      const nextPdfEvidence =
+                                        currentPayload.pdfEvidence
+                                          ? {
+                                              ...currentPayload.pdfEvidence,
+                                              matches:
+                                                currentPayload.pdfEvidence.matches.filter(
+                                                  (match) =>
+                                                    getPdfEvidenceMatchSlotKey(
+                                                      match,
+                                                    ) !== removedSlotKey,
+                                                ),
+                                            }
+                                          : undefined;
+
+                                      return removeOrphanPdfEvidenceMatches({
+                                        ...currentPayload,
+                                        extractionResult: nextExtractionResult,
+                                        pdfEvidence: nextPdfEvidence,
+                                      });
+                                    })();
 
                                     const nextPendingSelectionByItemId =
                                       Object.fromEntries(

@@ -24,9 +24,8 @@ import type { TemplateExtractionTaskResponse } from '@/src/app/api/types/templat
 import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { parseDocxInBrowser } from '@/src/lib/docx/parse-browser';
 import {
+  getPdfPageNumbers,
   getPdfRenderConfig,
-  parsePdf,
-  pickVisionPageNumbers,
   renderPdfPagesForVision,
 } from '@/src/lib/pdf/client-pdf';
 import {
@@ -682,15 +681,12 @@ async function preparePdfVisionPageAssets(
     { pdfRenderConfig },
   );
 
-  const parsedPdf = await parsePdf(file);
-  const pageNumbers = pickVisionPageNumbers(parsedPdf);
+  const pageNumbers = await getPdfPageNumbers(file);
 
   browserProcessLog.info(
     `[Template Extract][PDF Evidence] Rendering ${pageNumbers.length} page(s) for visual location evidence.`,
     {
       pdfFileName: file.name,
-      totalTextLength: parsedPdf.totalTextLength,
-      likelyScanned: parsedPdf.likelyScanned,
       pageNumbers,
       pdfRenderConfig,
     },

@@ -330,6 +330,12 @@ export function pickVisionPageNumbers(pdf: ParsedPdfDocument) {
   return pdf.pages.map((page) => page.pageNumber);
 }
 
+export async function getPdfPageNumbers(file: File) {
+  const pdf = await loadPdfDocument(file);
+
+  return Array.from({ length: pdf.numPages }, (_, index) => index + 1);
+}
+
 function isLikelyWhitePixel(data: Uint8ClampedArray, index: number) {
   const red = data[index] ?? 0;
   const green = data[index + 1] ?? 0;
@@ -741,17 +747,14 @@ function createPdfVisionCanvas(
   config: PdfRenderConfig,
 ) {
   const initialCrop = findCanvasContentBounds(canvas);
-  const rotationApplied = analyzeCanvasSidewaysRotation(
-    canvas,
-    initialCrop,
-    config,
-  );
-  const orientedCanvas = rotateCanvas(canvas, rotationApplied);
-  const crop =
-    rotationApplied === 0
-      ? initialCrop
-      : findCanvasContentBounds(orientedCanvas);
-  const croppedCanvas = crop ? cropCanvas(orientedCanvas, crop) : orientedCanvas;
+  // 暂停自动旋转判断，保持 PDF 原始方向，方便调试视觉定位流程。
+  // const rotationApplied = analyzeCanvasSidewaysRotation(
+  //   canvas,
+  //   initialCrop,
+  //   config,
+  // );
+  const rotationApplied: PdfVisionPageRotation = 0;
+  const croppedCanvas = initialCrop ? cropCanvas(canvas, initialCrop) : canvas;
   const optimizedCanvas =
     config.imageFormat === 'image/jpeg'
       ? resizeCanvasToMaxLongEdge(croppedCanvas, config.jpegMaxLongEdge)
@@ -763,7 +766,7 @@ function createPdfVisionCanvas(
 
   return {
     canvas: optimizedCanvas,
-    crop: crop ?? undefined,
+    crop: initialCrop ?? undefined,
     rotationApplied,
   };
 }
