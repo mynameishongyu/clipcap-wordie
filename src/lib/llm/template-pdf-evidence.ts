@@ -915,18 +915,18 @@ function buildLocateSlots(extractionResult: ExtractionParagraph[]) {
 }
 
 const PDF_BBOX_SYSTEM_PROMPT =
-  'You are a precise visual document layout locator. Return compact valid JSON only, with no markdown or explanations. Locate visible slot values in scanned PDF page images and return bounding boxes according to the requested bbox_target_mode. If the returned box and evidence_text are not spatially related to the same requested value, omit the match.';
+  '你是一个精确的视觉文档版面定位助手。请在扫描 PDF 页面图片中定位给定槽位值，并按照指定的 bbox_target_mode 返回 bounding boxes。只返回紧凑且合法的 JSON，不要返回 markdown 或解释文字。如果返回的 box 与 evidence_text 在空间上不对应同一个请求值，请省略该 match。';
 
 function getProviderBboxFormat(provider: LlmProvider) {
   if (provider === 'qwen' || provider === 'kimi' || provider === 'doubao') {
     const providerHint =
       provider === 'doubao'
-        ? 'This follows Seed/Doubao visual grounding semantics: equivalent to <bbox>x1 y1 x2 y2</bbox>, but return it as JSON bbox_2d.'
-        : 'Use x-first visual-grounding format.';
+        ? '这遵循 Seed/Doubao visual grounding 语义：等价于 <bbox>x1 y1 x2 y2</bbox>，但必须以 JSON bbox_2d 返回。'
+        : '使用 x-first visual-grounding 格式。';
 
     return {
       field: 'bbox_2d',
-      coordinateSystem: `${providerHint} bbox_2d must be [x1, y1, x2, y2], normalized to integers from 0 to 999 or 0 to 1000 relative to the full image.`,
+      coordinateSystem: `${providerHint} bbox_2d 必须是 [x1, y1, x2, y2]，相对于整张图片归一化为 0 到 999 或 0 到 1000 的整数。`,
       example: [100, 200, 400, 240],
     } as const;
   }
@@ -935,7 +935,7 @@ function getProviderBboxFormat(provider: LlmProvider) {
     return {
       field: 'box_2d',
       coordinateSystem:
-        'Use Gemini bounding-box format: box_2d must be [ymin, xmin, ymax, xmax], normalized to integers from 0 to 1000 relative to the full image.',
+        '使用 Gemini bounding-box 格式：box_2d 必须是 [ymin, xmin, ymax, xmax]，相对于整张图片归一化为 0 到 1000 的整数。',
       example: [200, 100, 240, 400],
     } as const;
   }
@@ -943,7 +943,7 @@ function getProviderBboxFormat(provider: LlmProvider) {
   return {
     field: 'bbox',
     coordinateSystem:
-      'Use normalized bbox object format: bbox must be {x, y, width, height}, and all values must be ratios from 0 to 1 relative to the full image.',
+      '使用归一化 bbox object 格式：bbox 必须是 {x, y, width, height}，所有值都是相对于整张图片的 0 到 1 比例。',
     example: {
       x: 0.1,
       y: 0.2,
@@ -959,22 +959,22 @@ function getTargetModeRules(input: {
 }) {
   if (input.targetMode === 'cell') {
     return [
-      `bbox_target_mode is "cell": ${input.bboxField} should enclose the table cell or compact evidence region that contains the requested value, not just the value glyphs.`,
-      `If the value is inside a table, ${input.bboxField} should follow the visual cell boundary as closely as possible and include the label/value text inside that same cell when useful.`,
-      'For table values such as amounts, dates, status fields, and small numbers, prefer the complete containing cell over a tiny text-only box.',
-      'For page headers, footers, system timestamps, screenshots, or corner metadata, return a compact local evidence region containing the value instead of only the characters.',
-      `The ${input.bboxField} may include the field label, table borders, and whitespace inside the same cell/evidence region, but must not cross into adjacent cells, adjacent rows, or unrelated areas.`,
-      'evidence_text should describe the visible value and nearby label/context inside the selected cell or evidence region, for example "overdue installment fee: 3400".',
-      `If the value is in a multi-line cell or evidence region, ${input.bboxField} may cover that whole cell/region but must not include unrelated adjacent cells.`,
+      `bbox_target_mode 为 "cell" 时，${input.bboxField} 应框住包含请求值的表格单元格或紧凑证据区域，而不是只框住值本身的文字笔画。`,
+      `如果值位于表格中，${input.bboxField} 应尽量贴近可见单元格边界；必要时可以包含同一单元格内的 label/value 文本。`,
+      '对于表格中的金额、日期、状态字段、小数字等值，优先返回完整包含该值的单元格，而不是很小的 text-only box。',
+      '对于页眉、页脚、系统时间戳、截图或角落元数据，返回包含该值的局部紧凑证据区域，不要只框几个字符。',
+      `${input.bboxField} 可以包含同一单元格/证据区域内的字段标签、表格边框和空白，但不能跨到相邻单元格、相邻行或无关区域。`,
+      'evidence_text 应描述选中单元格或证据区域中的可见值和附近标签/上下文，例如 "overdue installment fee: 3400"。',
+      `如果值处于多行单元格或证据区域，${input.bboxField} 可以覆盖整个单元格/区域，但不能包含无关的相邻单元格。`,
     ];
   }
 
   return [
-    `bbox_target_mode is "text": ${input.bboxField} must enclose only the slot value text itself.`,
-    'Do not include field labels such as name, gender, birth date, address, amount, phone, ID number, or nearby form labels.',
-    'Do not include adjacent rows, adjacent columns, explanatory text, table borders, stamps, photos, icons, or blank whitespace unless the value text itself visually requires it.',
-    `For each match, return the tightest practical ${input.bboxField} around the visible value text, not around the entire row, card, table cell, or page.`,
-    `If the value spans multiple lines, ${input.bboxField} may cover those value lines only; if the value is on one line, it must stay on that line only.`,
+    `bbox_target_mode 为 "text" 时，${input.bboxField} 只能框住槽位值文字本身。`,
+    '不要包含姓名、性别、出生日期、地址、金额、电话、身份证号等字段标签，也不要包含附近表单标签。',
+    '不要包含相邻行、相邻列、解释性文字、表格边框、印章、照片、图标或空白区域，除非值文字本身在视觉上确实需要这些区域。',
+    `每个 match 都应返回围绕可见值文字的最紧凑可用 ${input.bboxField}，不要框住整行、整张卡片、整个单元格或整页。`,
+    `如果值跨多行，${input.bboxField} 只可覆盖这些值所在行；如果值在单行，box 也必须停留在该行。`,
   ];
 }
 
@@ -984,23 +984,23 @@ function getTargetModeNegativeExamples(input: {
 }) {
   if (input.targetMode === 'cell') {
     return [
-      'For a table amount value, do not box only the tiny amount glyphs if the containing table cell boundary is visible.',
-      'For a table cell, do not cross into the adjacent row or adjacent column.',
-      'For a corner system date/time, do not box the whole page or the whole screenshot; box only the local corner evidence region.',
-      'For original_value "18803308383", never return evidence_text "0311-66568703" because it is a different phone number.',
-      `Never return evidence_text equal to original_value on a page where that text is not visibly printed or handwritten inside the proposed ${input.bboxField}.`,
+      '对于表格金额值，如果包含它的单元格边界清晰可见，不要只框很小的金额文字笔画。',
+      '对于表格单元格，不要跨到相邻行或相邻列。',
+      '对于角落里的系统日期/时间，不要框整页或整个截图，只框局部角落证据区域。',
+      '对于 original_value "18803308383"，不要返回 evidence_text "0311-66568703"，因为这是另一个电话号码。',
+      `如果某页中 proposed ${input.bboxField} 内没有可见打印或手写的 original_value 文本，不要返回 evidence_text 等于 original_value。`,
     ];
   }
 
   return [
-    'For a name value, box only the person name, not the name label.',
-    'For a gender value, box only the gender value, not the gender label or neighboring nationality value.',
-    'For a birth date, box only the date value, not the birth-date label or the address line below it.',
-    'For an address, box only the address text, not the address label, birth date line, ID number line, or photo.',
-    'For original_value "18803308383", never return evidence_text "0311-66568703" because it is a different phone number.',
-    `For original_value "18103108407", never return evidence_text "18103108407" with ${input.bboxField} around the left-side company phone/stamp area if the visible number is actually on the right-side person phone area.`,
-    `Never return evidence_text equal to original_value on a page where that text is not visibly printed or handwritten inside the proposed ${input.bboxField}.`,
-    `For pages with multiple phone labels, ${input.bboxField} must cover the exact phone number characters, not merely the nearest phone label or a different phone line.`,
+    '对于姓名值，只框人名本身，不要框“姓名”等标签。',
+    '对于性别值，只框性别值本身，不要框性别标签或相邻民族值。',
+    '对于出生日期，只框日期值本身，不要框出生日期标签或下一行地址。',
+    '对于地址，只框地址文本本身，不要框地址标签、出生日期行、身份证号行或照片。',
+    '对于 original_value "18803308383"，不要返回 evidence_text "0311-66568703"，因为这是另一个电话号码。',
+    `对于 original_value "18103108407"，如果可见号码实际在右侧个人电话区域，不要返回 evidence_text "18103108407" 但把 ${input.bboxField} 框在左侧公司电话/印章区域。`,
+    `如果某页中 proposed ${input.bboxField} 内没有可见打印或手写的 original_value 文本，不要返回 evidence_text 等于 original_value。`,
+    `对于有多个电话标签的页面，${input.bboxField} 必须覆盖精确的电话号码字符，而不是只覆盖最近的电话标签或另一条电话行。`,
   ];
 }
 
@@ -1016,44 +1016,44 @@ function buildPdfBboxLocatePrompt(input: {
   return {
     task:
       input.targetMode === 'cell'
-        ? 'Locate the provided DOCX slot values directly on these PDF page images. Return the containing table cell or compact evidence region for each matched value. Do not OCR the whole page. Return compact valid JSON only.'
-        : 'Locate the provided DOCX slot values directly on these PDF page images. Do not OCR the whole page. Return compact valid JSON only.',
+        ? '请直接在这些 PDF 页面图片中定位给定的 DOCX 槽位值。每个匹配值应返回包含它的表格单元格或紧凑证据区域。不要 OCR 整页。只返回紧凑且合法的 JSON。'
+        : '请直接在这些 PDF 页面图片中定位给定的 DOCX 槽位值。不要 OCR 整页。只返回紧凑且合法的 JSON。',
     document_name: input.pdfFileName,
     page_numbers: input.pageNumbers,
     provider: input.provider,
     bbox_target_mode: input.targetMode,
     coordinate_system: bboxFormat.coordinateSystem,
     json_output_rules: [
-      'Return exactly one compact JSON object and nothing else.',
-      'The response must start with {"matches": and must be directly parseable by JSON.parse.',
-      'Do not use markdown fences, comments, explanations, line prefixes, trailing commas, single quotes, Chinese punctuation as JSON delimiters, NaN, Infinity, or undefined.',
-      'If there are no confident matches, return {"matches":[]}.',
+      '只返回一个紧凑 JSON object，不要返回其他内容。',
+      '响应必须以 {"matches": 开头，并且必须能被 JSON.parse 直接解析。',
+      '不要使用 markdown fences、注释、解释、行前缀、尾随逗号、单引号、中文标点作为 JSON 分隔符、NaN、Infinity 或 undefined。',
+      '如果没有可信匹配，返回 {"matches":[]}。',
     ],
     strict_requirements: [
-      `Every match must use the field named ${bboxFormat.field}. Do not use any other bbox field name.`,
-      `Every match must include bbox_target with the exact value "${input.targetMode}".`,
-      'Only return a match when the visual page image contains the exact value or a visually equivalent value.',
-      'A matching field label or matching field type is not enough. The visible value must match original_value after normalizing formatting.',
-      'For phone numbers, compare digit sequences after removing spaces, hyphens, parentheses, and country-code formatting. Do not return a different phone number just because it is near a phone label.',
-      'For ID numbers, dates, and amounts, the visible value must match the input value after normalizing common formatting such as spaces, commas, Chinese date units, and currency symbols.',
-      'For dates, treat Chinese date text and numeric slash/dash/dot formats as equivalent when the year, month, and day are the same. For example, original_value with year=2026, month=3, day=30 matches visible text "2026/3/30", "2026-3-30", "2026.3.30", "2026/03/30", and "2026-03-30".',
-      'For dates, ignore leading zeros in month/day during comparison, but evidence_text must still be the exact visible date text from the PDF image.',
-      'If the page contains the same label but a different value, omit that slot from matches.',
-      `Spatial consistency is mandatory: ${bboxFormat.field} must physically contain the exact visible value reported in evidence_text.`,
-      `Page consistency is mandatory: page_number must be the page image where ${bboxFormat.field} and evidence_text are visibly present. Do not copy a value from another page, another slot, memory, or document context.`,
-      `evidence_text must be transcribed only from the visible characters inside or immediately touching the returned ${bboxFormat.field} on the same page_number image.`,
-      'If original_value is known from the input but is not visibly present on the current page image, do not return it as evidence_text for that page.',
-      `Do not return a correct evidence_text with ${bboxFormat.field} around another nearby value, another phone number, another signature block, a stamp, a label, or blank space.`,
-      `Before returning a match, visually re-check the proposed ${bboxFormat.field}: if it does not contain the requested visible value, omit the match.`,
-      `If you can read the value somewhere on the page but cannot confidently draw ${bboxFormat.field} according to bbox_target_mode, omit the match instead of guessing a box.`,
+      `每个 match 必须使用字段名 ${bboxFormat.field}，不要使用其他 bbox 字段名。`,
+      `每个 match 必须包含 bbox_target，且值必须精确等于 "${input.targetMode}"。`,
+      '只有当视觉页面图片中包含精确值或视觉上等价的值时，才返回 match。',
+      '仅字段标签匹配或字段类型匹配是不够的。可见值在格式归一化后必须匹配 original_value。',
+      '对于电话号码，先移除空格、连字符、括号和国家区号格式，再比较数字序列。不要因为某个号码靠近电话标签，就返回另一个电话号码。',
+      '对于身份证号、日期和金额，可见值在归一化常见格式后必须匹配输入值，例如空格、逗号、中文日期单位和货币符号。',
+      '对于日期，当年月日相同，中文日期文本和斜杠/短横线/点号数字格式视为等价。例如 original_value 的 year=2026、month=3、day=30，可以匹配可见文本 "2026/3/30"、"2026-3-30"、"2026.3.30"、"2026/03/30" 和 "2026-03-30"。',
+      '对于日期，比较时忽略月/日的前导零，但 evidence_text 仍必须是 PDF 图片中的精确可见日期文本。',
+      '如果页面包含相同标签但值不同，请从 matches 中省略该槽位。',
+      `空间一致性是强制要求：${bboxFormat.field} 必须在物理位置上包含 evidence_text 中报告的精确可见值。`,
+      `页面一致性是强制要求：page_number 必须是 ${bboxFormat.field} 和 evidence_text 实际可见所在的页面图片。不要从其他页面、其他槽位、记忆或文档上下文复制值。`,
+      `evidence_text 只能转写同一 page_number 图片中、位于返回 ${bboxFormat.field} 内部或紧贴其边缘的可见字符。`,
+      '如果 original_value 来自输入，但当前页面图片中不可见，不要把它作为该页的 evidence_text 返回。',
+      `不要返回正确的 evidence_text，却把 ${bboxFormat.field} 框在另一个附近值、另一个电话号码、另一个签名块、印章、标签或空白区域上。`,
+      `返回 match 前必须视觉复查 proposed ${bboxFormat.field}：如果它不包含请求的可见值，请省略该 match。`,
+      `如果你能在页面某处读到该值，但不能按照 bbox_target_mode 可信地绘制 ${bboxFormat.field}，请省略该 match，不要猜 box。`,
       ...getTargetModeRules({
         bboxField: bboxFormat.field,
         targetMode: input.targetMode,
       }),
-      'If a value appears multiple times, choose the occurrence that best matches the field label or context.',
-      'If the exact slot value is not visible but a shortened or formatted equivalent is visible, locate only that visible equivalent and put the visible text in evidence_text.',
-      `evidence_text must be the visible text inside or immediately touching ${bboxFormat.field}. It should include the located value, not just the field label.`,
-      'If you are unsure, omit the match instead of guessing.',
+      '如果同一个值出现多次，选择最符合字段标签或上下文的那个出现位置。',
+      '如果精确槽位值不可见，但可见缩写或格式等价值，只定位该可见等价值，并将可见文本放入 evidence_text。',
+      `evidence_text 必须是 ${bboxFormat.field} 内部或紧贴其边缘的可见文本。它应包含定位到的值，而不只是字段标签。`,
+      '如果不确定，请省略 match，不要猜测。',
     ],
     negative_examples: getTargetModeNegativeExamples({
       bboxField: bboxFormat.field,

@@ -409,13 +409,14 @@ async function persistTemplateReferencePdfPages(input: {
     ),
   );
 
-  await cleanupTemplateExtractionPages({
-    supabase: input.supabase,
-    user: input.user,
-    extractionTaskId: pdfEvidence.extractionTaskId,
-    originalPages: pdfEvidence.pages,
-    persistedPages: pages,
-  });
+  // Debug: keep temporary PDF extraction page images in Storage for inspection.
+  // await cleanupTemplateExtractionPages({
+  //   supabase: input.supabase,
+  //   user: input.user,
+  //   extractionTaskId: pdfEvidence.extractionTaskId,
+  //   originalPages: pdfEvidence.pages,
+  //   persistedPages: pages,
+  // });
 
   return {
     ...input.slotReviewPayload,
@@ -445,20 +446,24 @@ async function cleanupTemplateExtractionPages(input: {
     `${input.user.id}/template-extraction-pages/task/${extractionTaskId}/`,
     `${input.user.id}/template-extraction-pages/${extractionTaskId}/`,
   ];
-  const storagePathsToRemove = input.originalPages
-    .map((page, index) => ({
-      originalPath: page.storagePath?.trim() ?? '',
-      persistedPath: input.persistedPages[index]?.storagePath?.trim() ?? '',
-    }))
-    .filter(
-      (entry) =>
-        temporaryPrefixes.some((temporaryPrefix) =>
-          entry.originalPath.startsWith(temporaryPrefix),
-        ) &&
-        entry.persistedPath &&
-        entry.persistedPath !== entry.originalPath,
-    )
-    .map((entry) => entry.originalPath);
+  const storagePathsToRemove: string[] = [];
+
+  input.originalPages.forEach((page, index) => {
+    const originalPath = page.storagePath?.trim() ?? '';
+    const persistedPath =
+      input.persistedPages[index]?.storagePath?.trim() ?? '';
+    const isTemporaryPath = temporaryPrefixes.some((temporaryPrefix) =>
+      originalPath.startsWith(temporaryPrefix),
+    );
+    const wasPersistedToDifferentPath =
+      Boolean(persistedPath) && persistedPath !== originalPath;
+
+    if (!isTemporaryPath || !wasPersistedToDifferentPath) {
+      return;
+    }
+
+    storagePathsToRemove.push(originalPath);
+  });
 
   if (storagePathsToRemove.length === 0) {
     return;

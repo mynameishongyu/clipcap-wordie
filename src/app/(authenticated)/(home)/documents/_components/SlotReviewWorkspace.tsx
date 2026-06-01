@@ -2923,14 +2923,28 @@ export function SlotReviewWorkspace() {
         bbox: pdfLocationEditState.draftBbox!,
         existingMatch,
       });
-      const didReplaceMatch = currentState.payload.pdfEvidence.matches.some(
-        (match) => isPdfEvidenceMatchForItem(match, currentItem),
+      const currentMatches = currentState.payload.pdfEvidence.matches;
+      const hasExistingMatch = currentMatches.some((match) =>
+        isPdfEvidenceMatchForItem(match, currentItem),
       );
-      const nextMatches = didReplaceMatch
-        ? currentState.payload.pdfEvidence.matches.map((match) =>
-            isPdfEvidenceMatchForItem(match, currentItem) ? nextMatch : match,
-          )
-        : [...currentState.payload.pdfEvidence.matches, nextMatch];
+      let nextMatches: PdfEvidenceMatch[];
+
+      if (hasExistingMatch) {
+        nextMatches = currentMatches.map((match) => {
+          const isCurrentItemMatch = isPdfEvidenceMatchForItem(
+            match,
+            currentItem,
+          );
+
+          if (isCurrentItemMatch) {
+            return nextMatch;
+          }
+
+          return match;
+        });
+      } else {
+        nextMatches = [...currentMatches, nextMatch];
+      }
       const nextPayload: SlotReviewSessionPayload = {
         ...currentState.payload,
         pdfEvidence: {
@@ -3737,19 +3751,30 @@ export function SlotReviewWorkspace() {
                                           nextItems,
                                           currentPayload.extractionResult,
                                         );
-                                      const nextPdfEvidence =
-                                        currentPayload.pdfEvidence
-                                          ? {
-                                              ...currentPayload.pdfEvidence,
-                                              matches:
-                                                currentPayload.pdfEvidence.matches.filter(
-                                                  (match) =>
-                                                    getPdfEvidenceMatchSlotKey(
-                                                      match,
-                                                    ) !== removedSlotKey,
-                                                ),
-                                            }
-                                          : undefined;
+                                      const currentPdfEvidence =
+                                        currentPayload.pdfEvidence;
+                                      let nextPdfEvidence = currentPdfEvidence;
+
+                                      if (currentPdfEvidence) {
+                                        const nextPdfEvidenceMatches =
+                                          currentPdfEvidence.matches.filter(
+                                            (match) => {
+                                              const matchSlotKey =
+                                                getPdfEvidenceMatchSlotKey(
+                                                  match,
+                                                );
+                                              const shouldKeepMatch =
+                                                matchSlotKey !== removedSlotKey;
+
+                                              return shouldKeepMatch;
+                                            },
+                                          );
+
+                                        nextPdfEvidence = {
+                                          ...currentPdfEvidence,
+                                          matches: nextPdfEvidenceMatches,
+                                        };
+                                      }
 
                                       return removeOrphanPdfEvidenceMatches({
                                         ...currentPayload,

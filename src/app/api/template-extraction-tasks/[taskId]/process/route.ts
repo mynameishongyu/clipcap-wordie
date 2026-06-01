@@ -158,11 +158,12 @@ function normalizePdfVisionPageAssets(value: unknown) {
 async function resolvePdfVisionPages(input: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
   sourcePdfVisionPages: unknown;
+  storedAssets: PdfPageImageAsset[];
   taskId: string;
   pdfFileName: string | null;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
 }) {
-  const storedAssets = normalizePdfVisionPageAssets(input.sourcePdfVisionPages);
+  const { storedAssets } = input;
 
   if (storedAssets.length > 0) {
     const llmConfig = getLlmRuntimeConfig('vision');
@@ -381,9 +382,11 @@ export async function POST(
     let pdfEvidence = null as Awaited<
       ReturnType<typeof buildTemplatePdfEvidence>
     > | null;
+    const pdfVisionPageAssets = normalizePdfVisionPageAssets(
+      task.source_pdf_vision_pages,
+    );
     const hasPdfEvidence =
-      Boolean(task.source_pdf_name) ||
-      normalizePdfVisionPageAssets(task.source_pdf_vision_pages).length > 0;
+      Boolean(task.source_pdf_name) || pdfVisionPageAssets.length > 0;
 
     if (hasPdfEvidence) {
       await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_start', {
@@ -392,6 +395,7 @@ export async function POST(
       const pdfVisionPages = await resolvePdfVisionPages({
         admin: routeAdmin,
         sourcePdfVisionPages: task.source_pdf_vision_pages,
+        storedAssets: pdfVisionPageAssets,
         taskId: task.id,
         pdfFileName: task.source_pdf_name,
         onTrace: async (entry) => {

@@ -9,10 +9,7 @@ import {
   geminiTemplateSlotExtractionResponseSchema,
   withGeminiOpenAiJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
-import {
-  extractFirstCompleteJsonValue,
-  parseModelJsonOutput,
-} from '@/src/lib/llm/json-output';
+import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
   buildChatCompletionBody,
   getLlmRuntimeConfig,
@@ -310,10 +307,6 @@ function getRetryDelayMs(input: {
       ? 5000 * (input.attempt + 1)
       : 1000 * (input.attempt + 1),
   );
-}
-
-function normalizeJsonText(rawContent: string) {
-  return extractFirstCompleteJsonValue(rawContent);
 }
 
 function formatElapsedMs(ms: number) {
@@ -625,7 +618,7 @@ async function requestTextLlmJson(input: {
       console.log(completedMessage);
       await input.onTrace?.({ message: completedMessage });
 
-      return normalizeJsonText(rawContent);
+      return rawContent;
     } catch (error) {
       const isTimeout =
         error instanceof DOMException && error.name === 'AbortError';
