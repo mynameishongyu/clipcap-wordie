@@ -20,11 +20,18 @@ import {
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
+import { removeTemplateFixedSuffixFromValue } from '@/src/lib/templates/fixed-suffix';
+import {
+  recordLlmUsageFromPayload,
+  type LlmUsageAccumulator,
+} from '@/src/lib/llm/usage';
 
 export interface GenerationSlotSchemaItem {
   slot_key: string;
   field_category: string;
   meaning_to_applicant: string;
+  template_original_value?: string;
+  template_original_doc_position?: string;
   reference_pdf_evidence?: GenerationSlotReferencePdfEvidence | null;
 }
 
@@ -547,6 +554,9 @@ function stringifyTraceJson(value: unknown) {
   return JSON.stringify(value);
 }
 
+const TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT =
+  'final_value is the replacement for template_original_value in the DOCX template, not necessarily the full field phrase seen in the PDF. Match the granularity of template_original_value. If template_original_value omits a fixed suffix/unit that appears immediately after it in template_original_context, such as %, ％, yuan/元, or 族, final_value must omit that suffix/unit too. Examples: template_original_value "0.4" in context "0.4％" -> return "0.4167", not "0.4167%"; template_original_value "40800" in context "40800元" -> return "17,500", not "17,500元"; template_original_value "汉" in context "汉族" -> return "汉", not "汉族".';
+
 export function buildTextSlotFillPromptPayload(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
@@ -559,8 +569,7 @@ export function buildTextSlotFillPromptPayload(input: {
     slot_definitions: input.slots.map((slot) =>
       buildSlotDefinitionForPrompt(slot),
     ),
-    strict_requirement:
-      'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+    strict_requirement: `Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. ${TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT} The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.`,
     page_numbers: input.pageNumbers,
     content: input.chunkText,
     output_schema: {
@@ -805,6 +814,8 @@ function buildSlotDefinitionForPrompt(
   return {
     slot_key: slot.slot_key,
     slot_name: slot.field_category,
+    template_original_value: slot.template_original_value ?? '',
+    template_original_context: slot.template_original_doc_position ?? '',
     slot_source:
       slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
     reference_example_pdf_evidence: shouldIncludeReferenceEvidence
@@ -978,8 +989,7 @@ async function extractSlotWithTextModel(input: {
                 reference_example_pdf_evidence: buildSlotReferencePromptData(
                   input.slot,
                 ),
-                strict_requirement:
-                  'Return the exact same slot_key in results[0].slot_key. Use slot_source and reference_example_pdf_evidence as example clues from the reviewed template PDF, but extract final_value only from this new PDF text chunk. final_value must be the exact value used for filling. matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.',
+                strict_requirement: `Return the exact same slot_key in results[0].slot_key. Use slot_source and reference_example_pdf_evidence as example clues from the reviewed template PDF, but extract final_value only from this new PDF text chunk. final_value must be the exact value used for filling. ${TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT} matches[0].value must equal final_value. matches[0].snippet must contain final_value as a direct quote from the PDF text chunk.`,
                 page_numbers: input.pageNumbers,
                 content: input.chunkText,
                 output_schema: {
@@ -1602,7 +1612,10 @@ function normalizeDateValue(value: string) {
 function resolveExtractedValue(
   slot: Pick<
     GenerationSlotSchemaItem,
-    'field_category' | 'meaning_to_applicant'
+    | 'field_category'
+    | 'meaning_to_applicant'
+    | 'template_original_value'
+    | 'template_original_doc_position'
   >,
   result: ModelResultCandidate | null,
   firstMatch?: ModelMatch,
@@ -1614,11 +1627,15 @@ function resolveExtractedValue(
     return '';
   }
 
-  if (isDateSlot(slot)) {
-    return normalizeDateValue(rawValue);
-  }
+  const normalizedValue = isDateSlot(slot)
+    ? normalizeDateValue(rawValue)
+    : rawValue;
 
-  return rawValue;
+  return removeTemplateFixedSuffixFromValue({
+    value: normalizedValue,
+    templateOriginalValue: slot.template_original_value,
+    templateContext: slot.template_original_doc_position,
+  });
 }
 
 function resolveEvidenceSnippet(
@@ -1767,6 +1784,36 @@ function sanitizeExtractedItemEvidencePages(
       fallbackUploadedPageNumbers,
     ),
   }));
+}
+
+function normalizeExtractedItemTemplateSuffixes(
+  items: Array<z.infer<typeof generationExtractedItemSchema>>,
+  slots: GenerationSlotSchemaItem[],
+) {
+  const slotByKey = new Map(slots.map((slot) => [slot.slot_key, slot]));
+
+  return items.map((item) => {
+    const slot = slotByKey.get(item.slot_key);
+
+    if (!slot) {
+      return item;
+    }
+
+    const originalValue = removeTemplateFixedSuffixFromValue({
+      value: item.original_value,
+      templateOriginalValue: slot.template_original_value,
+      templateContext: slot.template_original_doc_position,
+    });
+
+    if (originalValue === item.original_value) {
+      return item;
+    }
+
+    return {
+      ...item,
+      original_value: originalValue,
+    };
+  });
 }
 
 function buildSlotBatches<T>(items: T[], batchSize: number) {
@@ -2029,8 +2076,7 @@ async function extractAllSlotsWithTextModel(input: {
                 slot_definitions: input.slots.map((slot) =>
                   buildSlotDefinitionForPrompt(slot),
                 ),
-                strict_requirement:
-                  'Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.',
+                strict_requirement: `Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. ${TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT} The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.`,
                 page_numbers: input.pageNumbers,
                 content: input.chunkText,
                 output_schema: {
@@ -2289,11 +2335,12 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       hasReferenceExampleImages
         ? 'For each slot with reference_example_pdf_evidence, first inspect the matching reference box and then search the provided new PDF images for the layout-equivalent source.'
         : 'For each slot, identify the most reliable visible value in the new PDF using the slot name, slot_source, nearby labels, form title, and surrounding layout.',
+      TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT,
       'Search only New PDF uploaded page images for final values. The new PDF may have different page numbers and layout than the reference PDF.',
       'For matches[0].page_number, use only the uploaded-page number shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". Do not use printed page numbers or reference page numbers.',
       'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, prefer the candidate whose page, section, nearby label, and visual region best match slot_source and the reference box when available. Leave final_value empty if the source cannot be distinguished.',
       'Return a final_value only if it is visible or strongly inferable from the provided new PDF images.',
-      'For dates, normalize visible dates to Chinese date format when possible, such as 2026年3月30日. For money amounts, preserve decimals and units when visible.',
+      'For dates, normalize visible dates to Chinese date format when possible, such as 2026年3月30日. For money amounts and rates, preserve visible digits, decimals, and commas; include units only when template_original_value also includes that unit.',
       'matches[0].value must equal final_value. matches[0].evidence_text must include the visible source value and nearby label/context.',
       'matches[0].matched_reference_label should equal reference_example_pdf_evidence.example_annotation_label only when a reference box was used; otherwise return null or an empty string.',
     ],
@@ -2379,7 +2426,9 @@ function getReferenceImageSummaries(
   return referenceExamplePages.map((page) => {
     const imageBytes =
       page.gemini_file?.sizeBytes ??
-      estimateDataUrlBytes(page.annotated_image_data_url ?? page.image_data_url);
+      estimateDataUrlBytes(
+        page.annotated_image_data_url ?? page.image_data_url,
+      );
 
     return {
       label: `Annotated reference example PDF page ${page.page_number}`,
@@ -2392,7 +2441,7 @@ function getReferenceImageSummaries(
       has_gemini_file: Boolean(page.gemini_file),
       has_image_data_url: Boolean(
         !page.gemini_file &&
-          (page.annotated_image_data_url ?? page.image_data_url),
+        (page.annotated_image_data_url ?? page.image_data_url),
       ),
       image_bytes: imageBytes,
       image_size: formatBytes(imageBytes),
@@ -2872,6 +2921,7 @@ async function extractSlotsFromVisionPageBatch(input: {
   totalVisionPages: number;
   requestLabel?: string;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
 }) {
@@ -2935,7 +2985,7 @@ async function extractSlotsFromVisionPageBatch(input: {
             has_gemini_file: Boolean(page.gemini_file),
             has_image_data_url: Boolean(
               !page.gemini_file &&
-                (page.annotated_image_data_url ?? page.image_data_url),
+              (page.annotated_image_data_url ?? page.image_data_url),
             ),
             image_bytes: imageBytes,
             image_size: formatBytes(imageBytes),
@@ -3149,6 +3199,9 @@ async function extractSlotsFromVisionPageBatch(input: {
             content?: string;
           };
         }>;
+        usage?: unknown;
+        usageMetadata?: unknown;
+        usage_metadata?: unknown;
       };
       let modelRequestDurationMs: number | null = null;
       let requestMode = 'chat_completions';
@@ -3183,6 +3236,13 @@ async function extractSlotsFromVisionPageBatch(input: {
         });
 
         modelRequestDurationMs = geminiResult.timings.totalDurationMs;
+        recordLlmUsageFromPayload(input.usageAccumulator, {
+          phase: 'slot_fill_direct_vision',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel,
+          payload: geminiResult.responsePayload,
+        });
         payload = geminiResult.payload;
       } else {
         await input.onTrace?.({
@@ -3218,6 +3278,13 @@ async function extractSlotsFromVisionPageBatch(input: {
 
         payload = (await upstream.json()) as typeof payload;
         modelRequestDurationMs = Date.now() - upstreamStartedAt;
+        recordLlmUsageFromPayload(input.usageAccumulator, {
+          phase: 'slot_fill_direct_vision',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel,
+          payload,
+        });
       }
       const rawContent = payload?.choices?.[0]?.message?.content;
 
@@ -3260,10 +3327,13 @@ async function extractSlotsFromVisionPageBatch(input: {
         extracted_items: normalized.extracted_items ?? [],
       });
       const extractedItemsFromSchema = parsedExtractedItems.success
-        ? sanitizeExtractedItemEvidencePages(
-            parsedExtractedItems.data.extracted_items,
-            allUploadedPageNumbers,
-            pageNumbers,
+        ? normalizeExtractedItemTemplateSuffixes(
+            sanitizeExtractedItemEvidencePages(
+              parsedExtractedItems.data.extracted_items,
+              allUploadedPageNumbers,
+              pageNumbers,
+            ),
+            input.slots,
           )
         : [];
       const extractedItemsFromResults = input.slots.flatMap((slot) => {
@@ -3420,6 +3490,7 @@ export async function fillSlotsFromVisionPages(params: {
   referenceExamplePages?: ReferencePdfVisionPageInput[];
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
+  usageAccumulator?: LlmUsageAccumulator;
   onProgress?: (progress: {
     completedSlots: number;
     totalSlots: number;
@@ -3472,6 +3543,7 @@ export async function fillSlotsFromVisionPages(params: {
         totalVisionPages: validVisionPages.length,
         requestLabel: job.requestLabel,
         onTrace: params.onTrace,
+        usageAccumulator: params.usageAccumulator,
         processStartedAtMs: params.processStartedAtMs,
         processHardTimeoutMs: params.processHardTimeoutMs,
       });

@@ -10,7 +10,6 @@ import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
 export const runtime = 'nodejs';
 
-
 export async function GET(
   _request: Request,
   context: { params: Promise<{ taskId: string }> },
@@ -35,7 +34,7 @@ export async function GET(
     const { data: task, error } = await supabase
       .from('template_extraction_tasks')
       .select(
-        'id, status, source_docx_name, source_pdf_name, prompt, total_paragraphs, completed_paragraphs, processing_trace, upload_text, upload_html, result, pdf_evidence, error_message, created_at, started_at, finished_at',
+        'id, status, source_docx_name, source_pdf_name, prompt, total_paragraphs, completed_paragraphs, processing_trace, upload_text, upload_html, result, pdf_evidence, docx_slot_extraction_llm_usage, pdf_evidence_location_llm_usage, error_message, created_at, started_at, finished_at',
       )
       .eq('id', taskId)
       .eq('owner_id', user.id)

@@ -2,6 +2,7 @@ import 'server-only';
 
 import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 import JSZip from 'jszip';
+import { removeDuplicateFixedSuffixFromReplacement } from '@/src/lib/templates/fixed-suffix';
 import type { GenerationReviewedItem } from '@/src/app/api/types/generation-task';
 import type { ExtractionParagraph } from '@/src/app/api/types/template-slot-extraction';
 import type { SlotReviewSessionPayload } from '@/src/lib/templates/slot-review-session';
@@ -380,11 +381,16 @@ function applyParagraphReplacements(
       );
 
       if (!overlaps) {
+        const replacement = removeDuplicateFixedSuffixFromReplacement({
+          replacementValue: reviewed.value,
+          followingText: paragraphText.slice(nextRange.end),
+        });
+
         usedRanges.push(nextRange);
         replacements.push({
           start: nextRange.start,
           end: nextRange.end,
-          replacement: reviewed.value,
+          replacement,
         });
         break;
       }

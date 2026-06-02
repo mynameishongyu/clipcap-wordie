@@ -15,6 +15,13 @@ import {
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
+import {
+  createLlmUsageAccumulator,
+  recordLlmUsageFromPayload,
+  summarizeLlmUsage,
+  type LlmUsageAccumulator,
+  type LlmUsageSummary,
+} from '@/src/lib/llm/usage';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
 const EXTRACTION_TIMEOUT_MS = 120000;
@@ -238,6 +245,7 @@ async function waitForTemplateExtractionRequestSlot(input: {
   totalParagraphs: number;
   batchParagraphCount?: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }) {
   const requestIntervalMs = getTemplateExtractionRequestIntervalMs();
 
@@ -437,6 +445,7 @@ async function requestTextLlmJson(input: {
   sourceParagraphIndices?: number[];
   concurrency: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }) {
   let lastError: unknown = null;
   const maxRetries = getTemplateExtractionMaxRetries();
@@ -584,12 +593,20 @@ async function requestTextLlmJson(input: {
       }
 
       const payload = (await upstream.json()) as {
+        usage?: unknown;
         choices?: Array<{
           message?: {
             content?: string;
           };
         }>;
       };
+      recordLlmUsageFromPayload(input.usageAccumulator, {
+        phase: 'docx_slot_extraction',
+        provider: llmConfig.provider,
+        model: llmConfig.model,
+        requestLabel: paragraphRequestTraceLabel,
+        payload,
+      });
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -813,6 +830,7 @@ async function extractSlotsForParagraphBatch(params: {
   totalParagraphs: number;
   concurrency: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }): Promise<ExtractedParagraphResult[]> {
   /*
   if (params.paragraphs.length === 1) {
@@ -878,6 +896,7 @@ async function extractSlotsForParagraphBatch(params: {
     ),
     concurrency: params.concurrency,
     onTrace: params.onTrace,
+    usageAccumulator: params.usageAccumulator,
   });
   const parsed = parseModelJsonOutput<unknown>(rawJson, {
     context: 'Template slot extraction JSON',
@@ -935,6 +954,7 @@ async function extractParagraphsConcurrently(params: {
   paragraphs: ExtractedParagraph[];
   onParagraphComplete?: (progress: ParagraphProgress) => Promise<void> | void;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }) {
   let completedParagraphs = 0;
   const totalParagraphs = params.paragraphs.length;
@@ -973,6 +993,7 @@ async function extractParagraphsConcurrently(params: {
           totalParagraphs,
           concurrency,
           onTrace: params.onTrace,
+          usageAccumulator: params.usageAccumulator,
         });
       } finally {
         completedParagraphs += paragraphBatch.length;
@@ -1051,6 +1072,7 @@ export async function extractTemplateSlotsFromDocx(
     totalParagraphs: number;
     succeededParagraphs: number;
     failedParagraphs: number;
+    llmUsage: LlmUsageSummary;
   }
 > {
   const uploadText = await extractTextFromDocxBuffer(params.buffer);
@@ -1072,6 +1094,7 @@ export async function extractTemplateSlotsFromDocx(
     throw new Error('No extractable paragraphs were found in the DOCX file.');
   }
 
+  const usageAccumulator = createLlmUsageAccumulator();
   const textTraceConfig = getLlmRuntimeTraceConfig('text');
   const textConfigMessage =
     `[Template Extract][Text LLM Config] ` +
@@ -1106,6 +1129,7 @@ export async function extractTemplateSlotsFromDocx(
     paragraphs: extractableParagraphs,
     onParagraphComplete: params.onParagraphComplete,
     onTrace: params.onTrace,
+    usageAccumulator,
   });
 
   const extractedParagraphs = paragraphExtraction.extractedParagraphs;
@@ -1132,6 +1156,7 @@ export async function extractTemplateSlotsFromDocx(
     totalParagraphs: paragraphExtraction.totalParagraphs,
     succeededParagraphs: paragraphExtraction.succeededParagraphs,
     failedParagraphs: paragraphExtraction.failedParagraphs,
+    llmUsage: summarizeLlmUsage(usageAccumulator),
   };
 }
 

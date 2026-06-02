@@ -9,6 +9,10 @@ import {
 import { createGeminiImageProxyFile } from '@/src/lib/gemini/image-proxy';
 import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
 import {
+  createLlmUsageAccumulator,
+  summarizeLlmUsage,
+} from '@/src/lib/llm/usage';
+import {
   appendProcessingTrace,
   buildStoredPageImageProxyVisionPages,
   buildFallbackReviewPayload,
@@ -149,7 +153,9 @@ async function createReferenceAnnotationSignedUrl(params: {
   const folderPath =
     slashIndex >= 0 ? params.storagePath.slice(0, slashIndex) : '';
   const fileName =
-    slashIndex >= 0 ? params.storagePath.slice(slashIndex + 1) : params.storagePath;
+    slashIndex >= 0
+      ? params.storagePath.slice(slashIndex + 1)
+      : params.storagePath;
   const { data: entries, error: listError } = await params.admin.storage
     .from('generation-pdfs')
     .list(folderPath, {
@@ -193,7 +199,10 @@ async function runWithConcurrency<T, R>(
       while (nextIndex < items.length) {
         const currentIndex = nextIndex;
         nextIndex += 1;
-        results[currentIndex] = await worker(items[currentIndex]!, currentIndex);
+        results[currentIndex] = await worker(
+          items[currentIndex]!,
+          currentIndex,
+        );
       }
     }),
   );
@@ -344,8 +353,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
             page_number: asset.pageNumber,
             storage_path: annotatedStoragePath,
             slot_count: asset.slotBoxes.length,
-            error_message:
-              `Missing browser-saved annotated reference image. ${errorMessage}`,
+            error_message: `Missing browser-saved annotated reference image. ${errorMessage}`,
           },
         };
       }
@@ -473,6 +481,7 @@ async function runGenerationTaskItemSlotFill(params: {
   const pipelineStartedAt = params.item.started_at
     ? new Date(params.item.started_at)
     : startedAt;
+  const slotFillUsageAccumulator = createLlmUsageAccumulator();
   try {
     if (slotSchema.length === 0) {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
@@ -505,7 +514,7 @@ async function runGenerationTaskItemSlotFill(params: {
             uploaded_page_number: asset.uploaded_page_number,
             original_page_number: asset.original_page_number,
             storage_path: asset.storage_path,
-        })),
+          })),
       })}`,
     );
     await appendMemoryTrace(admin, params.item.id, 'slot_fill_route_started', {
@@ -518,21 +527,20 @@ async function runGenerationTaskItemSlotFill(params: {
     const llmConfig = getLlmRuntimeConfig('vision');
     const usesGeminiImageProxy =
       llmConfig.provider === 'gemini' && pageImageAssets.length > 0;
-    const visionPages =
-      usesGeminiImageProxy
-        ? await buildStoredPageImageProxyVisionPages({
+    const visionPages = usesGeminiImageProxy
+      ? await buildStoredPageImageProxyVisionPages({
+          pageImageAssets,
+          requestLabel: `slot fill ${params.item.id}`,
+          onTrace: async ({ message }) => {
+            await appendProcessingTrace(admin, params.item.id, message);
+          },
+        })
+      : precomputedVisionPages.length > 0
+        ? precomputedVisionPages
+        : await loadVisionPagesFromStoredAssets({
+            admin,
             pageImageAssets,
-            requestLabel: `slot fill ${params.item.id}`,
-            onTrace: async ({ message }) => {
-              await appendProcessingTrace(admin, params.item.id, message);
-            },
-          })
-        : precomputedVisionPages.length > 0
-          ? precomputedVisionPages
-          : await loadVisionPagesFromStoredAssets({
-              admin,
-              pageImageAssets,
-            });
+          });
 
     await appendProcessingTrace(
       admin,
@@ -541,8 +549,7 @@ async function runGenerationTaskItemSlotFill(params: {
         provider: llmConfig.provider,
         proxy_page_count: usesGeminiImageProxy ? visionPages.length : 0,
         fallback_to_supabase_download:
-          !usesGeminiImageProxy &&
-          precomputedVisionPages.length === 0,
+          !usesGeminiImageProxy && precomputedVisionPages.length === 0,
         required_page_count: pageImageAssets.length,
       })}`,
     );
@@ -554,7 +561,9 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendMemoryTrace(admin, params.item.id, 'vision_page_urls_ready', {
       vision_page_count: visionPages.length,
       source:
-        llmConfig.provider === 'gemini' ? 'vercel_gemini_image_proxy' : 'data_url',
+        llmConfig.provider === 'gemini'
+          ? 'vercel_gemini_image_proxy'
+          : 'data_url',
     });
 
     const referenceExamplePages = await loadReferenceExamplePagesWithBbox({
@@ -564,17 +573,21 @@ async function runGenerationTaskItemSlotFill(params: {
       templateId: params.item.template_id,
       slots: slotSchema,
     });
-    const referencePagesForSlotFill =
-      await getSharedReferencePagesForSlotFill({
-        admin,
-        taskItemId: params.item.id,
-        taskId: params.item.task_id,
-        templateId: params.item.template_id,
-        pages: referenceExamplePages.pages,
-      });
-    await appendMemoryTrace(admin, params.item.id, 'reference_page_urls_ready', {
-      reference_page_count: referencePagesForSlotFill.length,
+    const referencePagesForSlotFill = await getSharedReferencePagesForSlotFill({
+      admin,
+      taskItemId: params.item.id,
+      taskId: params.item.task_id,
+      templateId: params.item.template_id,
+      pages: referenceExamplePages.pages,
     });
+    await appendMemoryTrace(
+      admin,
+      params.item.id,
+      'reference_page_urls_ready',
+      {
+        reference_page_count: referencePagesForSlotFill.length,
+      },
+    );
 
     await admin
       .from('generation_task_items')
@@ -586,6 +599,7 @@ async function runGenerationTaskItemSlotFill(params: {
         updated_at: startedAt.toISOString(),
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
+        slot_fill_llm_usage: null,
       })
       .eq('id', params.item.id);
 
@@ -682,52 +696,53 @@ async function runGenerationTaskItemSlotFill(params: {
       runReferencePages: ReferencePdfVisionPageInput[];
     }) =>
       fillSlotsFromVisionPages({
-      pdfFileName: params.item.source_pdf_name,
-      slots: slotSchema,
-      visionPages: input.runVisionPages,
-      referenceExamplePages: input.runReferencePages,
-      processStartedAtMs,
-      processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
-      onTrace: async ({ message }) => {
-        await appendProcessingTrace(admin, params.item.id, message);
-      },
-      onProgress: async ({ completedSlots, totalSlots }) => {
-        await updateSlotProgress(admin, params.item.id, {
-          completedSlots,
-          totalSlots,
-        });
-
-        if (
-          completedSlots === totalSlots ||
-          completedSlots === 0 ||
-          completedSlots !== lastLoggedCompletedSlots
-        ) {
-          lastLoggedCompletedSlots = completedSlots;
-          await appendProcessingTrace(
-            admin,
-            params.item.id,
-            `槽位回填进度：已完成 ${completedSlots}/${totalSlots}，待抽取 ${Math.max(0, totalSlots - completedSlots)}。`,
-          );
-
-          await logEvent({
-            ownerId: params.item.owner_id,
-            actorEmail: params.actorEmail,
-            level: 'info',
-            eventType: 'generation_task_item_progress',
-            message: `Generation task item progressed to ${completedSlots}/${totalSlots} filled slots.`,
-            route: '/api/generation-task-items/[taskItemId]/slot-fill',
-            templateId: params.item.template_id,
-            taskId: params.item.task_id,
-            taskItemId: params.item.id,
-            payload: {
-              completedSlots,
-              totalSlots,
-              pendingSlots: Math.max(0, totalSlots - completedSlots),
-            },
+        pdfFileName: params.item.source_pdf_name,
+        slots: slotSchema,
+        visionPages: input.runVisionPages,
+        referenceExamplePages: input.runReferencePages,
+        processStartedAtMs,
+        processHardTimeoutMs: PROCESS_HARD_TIMEOUT_MS,
+        usageAccumulator: slotFillUsageAccumulator,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+        onProgress: async ({ completedSlots, totalSlots }) => {
+          await updateSlotProgress(admin, params.item.id, {
+            completedSlots,
+            totalSlots,
           });
-        }
-      },
-    });
+
+          if (
+            completedSlots === totalSlots ||
+            completedSlots === 0 ||
+            completedSlots !== lastLoggedCompletedSlots
+          ) {
+            lastLoggedCompletedSlots = completedSlots;
+            await appendProcessingTrace(
+              admin,
+              params.item.id,
+              `槽位回填进度：已完成 ${completedSlots}/${totalSlots}，待抽取 ${Math.max(0, totalSlots - completedSlots)}。`,
+            );
+
+            await logEvent({
+              ownerId: params.item.owner_id,
+              actorEmail: params.actorEmail,
+              level: 'info',
+              eventType: 'generation_task_item_progress',
+              message: `Generation task item progressed to ${completedSlots}/${totalSlots} filled slots.`,
+              route: '/api/generation-task-items/[taskItemId]/slot-fill',
+              templateId: params.item.template_id,
+              taskId: params.item.task_id,
+              taskItemId: params.item.id,
+              payload: {
+                completedSlots,
+                totalSlots,
+                pendingSlots: Math.max(0, totalSlots - completedSlots),
+              },
+            });
+          }
+        },
+      });
 
     const llmOutput = await runDirectVisionSlotFill({
       runVisionPages: visionPages,
@@ -765,6 +780,7 @@ async function runGenerationTaskItemSlotFill(params: {
         status: 'review_pending',
         elapsed_seconds: elapsedSeconds,
         llm_output: llmOutput,
+        slot_fill_llm_usage: summarizeLlmUsage(slotFillUsageAccumulator),
         slot_total_count: slotSchema.length,
         slot_completed_count: completedSlots,
         finished_at: finishedAt.toISOString(),
@@ -814,6 +830,7 @@ async function runGenerationTaskItemSlotFill(params: {
         status: 'review_pending',
         error_message: null,
         llm_output: fallbackReviewPayload,
+        slot_fill_llm_usage: summarizeLlmUsage(slotFillUsageAccumulator),
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
         finished_at: new Date().toISOString(),

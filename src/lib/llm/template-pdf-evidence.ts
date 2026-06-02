@@ -24,6 +24,10 @@ import {
   getLlmRuntimeTraceConfig,
   type LlmProvider,
 } from '@/src/lib/llm/provider';
+import {
+  recordLlmUsageFromPayload,
+  type LlmUsageAccumulator,
+} from '@/src/lib/llm/usage';
 import { getExtractionItemSlotKey } from '@/src/lib/templates/slot-key';
 
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
@@ -315,6 +319,7 @@ async function repairVisionLocationJsonWithLlm(input: {
   rawContent: string;
   parseError: Error;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }) {
   const llmConfig = getLlmRuntimeConfig('text');
   const controller = new AbortController();
@@ -370,12 +375,20 @@ async function repairVisionLocationJsonWithLlm(input: {
     }
 
     const payload = (await upstream.json()) as {
+      usage?: unknown;
       choices?: Array<{
         message?: {
           content?: string;
         };
       }>;
     };
+    recordLlmUsageFromPayload(input.usageAccumulator, {
+      phase: 'pdf_evidence_location_json_repair',
+      provider: llmConfig.provider,
+      model: llmConfig.model,
+      requestLabel: 'template_pdf_locate_json_repair',
+      payload,
+    });
     const repairedContent = payload?.choices?.[0]?.message?.content;
 
     if (typeof repairedContent !== 'string' || !repairedContent.trim()) {
@@ -404,6 +417,7 @@ async function parseVisionLocationResponse(input: {
   pageBatchIndex: number;
   totalPageBatches: number;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }) {
   try {
     const parsed = parseModelJsonWithLocalRepair<VisionLocateModelResponse>(
@@ -427,6 +441,7 @@ async function parseVisionLocationResponse(input: {
       rawContent: input.rawContent,
       parseError,
       onTrace: input.onTrace,
+      usageAccumulator: input.usageAccumulator,
     });
   }
 }
@@ -1088,6 +1103,7 @@ async function locateSlotsInPageBatch(input: {
   slots: TemplatePdfLocateSlot[];
   targetMode: PdfBboxTargetMode;
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }) {
   const llmConfig = getLlmRuntimeConfig(
     'vision',
@@ -1207,6 +1223,7 @@ async function locateSlotsInPageBatch(input: {
     });
 
     let payload: {
+      usage?: unknown;
       choices?: Array<{
         message?: {
           content?: string;
@@ -1225,7 +1242,9 @@ async function locateSlotsInPageBatch(input: {
           responseMimeType: 'application/json',
           responseSchema: geminiTemplatePdfLocateResponseSchema,
         },
-        onGenerateContentRequestBody: async ({ requestBody: geminiRequestBody }) => {
+        onGenerateContentRequestBody: async ({
+          requestBody: geminiRequestBody,
+        }) => {
           await input.onTrace?.({
             message:
               `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
@@ -1245,6 +1264,13 @@ async function locateSlotsInPageBatch(input: {
         onTrace: input.onTrace,
       });
 
+      recordLlmUsageFromPayload(input.usageAccumulator, {
+        phase: 'pdf_evidence_location',
+        provider: llmConfig.provider,
+        model: llmConfig.model,
+        requestLabel,
+        payload: geminiResult.responsePayload,
+      });
       payload = geminiResult.payload;
     } else {
       await input.onTrace?.({
@@ -1278,6 +1304,13 @@ async function locateSlotsInPageBatch(input: {
       }
 
       payload = (await upstream.json()) as typeof payload;
+      recordLlmUsageFromPayload(input.usageAccumulator, {
+        phase: 'pdf_evidence_location',
+        provider: llmConfig.provider,
+        model: llmConfig.model,
+        requestLabel,
+        payload,
+      });
     }
     const rawContent = payload?.choices?.[0]?.message?.content;
 
@@ -1310,6 +1343,7 @@ async function locateSlotsInPageBatch(input: {
       pageBatchIndex: input.pageBatchIndex,
       totalPageBatches: input.totalPageBatches,
       onTrace: input.onTrace,
+      usageAccumulator: input.usageAccumulator,
     });
 
     await input.onTrace?.({
@@ -1339,6 +1373,7 @@ export async function buildTemplatePdfEvidence(input: {
   extractionResult: ExtractionParagraph[];
   visionPages: PdfVisionPageInput[];
   onTrace?: (entry: { message: string }) => Promise<void> | void;
+  usageAccumulator?: LlmUsageAccumulator;
 }): Promise<TemplatePdfEvidenceResult> {
   const slots = buildLocateSlots(input.extractionResult);
   const targetMode = getTemplatePdfBboxTargetMode();
@@ -1394,6 +1429,7 @@ export async function buildTemplatePdfEvidence(input: {
           slots,
           targetMode,
           onTrace: input.onTrace,
+          usageAccumulator: input.usageAccumulator,
         });
 
         return { pageBatchIndex, rawMatches };

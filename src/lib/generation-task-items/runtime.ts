@@ -61,6 +61,7 @@ export type GenerationTaskItemRecord = {
   reviewed_at?: string | null;
   output_docx_path?: string | null;
   error_message?: string | null;
+  slot_fill_llm_usage?: unknown;
   llm_input?: {
     template_name?: string;
     template_prompt?: string;
@@ -93,7 +94,7 @@ export type GenerationTaskItemRecord = {
 };
 
 export const generationTaskItemSelect =
-  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input';
+  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input, slot_fill_llm_usage';
 
 export const GENERATION_TASK_ITEM_RUNNING_STATUSES = [
   'uploaded',
@@ -124,7 +125,9 @@ export function getErrorMessage(error: unknown) {
   return getRawErrorMessage(error);
 }
 
-export function buildFallbackReviewPayload(slotSchema: GenerationSlotSchemaItem[]) {
+export function buildFallbackReviewPayload(
+  slotSchema: GenerationSlotSchemaItem[],
+) {
   return {
     document_summary: '',
     extracted_items: slotSchema.map((slot) => ({
@@ -179,11 +182,15 @@ export function normalizeSelectedOriginalPageNumbers(value: unknown) {
 
   return value.filter(
     (pageNumber): pageNumber is number =>
-      typeof pageNumber === 'number' && Number.isInteger(pageNumber) && pageNumber > 0,
+      typeof pageNumber === 'number' &&
+      Number.isInteger(pageNumber) &&
+      pageNumber > 0,
   );
 }
 
-export function normalizePdfPageImageAssets(value: unknown): PdfPageImageAsset[] {
+export function normalizePdfPageImageAssets(
+  value: unknown,
+): PdfPageImageAsset[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -214,10 +221,14 @@ export function normalizePdfPageImageAssets(value: unknown): PdfPageImageAsset[]
           ? (entry as { size: number }).size
           : null,
     }))
-    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+    .sort(
+      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
+    );
 }
 
-export function filterPdfPageImageAssetsForSlotFill(assets: PdfPageImageAsset[]) {
+export function filterPdfPageImageAssetsForSlotFill(
+  assets: PdfPageImageAsset[],
+) {
   return assets.filter((asset) => asset.used_for_slot_fill !== false);
 }
 
@@ -273,7 +284,8 @@ export async function loadVisionPagesFromStoredAssets(params: {
       }
 
       const buffer = Buffer.from(await fileBlob.arrayBuffer());
-      const mimeType = fileBlob.type || getMimeTypeFromStoragePath(asset.storage_path);
+      const mimeType =
+        fileBlob.type || getMimeTypeFromStoragePath(asset.storage_path);
 
       return {
         page_number: asset.uploaded_page_number,
@@ -315,17 +327,19 @@ export async function buildStoredPageImageProxyVisionPages(params: {
     });
 
     await params.onTrace?.({
-      message: `[Gemini Image Proxy][StoragePipelinePageComplete] ${JSON.stringify({
-        request_label: params.requestLabel,
-        sequence_index: index + 1,
-        uploaded_page_number: asset.uploaded_page_number,
-        original_page_number: asset.original_page_number,
-        storage_path: asset.storage_path,
-        mime_type: mimeType,
-        image_size_bytes: asset.size ?? null,
-        file_uri: geminiFile.uri,
-        source: 'vercel_gemini_image_proxy',
-      })}`,
+      message: `[Gemini Image Proxy][StoragePipelinePageComplete] ${JSON.stringify(
+        {
+          request_label: params.requestLabel,
+          sequence_index: index + 1,
+          uploaded_page_number: asset.uploaded_page_number,
+          original_page_number: asset.original_page_number,
+          storage_path: asset.storage_path,
+          mime_type: mimeType,
+          image_size_bytes: asset.size ?? null,
+          file_uri: geminiFile.uri,
+          source: 'vercel_gemini_image_proxy',
+        },
+      )}`,
     });
 
     pages.push({
@@ -351,9 +365,7 @@ export async function buildStoredPageImageProxyVisionPages(params: {
   return pages;
 }
 
-export function collectGeminiFilesFromVisionPages(
-  pages: PdfVisionPageInput[],
-) {
+export function collectGeminiFilesFromVisionPages(pages: PdfVisionPageInput[]) {
   const filesByNameOrUri = new Map<string, GeminiVisionFile>();
 
   pages.forEach((page) => {
@@ -369,7 +381,10 @@ export function collectGeminiFilesFromVisionPages(
   return Array.from(filesByNameOrUri.values());
 }
 
-export async function recalculateTaskSummary(admin: AdminClient, taskId: string) {
+export async function recalculateTaskSummary(
+  admin: AdminClient,
+  taskId: string,
+) {
   const { data: items, error } = await admin
     .from('generation_task_items')
     .select('status')
@@ -381,9 +396,11 @@ export async function recalculateTaskSummary(admin: AdminClient, taskId: string)
 
   const totalItems = items?.length ?? 0;
   const succeededItems =
-    items?.filter((item) => ['succeeded', 'review_pending', 'reviewed'].includes(item.status))
-      .length ?? 0;
-  const failedItems = items?.filter((item) => item.status === 'failed').length ?? 0;
+    items?.filter((item) =>
+      ['succeeded', 'review_pending', 'reviewed'].includes(item.status),
+    ).length ?? 0;
+  const failedItems =
+    items?.filter((item) => item.status === 'failed').length ?? 0;
   const hasRunningItems =
     items?.some((item) =>
       [
@@ -441,8 +458,8 @@ export async function markTimedOutGenerationTaskItems(params: {
 
     const timeoutAnchor =
       item.status === 'slot_filling' || item.status === 'page_preparing'
-        ? item.updated_at ?? item.started_at
-        : item.started_at ?? item.updated_at;
+        ? (item.updated_at ?? item.started_at)
+        : (item.started_at ?? item.updated_at);
 
     if (!timeoutAnchor) {
       return false;
@@ -458,7 +475,8 @@ export async function markTimedOutGenerationTaskItems(params: {
 
     return (
       elapsedSeconds >=
-      VERCEL_FUNCTION_TIMEOUT_SECONDS + GENERATION_TASK_ITEM_TIMEOUT_GRACE_SECONDS
+      VERCEL_FUNCTION_TIMEOUT_SECONDS +
+        GENERATION_TASK_ITEM_TIMEOUT_GRACE_SECONDS
     );
   });
 
@@ -518,15 +536,24 @@ export async function appendProcessingTrace(
   message: string,
 ) {
   try {
-    const { error } = await admin.rpc('append_generation_task_item_processing_trace', {
-      p_task_item_id: taskItemId,
-      p_entry: formatProcessingTraceEntry(message),
-    });
+    const { error } = await admin.rpc(
+      'append_generation_task_item_processing_trace',
+      {
+        p_task_item_id: taskItemId,
+        p_entry: formatProcessingTraceEntry(message),
+      },
+    );
 
     if (error) {
-      console.error('[Generation Task] Failed to append processing trace.', error);
+      console.error(
+        '[Generation Task] Failed to append processing trace.',
+        error,
+      );
     }
   } catch (error) {
-    console.error('[Generation Task] Failed to append processing trace.', error);
+    console.error(
+      '[Generation Task] Failed to append processing trace.',
+      error,
+    );
   }
 }

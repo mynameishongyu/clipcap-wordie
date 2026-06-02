@@ -155,6 +155,8 @@ function buildSlotSchemaFromPayload(
       slot_key: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
       field_category: item.field_category,
       meaning_to_applicant: item.meaning_to_applicant,
+      template_original_value: item.original_value,
+      template_original_doc_position: item.original_doc_position,
       reference_pdf_evidence: buildReferenceEvidence(paragraphIndex, itemIndex, item),
     })),
   );

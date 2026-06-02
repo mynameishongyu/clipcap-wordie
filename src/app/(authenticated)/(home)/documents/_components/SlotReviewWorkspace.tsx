@@ -28,7 +28,6 @@ import {
   type ReactNode,
 } from 'react';
 import type {
-  ExtractionItem,
   ExtractionParagraph,
   TemplatePdfEvidenceResult,
 } from '@/src/app/api/types/template-slot-extraction';
@@ -43,6 +42,11 @@ import {
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import {
+  flattenExtractionResult,
+  groupExtractionItemsByParagraph,
+  type FlattenedExtractionItem,
+} from '@/src/lib/templates/extraction-items';
+import {
   SLOT_REVIEW_SESSION_KEY,
   type SlotReviewSessionPayload,
 } from '@/src/lib/templates/slot-review-session';
@@ -50,7 +54,6 @@ import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-
 import {
   createManualSlotKey,
   filterPdfEvidenceMatchesBySlotKeys,
-  getExtractionItemSlotKey,
   getExtractionResultSlotKeySet,
   getPdfEvidenceMatchSlotKey,
 } from '@/src/lib/templates/slot-key';
@@ -65,10 +68,7 @@ import type {
   TextStyleSnapshot,
 } from '@/src/types/docx-preview';
 
-interface EditableExtractionItem extends ExtractionItem {
-  id: string;
-  paragraphTitle: string;
-}
+interface EditableExtractionItem extends FlattenedExtractionItem {}
 
 type PdfEvidenceMatch = TemplatePdfEvidenceResult['matches'][number];
 
@@ -145,121 +145,13 @@ interface SlotReviewWorkspaceState {
   pendingNewItemMeaning: string;
 }
 
-function getParagraphGroupKey(input: {
-  paragraphTitle: string;
-  paragraphIndex: number | undefined;
-}) {
-  return `${input.paragraphTitle}::${input.paragraphIndex ?? 'manual'}`;
-}
-
-function getSourceParagraphGroupKey(
-  paragraph: ExtractionParagraph,
-  fallbackParagraphIndex: number,
-) {
-  return getParagraphGroupKey({
-    paragraphTitle: paragraph.paragraph_title,
-    paragraphIndex: paragraph.paragraph_index ?? fallbackParagraphIndex,
-  });
-}
-
-function getItemParagraphGroupKey(item: EditableExtractionItem) {
-  return getParagraphGroupKey({
-    paragraphTitle: item.paragraphTitle,
-    paragraphIndex:
-      typeof item.paragraph_index === 'number'
-        ? item.paragraph_index
-        : undefined,
-  });
-}
-
-function buildExtractionResultFromItems(
-  items: EditableExtractionItem[],
-  sourceParagraphs: ExtractionParagraph[],
-): ExtractionParagraph[] {
-  const matchedItemIds = new Set<string>();
-  const groupedSourceParagraphs = sourceParagraphs.flatMap(
-    (paragraph, paragraphIndex) => {
-      const paragraphGroupKey = getSourceParagraphGroupKey(
-        paragraph,
-        paragraphIndex,
-      );
-      const paragraphItems = items
-        .filter((item) => {
-          if (matchedItemIds.has(item.id)) {
-            return false;
-          }
-
-          return getItemParagraphGroupKey(item) === paragraphGroupKey;
-        })
-        .map(({ id, paragraphTitle, ...rest }) => {
-          matchedItemIds.add(id);
-          return rest;
-        });
-
-      if (paragraphItems.length === 0) {
-        return [];
-      }
-
-      return [
-        {
-          paragraph_index: paragraph.paragraph_index ?? paragraphIndex,
-          paragraph_title: paragraph.paragraph_title,
-          items: paragraphItems,
-        },
-      ];
-    },
-  );
-
-  const manualParagraphMap = new Map<
-    string,
-    {
-      paragraphIndex: number | undefined;
-      paragraphTitle: string;
-      items: ExtractionParagraph['items'];
-    }
-  >();
-
-  items.forEach(({ id, paragraphTitle, ...rest }) => {
-    if (matchedItemIds.has(id)) {
-      return;
-    }
-
-    const paragraphIndex =
-      typeof rest.paragraph_index === 'number'
-        ? rest.paragraph_index
-        : undefined;
-    const paragraphKey = getParagraphGroupKey({
-      paragraphTitle,
-      paragraphIndex,
-    });
-    const bucket = manualParagraphMap.get(paragraphKey) ?? {
-      paragraphIndex,
-      paragraphTitle,
-      items: [],
-    };
-
-    bucket.items.push(rest);
-    manualParagraphMap.set(paragraphKey, bucket);
-  });
-
-  const manualParagraphs = Array.from(manualParagraphMap.values()).map(
-    (manualParagraph) => ({
-      paragraph_index: manualParagraph.paragraphIndex,
-      paragraph_title: manualParagraph.paragraphTitle,
-      items: manualParagraph.items,
-    }),
-  );
-
-  return [...groupedSourceParagraphs, ...manualParagraphs];
-}
-
 function createManualSlotKeyForNewItem(input: {
   items: EditableExtractionItem[];
   sourceParagraphs: ExtractionParagraph[];
   draftItem: EditableExtractionItem;
 }) {
   const draftItems = [...input.items, input.draftItem];
-  const draftExtractionResult = buildExtractionResultFromItems(
+  const draftExtractionResult = groupExtractionItemsByParagraph(
     draftItems,
     input.sourceParagraphs,
   );
@@ -328,7 +220,7 @@ function buildJsonPreviewPayload(
   items: EditableExtractionItem[],
   payload: SlotReviewSessionPayload,
 ) {
-  const groupedParagraphs = buildExtractionResultFromItems(
+  const groupedParagraphs = groupExtractionItemsByParagraph(
     items,
     payload.extractionResult,
   );
@@ -379,6 +271,7 @@ function buildPreviewItems(
     ...items,
     {
       id: 'pending-new-item',
+      slot_key: 'pending-new-item',
       paragraphTitle: '手动新增槽位',
       sequence: Number.MAX_SAFE_INTEGER,
       field_category: '手动新增',
@@ -386,6 +279,7 @@ function buildPreviewItems(
       meaning_to_applicant: '',
       original_doc_position: pendingNewItemSelection.trim(),
       paragraph_index: pendingNewItemParagraphIndex ?? undefined,
+      pdf_evidence_match: null,
     },
   ];
 }
@@ -1154,7 +1048,15 @@ function findPdfEvidenceMatchForItem(
   item: EditableExtractionItem | null,
   payload: SlotReviewSessionPayload | null,
 ) {
-  if (!item || !payload?.pdfEvidence) {
+  if (!item) {
+    return null;
+  }
+
+  if (item.pdf_evidence_match) {
+    return item.pdf_evidence_match;
+  }
+
+  if (!payload?.pdfEvidence) {
     return null;
   }
 
@@ -1850,8 +1752,7 @@ async function buildAnnotatedReferencePageBlob(input: {
         );
         const labelLineHeight = Math.ceil(labelFontSize * 1.14);
         const labelWidth = Math.ceil(measuredWidth) + labelPaddingX * 2;
-        const labelHeight =
-          labels.length * labelLineHeight + labelPaddingY * 2;
+        const labelHeight = labels.length * labelLineHeight + labelPaddingY * 2;
 
         return [
           {
@@ -1909,12 +1810,7 @@ async function buildAnnotatedReferencePageBlob(input: {
           bboxRects,
         });
 
-        drawLabelConnector(
-          annotatedContext,
-          bboxRect,
-          labelRect,
-          lineWidth,
-        );
+        drawLabelConnector(annotatedContext, bboxRect, labelRect, lineWidth);
         annotatedContext.fillStyle = 'rgba(255, 153, 0, 0.92)';
         annotatedContext.fillRect(
           labelRect.left,
@@ -2317,16 +2213,12 @@ function loadSlotReviewWorkspaceState(): SlotReviewWorkspaceState {
   const parsed = removeOrphanPdfEvidenceMatches(
     JSON.parse(rawValue) as SlotReviewSessionPayload,
   );
-  const flattenedItems = parsed.extractionResult.flatMap(
-    (paragraph: ExtractionParagraph, paragraphIndex) =>
-      paragraph.items.map((item, itemIndex) => ({
-        ...item,
-        slot_key: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
-        field_category: normalizeSlotCategoryLabel(item.field_category),
-        id: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
-        paragraphTitle: paragraph.paragraph_title,
-      })),
-  );
+  const flattenedItems = flattenExtractionResult(parsed.extractionResult, {
+    pdfEvidenceMatches: parsed.pdfEvidence?.matches,
+  }).map((item) => ({
+    ...item,
+    field_category: normalizeSlotCategoryLabel(item.field_category),
+  }));
 
   return {
     payload: parsed,
@@ -2913,10 +2805,10 @@ export function SlotReviewWorkspace() {
       const currentItem =
         currentState.items.find((item) => item.id === activeItem.id) ??
         activeItem;
-      const existingMatch =
-        currentState.payload.pdfEvidence.matches.find((match) =>
-          isPdfEvidenceMatchForItem(match, currentItem),
-        ) ?? null;
+      const existingMatch = findPdfEvidenceMatchForItem(
+        currentItem,
+        currentState.payload,
+      );
       const nextMatch = buildManualPdfEvidenceMatch({
         item: currentItem,
         pageNumber: pdfLocationEditState.draftPageNumber!,
@@ -2952,11 +2844,20 @@ export function SlotReviewWorkspace() {
           matches: nextMatches,
         },
       };
+      const nextItems = currentState.items.map((item) =>
+        item.id === currentItem.id
+          ? {
+              ...item,
+              pdf_evidence_match: nextMatch,
+            }
+          : item,
+      );
 
       persistSlotReviewPayloadToSession(nextPayload);
 
       return {
         ...currentState,
+        items: nextItems,
         payload: nextPayload,
       };
     });
@@ -2986,7 +2887,7 @@ export function SlotReviewWorkspace() {
       throw new Error('当前模板数据还未加载完成，请稍后再试。');
     }
 
-    const nextExtractionResult = buildExtractionResultFromItems(
+    const nextExtractionResult = groupExtractionItemsByParagraph(
       visibleItems,
       payload.extractionResult,
     );
@@ -3412,6 +3313,7 @@ export function SlotReviewWorkspace() {
                                     ) + 1;
                                   const draftItem: EditableExtractionItem = {
                                     id: `pending-manual-${nextSequence}`,
+                                    slot_key: `pending-manual-${nextSequence}`,
                                     paragraphTitle: '手动新增槽位',
                                     sequence: nextSequence,
                                     field_category: '手动新增',
@@ -3424,6 +3326,7 @@ export function SlotReviewWorkspace() {
                                     paragraph_index:
                                       currentState.pendingNewItemParagraphIndex ??
                                       undefined,
+                                    pdf_evidence_match: null,
                                   };
                                   const slotKey = createManualSlotKeyForNewItem(
                                     {
@@ -3438,6 +3341,7 @@ export function SlotReviewWorkspace() {
                                     ...draftItem,
                                     id: slotKey,
                                     slot_key: slotKey,
+                                    pdf_evidence_match: null,
                                   };
 
                                   return {
@@ -3747,7 +3651,7 @@ export function SlotReviewWorkspace() {
                                       }
 
                                       const nextExtractionResult =
-                                        buildExtractionResultFromItems(
+                                        groupExtractionItemsByParagraph(
                                           nextItems,
                                           currentPayload.extractionResult,
                                         );

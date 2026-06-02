@@ -34,6 +34,7 @@ import {
   useGenerationTaskItem,
   useReviewGenerationTaskItem,
 } from '@/src/querys/use-generation-task-runtime';
+import { logLlmUsageToBrowserConsole } from '@/src/lib/debug/browser-llm-usage-log';
 import { useJsonPreviewDebug } from '@/src/lib/debug/json-preview-toggle';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 import type {
@@ -133,38 +134,45 @@ function normalizeExtractedItems(value: unknown): EditableReviewedItem[] {
 
     return {
       slot_key: String(record.slot_key ?? `slot-${index + 1}`),
-      field_category: normalizeSlotCategoryLabel(String(record.field_category ?? '')),
+      field_category: normalizeSlotCategoryLabel(
+        String(record.field_category ?? ''),
+      ),
       meaning_to_applicant: String(record.meaning_to_applicant ?? ''),
       original_value: String(record.original_value ?? ''),
       evidence: String(record.evidence ?? ''),
       evidence_page_numbers: Array.isArray(record.evidence_page_numbers)
         ? record.evidence_page_numbers
             .filter(
-              (entry): entry is number => typeof entry === 'number' && Number.isFinite(entry),
+              (entry): entry is number =>
+                typeof entry === 'number' && Number.isFinite(entry),
             )
             .sort((left, right) => left - right)
         : [],
       notes: String(record.notes ?? ''),
       confidence:
-        typeof record.confidence === 'number' && Number.isFinite(record.confidence)
+        typeof record.confidence === 'number' &&
+        Number.isFinite(record.confidence)
           ? record.confidence
           : null,
       matched_reference_label:
         typeof record.matched_reference_label === 'string'
           ? record.matched_reference_label
           : null,
-      new_pdf_bbox: normalizeModelPdfBbox(record.new_pdf_bbox) ?? parseModelPdfBboxFromNotes(
-        String(record.notes ?? ''),
-      ),
+      new_pdf_bbox:
+        normalizeModelPdfBbox(record.new_pdf_bbox) ??
+        parseModelPdfBboxFromNotes(String(record.notes ?? '')),
       layout_match_score:
-        typeof record.layout_match_score === 'number' && Number.isFinite(record.layout_match_score)
+        typeof record.layout_match_score === 'number' &&
+        Number.isFinite(record.layout_match_score)
           ? record.layout_match_score
           : null,
     };
   });
 }
 
-function normalizeModelPdfBbox(value: unknown): [number, number, number, number] | null {
+function normalizeModelPdfBbox(
+  value: unknown,
+): [number, number, number, number] | null {
   if (!Array.isArray(value) || value.length !== 4) {
     return null;
   }
@@ -192,14 +200,18 @@ function parseModelPdfBboxFromNotes(notes: string) {
   }
 }
 
-function normalizeTemplateOriginalSlots(value: unknown): TemplateOriginalSlot[] {
+function normalizeTemplateOriginalSlots(
+  value: unknown,
+): TemplateOriginalSlot[] {
   if (!Array.isArray(value)) {
     return [];
   }
 
   return value.flatMap((paragraph, paragraphIndex) => {
     const paragraphRecord = paragraph as Record<string, unknown>;
-    const items = Array.isArray(paragraphRecord.items) ? paragraphRecord.items : [];
+    const items = Array.isArray(paragraphRecord.items)
+      ? paragraphRecord.items
+      : [];
     const paragraphTitle = String(paragraphRecord.paragraph_title ?? '');
     const baseParagraphIndex =
       typeof paragraphRecord.paragraph_index === 'number'
@@ -215,7 +227,9 @@ function normalizeTemplateOriginalSlots(value: unknown): TemplateOriginalSlot[] 
 
       return {
         slot_key: String(record.slot_key ?? `${paragraphIndex}-${itemIndex}`),
-        field_category: normalizeSlotCategoryLabel(String(record.field_category ?? '')),
+        field_category: normalizeSlotCategoryLabel(
+          String(record.field_category ?? ''),
+        ),
         meaning_to_applicant: String(record.meaning_to_applicant ?? ''),
         original_value: String(record.original_value ?? ''),
         original_doc_position: String(record.original_doc_position ?? ''),
@@ -239,7 +253,10 @@ function formatPageNumbers(pageNumbers: number[]) {
 
 function resolveUploadedPageNumber(
   pageNumber: number,
-  pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
+  pageNumberMapping: Array<{
+    uploaded_page_number: number;
+    original_page_number: number;
+  }>,
 ) {
   if (!Number.isInteger(pageNumber) || pageNumber <= 0) {
     return null;
@@ -264,7 +281,10 @@ function resolveUploadedPageNumber(
 
 function resolveUploadedPageNumbers(
   pageNumbers: number[],
-  pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
+  pageNumberMapping: Array<{
+    uploaded_page_number: number;
+    original_page_number: number;
+  }>,
 ) {
   return Array.from(
     new Set(
@@ -292,15 +312,22 @@ function normalizeUploadedPageNumberMapping(value: unknown) {
       } =>
         !!entry &&
         typeof entry === 'object' &&
-        typeof (entry as { uploaded_page_number?: unknown }).uploaded_page_number === 'number' &&
-        typeof (entry as { original_page_number?: unknown }).original_page_number === 'number',
+        typeof (entry as { uploaded_page_number?: unknown })
+          .uploaded_page_number === 'number' &&
+        typeof (entry as { original_page_number?: unknown })
+          .original_page_number === 'number',
     )
-    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+    .sort(
+      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
+    );
 }
 
 function formatEvidenceSource(
   uploadedPageNumbers: number[],
-  pageNumberMapping: Array<{ uploaded_page_number: number; original_page_number: number }>,
+  pageNumberMapping: Array<{
+    uploaded_page_number: number;
+    original_page_number: number;
+  }>,
 ) {
   const normalizedUploadedPageNumbers = resolveUploadedPageNumbers(
     uploadedPageNumbers,
@@ -333,7 +360,9 @@ function textStyleToCss(style: TextStyleSnapshot): CSSProperties {
     textDecoration: style.underline ? 'underline' : undefined,
     color: style.color || undefined,
     backgroundColor: style.backgroundColor || undefined,
-    fontSize: style.fontSizePt ? `${style.fontSizePt * DOCX_PREVIEW_FONT_SCALE}pt` : undefined,
+    fontSize: style.fontSizePt
+      ? `${style.fontSizePt * DOCX_PREVIEW_FONT_SCALE}pt`
+      : undefined,
     fontFamily: style.fontFamily || undefined,
     whiteSpace: 'pre-wrap',
   };
@@ -513,13 +542,17 @@ function collectParagraphDecorations(
   const decorations: TextDecoration[] = [];
 
   items.forEach((item) => {
-    if (typeof item.paragraph_index === 'number' && item.paragraph_index !== paragraphIndex) {
+    if (
+      typeof item.paragraph_index === 'number' &&
+      item.paragraph_index !== paragraphIndex
+    ) {
       return;
     }
 
-    const preferredValues = [item.original_value.trim(), item.original_doc_position.trim()].filter(
-      Boolean,
-    );
+    const preferredValues = [
+      item.original_value.trim(),
+      item.original_doc_position.trim(),
+    ].filter(Boolean);
     const replacementText = item.replacement_value?.trim();
 
     if (preferredValues.length === 0) {
@@ -541,7 +574,9 @@ function collectParagraphDecorations(
           end: matchIndex + value.length,
         };
         const overlapsExisting = consumedRanges.some(
-          (range) => Math.max(range.start, nextRange.start) < Math.min(range.end, nextRange.end),
+          (range) =>
+            Math.max(range.start, nextRange.start) <
+            Math.min(range.end, nextRange.end),
         );
 
         if (!overlapsExisting) {
@@ -571,7 +606,10 @@ function collectParagraphDecorations(
     paragraphOffset = segmentEnd;
 
     const segmentDecorations = decorations
-      .filter((decoration) => decoration.start < segmentEnd && decoration.end > segmentStart)
+      .filter(
+        (decoration) =>
+          decoration.start < segmentEnd && decoration.end > segmentStart,
+      )
       .map((decoration) => ({
         itemId: decoration.itemId,
         start: Math.max(0, decoration.start - segmentStart),
@@ -657,7 +695,8 @@ function renderSegmentContent(
           marginLeft: decoration.continuesFromPrevious ? -1 : 0,
           marginRight: decoration.continuesToNext ? -1 : 0,
           scrollMarginBlock: '140px',
-          transition: 'background-color 180ms ease, box-shadow 180ms ease, transform 180ms ease',
+          transition:
+            'background-color 180ms ease, box-shadow 180ms ease, transform 180ms ease',
           transform: isActive ? 'translateY(-1px)' : undefined,
         }}
       >
@@ -686,12 +725,17 @@ function renderParagraphBlock(
   activeSlotKey: string | null,
 ) {
   const firstText = block.segments.find(
-    (segment): segment is TextSegment => segment.type === 'text' && segment.text.trim().length > 0,
+    (segment): segment is TextSegment =>
+      segment.type === 'text' && segment.text.trim().length > 0,
   );
   const textSegments = block.segments.filter(
     (segment): segment is TextSegment => segment.type === 'text',
   );
-  const decorationMap = collectParagraphDecorations(textSegments, originalSlots, paragraphIndex);
+  const decorationMap = collectParagraphDecorations(
+    textSegments,
+    originalSlots,
+    paragraphIndex,
+  );
   const isLikelyTitle =
     block.align === 'center' &&
     block.segments.length <= 3 &&
@@ -718,20 +762,35 @@ function renderParagraphBlock(
         if (segment.type === 'text') {
           return (
             <span key={segment.id} style={textStyleToCss(segment.style)}>
-              {renderSegmentContent(segment, decorationMap.get(segment.id) ?? [], activeSlotKey)}
+              {renderSegmentContent(
+                segment,
+                decorationMap.get(segment.id) ?? [],
+                activeSlotKey,
+              )}
             </span>
           );
         }
 
         return (
-          <span key={segment.id} style={{ display: 'inline-flex', margin: '0 6px', verticalAlign: 'middle' }}>
+          <span
+            key={segment.id}
+            style={{
+              display: 'inline-flex',
+              margin: '0 6px',
+              verticalAlign: 'middle',
+            }}
+          >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               alt={segment.altText || '文档图片'}
               src={segment.src}
               style={{
-                maxWidth: segment.style.widthPx ? `${segment.style.widthPx}px` : '100%',
-                maxHeight: segment.style.heightPx ? `${segment.style.heightPx}px` : undefined,
+                maxWidth: segment.style.widthPx
+                  ? `${segment.style.widthPx}px`
+                  : '100%',
+                maxHeight: segment.style.heightPx
+                  ? `${segment.style.heightPx}px`
+                  : undefined,
               }}
             />
           </span>
@@ -746,11 +805,19 @@ function renderStructuredBlocks(
   originalSlots: TemplateOriginalSlot[],
   activeSlotKey: string | null,
 ): ReactNode {
-  const renderBlocks = (nextBlocks: DocBlock[], startingParagraphIndex: number): [ReactNode[], number] => {
+  const renderBlocks = (
+    nextBlocks: DocBlock[],
+    startingParagraphIndex: number,
+  ): [ReactNode[], number] => {
     let currentParagraphIndex = startingParagraphIndex;
     const nodes = nextBlocks.map((block) => {
       if (block.type === 'paragraph') {
-        const node = renderParagraphBlock(block, currentParagraphIndex, originalSlots, activeSlotKey);
+        const node = renderParagraphBlock(
+          block,
+          currentParagraphIndex,
+          originalSlots,
+          activeSlotKey,
+        );
         currentParagraphIndex += 1;
         return node;
       }
@@ -758,7 +825,10 @@ function renderStructuredBlocks(
       const renderedRows = block.rows.map((row) => (
         <tr key={row.id}>
           {row.cells.map((cell) => {
-            const [cellNodes, nextParagraphIndex] = renderBlocks(cell.blocks, currentParagraphIndex);
+            const [cellNodes, nextParagraphIndex] = renderBlocks(
+              cell.blocks,
+              currentParagraphIndex,
+            );
             currentParagraphIndex = nextParagraphIndex;
 
             return (
@@ -818,7 +888,9 @@ function collectStructuredParagraphTexts(blocks: DocBlock[]): string[] {
       if (block.type === 'paragraph') {
         paragraphTexts.push(
           block.segments
-            .filter((segment): segment is TextSegment => segment.type === 'text')
+            .filter(
+              (segment): segment is TextSegment => segment.type === 'text',
+            )
             .map((segment) => segment.text)
             .join(''),
         );
@@ -879,7 +951,9 @@ function buildStructuredParagraphIndexMap(
       const isExactMatch =
         normalizedStructuredParagraphText === normalizedRawParagraphText;
       const isContainedMatch =
-        normalizedStructuredParagraphText.includes(normalizedRawParagraphText) ||
+        normalizedStructuredParagraphText.includes(
+          normalizedRawParagraphText,
+        ) ||
         normalizedRawParagraphText.includes(normalizedStructuredParagraphText);
 
       if (!isExactMatch && !isContainedMatch) {
@@ -900,7 +974,9 @@ function resolveStructuredOriginalSlots(
   uploadText: string,
   originalSlots: TemplateOriginalSlot[],
 ) {
-  const structuredParagraphTexts = collectStructuredParagraphTexts(parsedDocument.blocks);
+  const structuredParagraphTexts = collectStructuredParagraphTexts(
+    parsedDocument.blocks,
+  );
   const rawParagraphTexts = extractParagraphTextsFromUploadText(uploadText);
   const structuredParagraphIndexMap = buildStructuredParagraphIndexMap(
     rawParagraphTexts,
@@ -977,14 +1053,23 @@ function resolveLinkedFilledSlotKey(
     return directKeyMatch.slot_key;
   }
 
-  const signature = buildSlotSignature(slot.field_category, slot.meaning_to_applicant);
+  const signature = buildSlotSignature(
+    slot.field_category,
+    slot.meaning_to_applicant,
+  );
   const originalMatches = originalSlots.filter(
     (currentSlot) =>
-      buildSlotSignature(currentSlot.field_category, currentSlot.meaning_to_applicant) === signature,
+      buildSlotSignature(
+        currentSlot.field_category,
+        currentSlot.meaning_to_applicant,
+      ) === signature,
   );
   const filledMatches = filledItems.filter(
     (currentItem) =>
-      buildSlotSignature(currentItem.field_category, currentItem.meaning_to_applicant) === signature,
+      buildSlotSignature(
+        currentItem.field_category,
+        currentItem.meaning_to_applicant,
+      ) === signature,
   );
   const originalMatchIndex = originalMatches.findIndex(
     (currentSlot) => currentSlot.slot_key === slot.slot_key,
@@ -995,10 +1080,14 @@ function resolveLinkedFilledSlotKey(
   }
 
   const fallbackByCategory = filledItems.filter(
-    (currentItem) => normalizeSlotText(currentItem.field_category) === normalizeSlotText(slot.field_category),
+    (currentItem) =>
+      normalizeSlotText(currentItem.field_category) ===
+      normalizeSlotText(slot.field_category),
   );
   const originalCategoryMatches = originalSlots.filter(
-    (currentSlot) => normalizeSlotText(currentSlot.field_category) === normalizeSlotText(slot.field_category),
+    (currentSlot) =>
+      normalizeSlotText(currentSlot.field_category) ===
+      normalizeSlotText(slot.field_category),
   );
   const originalCategoryMatchIndex = originalCategoryMatches.findIndex(
     (currentSlot) => currentSlot.slot_key === slot.slot_key,
@@ -1008,11 +1097,19 @@ function resolveLinkedFilledSlotKey(
     return fallbackByCategory[originalMatchIndex].slot_key;
   }
 
-  if (originalCategoryMatchIndex >= 0 && fallbackByCategory[originalCategoryMatchIndex]) {
+  if (
+    originalCategoryMatchIndex >= 0 &&
+    fallbackByCategory[originalCategoryMatchIndex]
+  ) {
     return fallbackByCategory[originalCategoryMatchIndex].slot_key;
   }
 
-  return filledMatches[0]?.slot_key ?? fallbackByCategory[0]?.slot_key ?? filledItems[0]?.slot_key ?? null;
+  return (
+    filledMatches[0]?.slot_key ??
+    fallbackByCategory[0]?.slot_key ??
+    filledItems[0]?.slot_key ??
+    null
+  );
 }
 
 function resolveLinkedOriginalSlotKey(
@@ -1028,14 +1125,23 @@ function resolveLinkedOriginalSlotKey(
     return directKeyMatch.slot_key;
   }
 
-  const signature = buildSlotSignature(item.field_category, item.meaning_to_applicant);
+  const signature = buildSlotSignature(
+    item.field_category,
+    item.meaning_to_applicant,
+  );
   const filledMatches = filledItems.filter(
     (currentItem) =>
-      buildSlotSignature(currentItem.field_category, currentItem.meaning_to_applicant) === signature,
+      buildSlotSignature(
+        currentItem.field_category,
+        currentItem.meaning_to_applicant,
+      ) === signature,
   );
   const originalMatches = originalSlots.filter(
     (currentSlot) =>
-      buildSlotSignature(currentSlot.field_category, currentSlot.meaning_to_applicant) === signature,
+      buildSlotSignature(
+        currentSlot.field_category,
+        currentSlot.meaning_to_applicant,
+      ) === signature,
   );
   const filledMatchIndex = filledMatches.findIndex(
     (currentItem) => currentItem.slot_key === item.slot_key,
@@ -1046,10 +1152,14 @@ function resolveLinkedOriginalSlotKey(
   }
 
   const fallbackByCategory = originalSlots.filter(
-    (currentSlot) => normalizeSlotText(currentSlot.field_category) === normalizeSlotText(item.field_category),
+    (currentSlot) =>
+      normalizeSlotText(currentSlot.field_category) ===
+      normalizeSlotText(item.field_category),
   );
   const filledCategoryMatches = filledItems.filter(
-    (currentItem) => normalizeSlotText(currentItem.field_category) === normalizeSlotText(item.field_category),
+    (currentItem) =>
+      normalizeSlotText(currentItem.field_category) ===
+      normalizeSlotText(item.field_category),
   );
   const filledCategoryMatchIndex = filledCategoryMatches.findIndex(
     (currentItem) => currentItem.slot_key === item.slot_key,
@@ -1059,11 +1169,19 @@ function resolveLinkedOriginalSlotKey(
     return fallbackByCategory[filledMatchIndex].slot_key;
   }
 
-  if (filledCategoryMatchIndex >= 0 && fallbackByCategory[filledCategoryMatchIndex]) {
+  if (
+    filledCategoryMatchIndex >= 0 &&
+    fallbackByCategory[filledCategoryMatchIndex]
+  ) {
     return fallbackByCategory[filledCategoryMatchIndex].slot_key;
   }
 
-  return originalMatches[0]?.slot_key ?? fallbackByCategory[0]?.slot_key ?? originalSlots[0]?.slot_key ?? null;
+  return (
+    originalMatches[0]?.slot_key ??
+    fallbackByCategory[0]?.slot_key ??
+    originalSlots[0]?.slot_key ??
+    null
+  );
 }
 
 function buildFilledPreviewSlots(
@@ -1079,7 +1197,10 @@ function buildFilledPreviewSlots(
       filledItems,
     );
 
-    if (!linkedOriginalSlotKey || filledItemsByOriginalSlotKey.has(linkedOriginalSlotKey)) {
+    if (
+      !linkedOriginalSlotKey ||
+      filledItemsByOriginalSlotKey.has(linkedOriginalSlotKey)
+    ) {
       return;
     }
 
@@ -1100,13 +1221,17 @@ function buildFilledPreviewSlots(
     if (!replacementValue) {
       return {
         ...slot,
-        linked_filled_slot_key: linkedFilledItem?.slot_key ?? fallbackLinkedFilledSlotKey ?? undefined,
+        linked_filled_slot_key:
+          linkedFilledItem?.slot_key ??
+          fallbackLinkedFilledSlotKey ??
+          undefined,
       };
     }
 
     return {
       ...slot,
-      linked_filled_slot_key: linkedFilledItem?.slot_key ?? fallbackLinkedFilledSlotKey ?? undefined,
+      linked_filled_slot_key:
+        linkedFilledItem?.slot_key ?? fallbackLinkedFilledSlotKey ?? undefined,
       replacement_value: replacementValue,
     };
   });
@@ -1139,7 +1264,11 @@ function buildFilledTemplatePreviewHtml(
     const originalValue =
       slot.original_value.trim() || slot.original_doc_position.trim();
 
-    if (!replacementValue || !originalValue || replacementValue === originalValue) {
+    if (
+      !replacementValue ||
+      !originalValue ||
+      replacementValue === originalValue
+    ) {
       return currentHtml;
     }
 
@@ -1158,7 +1287,8 @@ export default function GenerationReviewPage() {
   const isJsonPreviewDebugEnabled = useJsonPreviewDebug();
   const router = useRouter();
   const params = useParams<{ taskItemId: string }>();
-  const taskItemId = typeof params.taskItemId === 'string' ? params.taskItemId : null;
+  const taskItemId =
+    typeof params.taskItemId === 'string' ? params.taskItemId : null;
   const queryClient = useQueryClient();
   const taskItemQuery = useGenerationTaskItem(taskItemId);
   const reviewMutation = useReviewGenerationTaskItem();
@@ -1166,9 +1296,14 @@ export default function GenerationReviewPage() {
   const pdfPreviewViewportRef = useRef<HTMLDivElement | null>(null);
   const pdfPageRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const initializedTaskItemIdRef = useRef<string | null>(null);
+  const loggedSlotFillUsageKeyRef = useRef<string | null>(null);
   const [items, setItems] = useState<EditableReviewedItem[]>([]);
-  const [activeOriginalSlotKey, setActiveOriginalSlotKey] = useState<string | null>(null);
-  const [activeFilledSlotKey, setActiveFilledSlotKey] = useState<string | null>(null);
+  const [activeOriginalSlotKey, setActiveOriginalSlotKey] = useState<
+    string | null
+  >(null);
+  const [activeFilledSlotKey, setActiveFilledSlotKey] = useState<string | null>(
+    null,
+  );
   const [pdfZoom, setPdfZoom] = useState(1);
 
   useEffect(() => {
@@ -1180,7 +1315,9 @@ export default function GenerationReviewPage() {
       return;
     }
 
-    const payload = taskItemQuery.data.item.review_payload ?? taskItemQuery.data.item.llm_output;
+    const payload =
+      taskItemQuery.data.item.review_payload ??
+      taskItemQuery.data.item.llm_output;
     const nextItems = normalizeExtractedItems(payload);
     const nextOriginalSlots = normalizeTemplateOriginalSlots(
       taskItemQuery.data.item.template_preview_slots ?? null,
@@ -1188,29 +1325,68 @@ export default function GenerationReviewPage() {
 
     setItems(nextItems);
     setActiveOriginalSlotKey((currentKey) => {
-      if (currentKey && nextOriginalSlots.some((slot) => slot.slot_key === currentKey)) {
+      if (
+        currentKey &&
+        nextOriginalSlots.some((slot) => slot.slot_key === currentKey)
+      ) {
         return currentKey;
       }
 
       if (nextItems[0]) {
-        return resolveLinkedOriginalSlotKey(nextItems[0], nextOriginalSlots, nextItems);
+        return resolveLinkedOriginalSlotKey(
+          nextItems[0],
+          nextOriginalSlots,
+          nextItems,
+        );
       }
 
       return nextOriginalSlots[0]?.slot_key ?? null;
     });
     setActiveFilledSlotKey((currentKey) => {
-      if (currentKey && nextItems.some((item) => item.slot_key === currentKey)) {
+      if (
+        currentKey &&
+        nextItems.some((item) => item.slot_key === currentKey)
+      ) {
         return currentKey;
       }
 
       if (nextOriginalSlots[0]) {
-        return resolveLinkedFilledSlotKey(nextOriginalSlots[0], nextOriginalSlots, nextItems);
-        }
+        return resolveLinkedFilledSlotKey(
+          nextOriginalSlots[0],
+          nextOriginalSlots,
+          nextItems,
+        );
+      }
 
-        return nextItems[0]?.slot_key ?? null;
-      });
+      return nextItems[0]?.slot_key ?? null;
+    });
     initializedTaskItemIdRef.current = taskItemId;
   }, [taskItemId, taskItemQuery.data]);
+
+  useEffect(() => {
+    const item = taskItemQuery.data?.item;
+
+    if (!item?.slot_fill_llm_usage) {
+      return;
+    }
+
+    const usageKey = `${item.id}:${JSON.stringify(item.slot_fill_llm_usage)}`;
+
+    if (loggedSlotFillUsageKeyRef.current === usageKey) {
+      return;
+    }
+
+    loggedSlotFillUsageKeyRef.current = usageKey;
+    logLlmUsageToBrowserConsole(
+      'Generation Slot Fill',
+      item.slot_fill_llm_usage,
+      {
+        taskItemId: item.id,
+        taskId: item.task_id,
+        sourcePdfName: item.source_pdf_name,
+      },
+    );
+  }, [taskItemQuery.data?.item]);
 
   const templatePreviewDocumentInput =
     taskItemQuery.data?.item.template_preview_document ?? null;
@@ -1237,7 +1413,11 @@ export default function GenerationReviewPage() {
             normalizedOriginalSlots,
           )
         : normalizedOriginalSlots,
-    [normalizedOriginalSlots, templatePreviewDocument, templatePreviewUploadText],
+    [
+      normalizedOriginalSlots,
+      templatePreviewDocument,
+      templatePreviewUploadText,
+    ],
   );
   const filledPreviewSlots = useMemo(
     () => buildFilledPreviewSlots(originalSlots, items),
@@ -1252,7 +1432,10 @@ export default function GenerationReviewPage() {
   const stablePdfPreviewUrl = taskItemQuery.data?.item.pdf_preview_url ?? null;
   const pdfPreviewPages = useMemo(
     () =>
-      ((taskItemQuery.data?.item.pdf_preview_pages ?? []) as GenerationPdfPreviewPage[])
+      (
+        (taskItemQuery.data?.item.pdf_preview_pages ??
+          []) as GenerationPdfPreviewPage[]
+      )
         .filter(
           (page) =>
             typeof page.pageNumber === 'number' &&
@@ -1270,8 +1453,11 @@ export default function GenerationReviewPage() {
   const uploadedPageNumberMapping = normalizeUploadedPageNumberMapping(
     taskItemQuery.data?.item.llm_input &&
       typeof taskItemQuery.data.item.llm_input === 'object'
-      ? (taskItemQuery.data.item.llm_input as { uploaded_page_number_mapping?: unknown })
-          .uploaded_page_number_mapping
+      ? (
+          taskItemQuery.data.item.llm_input as {
+            uploaded_page_number_mapping?: unknown;
+          }
+        ).uploaded_page_number_mapping
       : null,
   );
   const selectedPageRangeLabel = useMemo(() => {
@@ -1283,7 +1469,9 @@ export default function GenerationReviewPage() {
     }
 
     const value = (
-      taskItemQuery.data.item.llm_input as { selected_page_range_label?: unknown }
+      taskItemQuery.data.item.llm_input as {
+        selected_page_range_label?: unknown;
+      }
     ).selected_page_range_label;
 
     return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -1374,10 +1562,17 @@ export default function GenerationReviewPage() {
   }, [activePdfPageNumber, pdfPreviewPages.length]);
 
   const closeReviewWindow = (didReview: boolean) => {
-    if (typeof window !== 'undefined' && window.opener && !window.opener.closed && taskItemId) {
+    if (
+      typeof window !== 'undefined' &&
+      window.opener &&
+      !window.opener.closed &&
+      taskItemId
+    ) {
       window.opener.postMessage(
         {
-          type: didReview ? 'generation-task-reviewed' : 'generation-task-closed',
+          type: didReview
+            ? 'generation-task-reviewed'
+            : 'generation-task-closed',
           taskItemId,
         },
         window.location.origin,
@@ -1423,7 +1618,12 @@ export default function GenerationReviewPage() {
               ? taskItemQuery.error.message
               : '任务项读取失败，请稍后重试。'}
           </Alert>
-          <Button radius="xl" size="sm" variant="light" onClick={() => router.push('/home')}>
+          <Button
+            radius="xl"
+            size="sm"
+            variant="light"
+            onClick={() => router.push('/home')}
+          >
             返回首页
           </Button>
         </Stack>
@@ -1445,9 +1645,15 @@ export default function GenerationReviewPage() {
       });
 
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['generation-task-item', taskItemId] }),
-        queryClient.invalidateQueries({ queryKey: ['generation-task', task.id] }),
-        queryClient.invalidateQueries({ queryKey: ['generation-template-tasks'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['generation-task-item', taskItemId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['generation-task', task.id],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['generation-template-tasks'],
+        }),
       ]);
 
       notifications.show({
@@ -1461,7 +1667,10 @@ export default function GenerationReviewPage() {
       notifications.show({
         color: 'red',
         title: '保存失败',
-        message: error instanceof Error ? error.message : '保存核查结果失败，请稍后重试。',
+        message:
+          error instanceof Error
+            ? error.message
+            : '保存核查结果失败，请稍后重试。',
       });
     }
   };
@@ -1480,13 +1689,24 @@ export default function GenerationReviewPage() {
               >
                 返回任务列表
               </Button>
-              <Title order={3} size="h4">批量生成任务核查</Title>
-              <Badge color={canDownload ? 'green' : 'teal'} radius="sm" variant="light">
+              <Title order={3} size="h4">
+                批量生成任务核查
+              </Title>
+              <Badge
+                color={canDownload ? 'green' : 'teal'}
+                radius="sm"
+                variant="light"
+              >
                 {canDownload ? '核查完毕' : '待核查'}
               </Badge>
             </Group>
             <Group gap="sm">
-              <Button loading={reviewMutation.isPending} radius="xl" size="sm" onClick={handleSaveReview}>
+              <Button
+                loading={reviewMutation.isPending}
+                radius="xl"
+                size="sm"
+                onClick={handleSaveReview}
+              >
                 提交核查
               </Button>
             </Group>
@@ -1496,14 +1716,20 @@ export default function GenerationReviewPage() {
         <Box
           style={{
             display: 'grid',
-            gridTemplateColumns: 'minmax(260px, 0.66fr) minmax(760px, 2.45fr) minmax(240px, 0.55fr)',
+            gridTemplateColumns:
+              'minmax(260px, 0.66fr) minmax(760px, 2.45fr) minmax(240px, 0.55fr)',
             gap: 12,
             alignItems: 'stretch',
             height: 'calc(100vh - 116px)',
             minHeight: 620,
           }}
         >
-          <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
+          <Card
+            padding="md"
+            radius="xl"
+            withBorder
+            style={{ overflow: 'hidden' }}
+          >
             <Stack gap="xs" h="100%">
               <Group justify="space-between" align="flex-start">
                 <div>
@@ -1539,7 +1765,8 @@ export default function GenerationReviewPage() {
                     <div
                       style={{
                         width: '100%',
-                        fontFamily: '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
+                        fontFamily:
+                          '"Times New Roman", "SimSun", "Songti SC", "STSong", serif',
                         fontSize: '11px',
                         lineHeight: 1.55,
                         whiteSpace: 'normal',
@@ -1549,7 +1776,11 @@ export default function GenerationReviewPage() {
                       {structuredTemplatePreview ? (
                         structuredTemplatePreview
                       ) : (
-                        <div dangerouslySetInnerHTML={{ __html: filledTemplatePreviewHtml }} />
+                        <div
+                          dangerouslySetInnerHTML={{
+                            __html: filledTemplatePreviewHtml,
+                          }}
+                        />
                       )}
                     </div>
                   </Paper>
@@ -1562,14 +1793,21 @@ export default function GenerationReviewPage() {
             </Stack>
           </Card>
 
-          <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
+          <Card
+            padding="md"
+            radius="xl"
+            withBorder
+            style={{ overflow: 'hidden' }}
+          >
             <Stack gap="xs" h="100%">
               <Group justify="space-between" align="flex-start">
                 <div>
                   <Title order={5}>新 PDF 预览</Title>
                   <Text c="dimmed" size="xs">
                     当前 PDF：{item.source_pdf_name}
-                    {selectedPageRangeLabel ? `，上传范围：原 PDF 第 ${selectedPageRangeLabel} 页` : ''}
+                    {selectedPageRangeLabel
+                      ? `，上传范围：原 PDF 第 ${selectedPageRangeLabel} 页`
+                      : ''}
                   </Text>
                 </div>
                 <Group gap="xs">
@@ -1578,7 +1816,11 @@ export default function GenerationReviewPage() {
                     radius="xl"
                     size="compact-sm"
                     variant="subtle"
-                    onClick={() => updatePdfZoom((currentZoom) => currentZoom - PDF_PREVIEW_ZOOM_STEP)}
+                    onClick={() =>
+                      updatePdfZoom(
+                        (currentZoom) => currentZoom - PDF_PREVIEW_ZOOM_STEP,
+                      )
+                    }
                   >
                     缩小
                   </Button>
@@ -1590,7 +1832,11 @@ export default function GenerationReviewPage() {
                     radius="xl"
                     size="compact-sm"
                     variant="subtle"
-                    onClick={() => updatePdfZoom((currentZoom) => currentZoom + PDF_PREVIEW_ZOOM_STEP)}
+                    onClick={() =>
+                      updatePdfZoom(
+                        (currentZoom) => currentZoom + PDF_PREVIEW_ZOOM_STEP,
+                      )
+                    }
                   >
                     放大
                   </Button>
@@ -1617,7 +1863,8 @@ export default function GenerationReviewPage() {
                   <Stack gap="md">
                     {pdfPreviewPages.map((page) => {
                       const zoomedPageWidth = PDF_PREVIEW_BASE_WIDTH * pdfZoom;
-                      const isActivePage = activePdfPageNumber === page.pageNumber;
+                      const isActivePage =
+                        activePdfPageNumber === page.pageNumber;
 
                       return (
                         <Box
@@ -1664,7 +1911,9 @@ export default function GenerationReviewPage() {
                 </ScrollArea>
               ) : stablePdfPreviewUrl ? (
                 <Alert color="yellow" radius="xl" title="暂无页图预览">
-                  当前任务没有返回可用于页图预览的 OCR 图片；请回到批量生成重新上传，或先使用浏览器 PDF 预览地址进行核对。
+                  当前任务没有返回可用于页图预览的 OCR
+                  图片；请回到批量生成重新上传，或先使用浏览器 PDF
+                  预览地址进行核对。
                 </Alert>
               ) : (
                 <Alert color="yellow" radius="xl" title="暂时无法预览 PDF">
@@ -1674,7 +1923,12 @@ export default function GenerationReviewPage() {
             </Stack>
           </Card>
 
-          <Card padding="md" radius="xl" withBorder style={{ overflow: 'hidden' }}>
+          <Card
+            padding="md"
+            radius="xl"
+            withBorder
+            style={{ overflow: 'hidden' }}
+          >
             <Stack gap="xs" h="100%">
               <Group justify="space-between" align="flex-start">
                 <div>
@@ -1683,23 +1937,36 @@ export default function GenerationReviewPage() {
                     点击槽位会联动左侧模板和中间 PDF 证据页。
                   </Text>
                 </div>
-                <Badge color={pendingManualFillItems.length > 0 ? 'yellow' : 'teal'} radius="xl" variant="filled">
+                <Badge
+                  color={pendingManualFillItems.length > 0 ? 'yellow' : 'teal'}
+                  radius="xl"
+                  variant="filled"
+                >
                   {items.length} 个
                 </Badge>
               </Group>
               <Divider />
               {items.length > 0 ? (
-                <ScrollArea offsetScrollbars scrollbarSize={8} style={{ flex: 1, minHeight: 0 }} type="always">
+                <ScrollArea
+                  offsetScrollbars
+                  scrollbarSize={8}
+                  style={{ flex: 1, minHeight: 0 }}
+                  type="always"
+                >
                   <Stack gap="sm">
                     {items.map((slotItem, index) => {
-                      const isActive = slotItem.slot_key === activeFilledSlotKey;
-                      const linkedOriginalSlotKey = resolveLinkedOriginalSlotKey(
-                        slotItem,
-                        originalSlots,
-                        items,
-                      );
+                      const isActive =
+                        slotItem.slot_key === activeFilledSlotKey;
+                      const linkedOriginalSlotKey =
+                        resolveLinkedOriginalSlotKey(
+                          slotItem,
+                          originalSlots,
+                          items,
+                        );
                       const linkedOriginalSlot =
-                        originalSlots.find((slot) => slot.slot_key === linkedOriginalSlotKey) ?? null;
+                        originalSlots.find(
+                          (slot) => slot.slot_key === linkedOriginalSlotKey,
+                        ) ?? null;
 
                       return (
                         <Paper
@@ -1709,8 +1976,12 @@ export default function GenerationReviewPage() {
                           withBorder
                           style={{
                             cursor: 'pointer',
-                            borderColor: isActive ? 'var(--mantine-color-teal-5)' : undefined,
-                            background: isActive ? 'rgba(18, 184, 134, 0.08)' : undefined,
+                            borderColor: isActive
+                              ? 'var(--mantine-color-teal-5)'
+                              : undefined,
+                            background: isActive
+                              ? 'rgba(18, 184, 134, 0.08)'
+                              : undefined,
                           }}
                           onClick={() => {
                             setActiveFilledSlotKey(slotItem.slot_key);
@@ -1719,15 +1990,23 @@ export default function GenerationReviewPage() {
                         >
                           <Stack gap={6}>
                             <Group justify="space-between" align="center">
-                              <Badge color={isActive ? 'teal' : 'gray'} radius="sm" variant="filled">
+                              <Badge
+                                color={isActive ? 'teal' : 'gray'}
+                                radius="sm"
+                                variant="filled"
+                              >
                                 {slotItem.field_category || `槽位 ${index + 1}`}
                               </Badge>
                               <Text c="dimmed" size="xs">
-                                {formatEvidenceSource(slotItem.evidence_page_numbers ?? [], uploadedPageNumberMapping)}
+                                {formatEvidenceSource(
+                                  slotItem.evidence_page_numbers ?? [],
+                                  uploadedPageNumberMapping,
+                                )}
                               </Text>
                             </Group>
                             <Text c="dimmed" lineClamp={2} size="xs">
-                              槽位来源：{slotItem.meaning_to_applicant || '未填写'}
+                              槽位来源：
+                              {slotItem.meaning_to_applicant || '未填写'}
                             </Text>
                             <TextInput
                               label="模板值"
@@ -1751,7 +2030,10 @@ export default function GenerationReviewPage() {
                                 setItems((currentItems) =>
                                   currentItems.map((currentItem) =>
                                     currentItem.slot_key === slotItem.slot_key
-                                      ? { ...currentItem, original_value: nextValue }
+                                      ? {
+                                          ...currentItem,
+                                          original_value: nextValue,
+                                        }
                                       : currentItem,
                                   ),
                                 );
@@ -1771,7 +2053,8 @@ export default function GenerationReviewPage() {
               )}
               {pendingManualFillItems.length > 0 ? (
                 <Text c="dimmed" size="xs">
-                  仍有 {pendingManualFillItems.length} 个槽位回填值为空；如该槽位本就应为空，可直接提交。
+                  仍有 {pendingManualFillItems.length}{' '}
+                  个槽位回填值为空；如该槽位本就应为空，可直接提交。
                 </Text>
               ) : null}
             </Stack>
@@ -1795,7 +2078,13 @@ export default function GenerationReviewPage() {
                   overflowX: 'auto',
                 }}
               >
-                <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                <pre
+                  style={{
+                    margin: 0,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
                   {jsonPreview}
                 </pre>
               </Paper>

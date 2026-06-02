@@ -24,6 +24,8 @@ export const templateExtractionTaskResponseSchema = z.object({
   upload_html: z.string().nullable().optional(),
   result: templateSlotExtractionResultSchema.nullable().optional(),
   pdf_evidence: templatePdfEvidenceResultSchema.nullable().optional(),
+  docx_slot_extraction_llm_usage: z.any().nullable().optional(),
+  pdf_evidence_location_llm_usage: z.any().nullable().optional(),
   error_message: z.string().nullable().optional(),
   created_at: z.string(),
   started_at: z.string().nullable().optional(),

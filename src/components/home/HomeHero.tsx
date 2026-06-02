@@ -21,6 +21,7 @@ import {
   useState,
 } from 'react';
 import type { TemplateExtractionTaskResponse } from '@/src/app/api/types/template-extraction-task';
+import { logLlmUsageToBrowserConsole } from '@/src/lib/debug/browser-llm-usage-log';
 import { browserProcessLog } from '@/src/lib/debug/browser-process-log';
 import { parseDocxInBrowser } from '@/src/lib/docx/parse-browser';
 import {
@@ -252,9 +253,7 @@ function formatTextLlmPromptPayload(payload: Record<string, unknown>) {
     })
     .join('\n\n');
 
-  return [header, messageText || JSON.stringify(payload, null, 2)].join(
-    '\n\n',
-  );
+  return [header, messageText || JSON.stringify(payload, null, 2)].join('\n\n');
 }
 
 function logTemplateExtractionLlmTrace(line: string) {
@@ -278,8 +277,8 @@ function logTemplateExtractionLlmTrace(line: string) {
     : line.includes(promptMarker)
       ? '[Template Extract][Text LLM Prompt]'
       : line.includes(rawMarker)
-      ? '[Template Extract][LLM Raw Response]'
-      : '[Template Extract][LLM Parsed JSON]';
+        ? '[Template Extract][LLM Raw Response]'
+        : '[Template Extract][LLM Parsed JSON]';
 
   if (jsonStartIndex < 0) {
     browserProcessLog.info(line);
@@ -1001,6 +1000,24 @@ export function HomeHero() {
         if (!task.result) {
           throw new Error('槽位抽取任务已完成，但缺少抽取结果。');
         }
+
+        logLlmUsageToBrowserConsole(
+          'Template Extract / DOCX Slot Extraction',
+          task.docx_slot_extraction_llm_usage,
+          {
+            taskId: task.id,
+            documentName: task.source_docx_name,
+          },
+        );
+        logLlmUsageToBrowserConsole(
+          'Template Extract / PDF Evidence Location',
+          task.pdf_evidence_location_llm_usage,
+          {
+            taskId: task.id,
+            documentName: task.source_docx_name,
+            pdfName: task.source_pdf_name ?? null,
+          },
+        );
 
         window.sessionStorage.setItem(
           SLOT_REVIEW_SESSION_KEY,

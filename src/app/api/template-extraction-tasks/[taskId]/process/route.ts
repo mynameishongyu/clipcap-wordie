@@ -13,6 +13,10 @@ import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slo
 import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
 import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
+import {
+  createLlmUsageAccumulator,
+  summarizeLlmUsage,
+} from '@/src/lib/llm/usage';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 import { ensureExtractionResultSlotKeys } from '@/src/lib/templates/slot-key';
@@ -382,6 +386,7 @@ export async function POST(
     let pdfEvidence = null as Awaited<
       ReturnType<typeof buildTemplatePdfEvidence>
     > | null;
+    const pdfEvidenceUsageAccumulator = createLlmUsageAccumulator();
     const pdfVisionPageAssets = normalizePdfVisionPageAssets(
       task.source_pdf_vision_pages,
     );
@@ -389,9 +394,14 @@ export async function POST(
       Boolean(task.source_pdf_name) || pdfVisionPageAssets.length > 0;
 
     if (hasPdfEvidence) {
-      await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_start', {
-        pdf_file_name: task.source_pdf_name ?? null,
-      });
+      await appendMemoryTrace(
+        routeAdmin,
+        task.id,
+        'pdf_page_url_prepare_start',
+        {
+          pdf_file_name: task.source_pdf_name ?? null,
+        },
+      );
       const pdfVisionPages = await resolvePdfVisionPages({
         admin: routeAdmin,
         sourcePdfVisionPages: task.source_pdf_vision_pages,
@@ -402,9 +412,14 @@ export async function POST(
           await appendProcessingTrace(routeAdmin, task.id, entry.message);
         },
       });
-      await appendMemoryTrace(routeAdmin, task.id, 'pdf_page_url_prepare_done', {
-        pdf_page_image_count: pdfVisionPages.length,
-      });
+      await appendMemoryTrace(
+        routeAdmin,
+        task.id,
+        'pdf_page_url_prepare_done',
+        {
+          pdf_page_image_count: pdfVisionPages.length,
+        },
+      );
       const pdfMappingStartedAt = Date.now();
       await appendMemoryTrace(
         routeAdmin,
@@ -424,13 +439,19 @@ export async function POST(
               onTrace: async (entry) => {
                 await appendProcessingTrace(routeAdmin, task.id, entry.message);
               },
+              usageAccumulator: pdfEvidenceUsageAccumulator,
             })
           : null;
       const pdfMappingFinishedAt = Date.now();
-      await appendMemoryTrace(routeAdmin, task.id, 'slot_pdf_page_mapping_done', {
-        pdf_page_image_count: pdfVisionPages.length,
-        matched_slot_count: pdfEvidence?.matches.length ?? 0,
-      });
+      await appendMemoryTrace(
+        routeAdmin,
+        task.id,
+        'slot_pdf_page_mapping_done',
+        {
+          pdf_page_image_count: pdfVisionPages.length,
+          matched_slot_count: pdfEvidence?.matches.length ?? 0,
+        },
+      );
       await appendProcessingTrace(
         routeAdmin,
         task.id,
@@ -483,6 +504,10 @@ export async function POST(
           extraction_result: extractionResultWithSlotKeys,
         },
         pdf_evidence: pdfEvidence,
+        docx_slot_extraction_llm_usage: result.llmUsage,
+        pdf_evidence_location_llm_usage: hasPdfEvidence
+          ? summarizeLlmUsage(pdfEvidenceUsageAccumulator)
+          : null,
         error_message: partialCompletionMessage,
         finished_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),

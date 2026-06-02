@@ -49,16 +49,25 @@ function normalizePdfPreviewPagesInput(value: unknown) {
       } =>
         !!entry &&
         typeof entry === 'object' &&
-        typeof (entry as { uploaded_page_number?: unknown }).uploaded_page_number === 'number' &&
-        Number.isInteger((entry as { uploaded_page_number: number }).uploaded_page_number) &&
+        typeof (entry as { uploaded_page_number?: unknown })
+          .uploaded_page_number === 'number' &&
+        Number.isInteger(
+          (entry as { uploaded_page_number: number }).uploaded_page_number,
+        ) &&
         (entry as { uploaded_page_number: number }).uploaded_page_number > 0 &&
-        typeof (entry as { original_page_number?: unknown }).original_page_number === 'number' &&
-        Number.isInteger((entry as { original_page_number: number }).original_page_number) &&
+        typeof (entry as { original_page_number?: unknown })
+          .original_page_number === 'number' &&
+        Number.isInteger(
+          (entry as { original_page_number: number }).original_page_number,
+        ) &&
         (entry as { original_page_number: number }).original_page_number > 0 &&
-        typeof (entry as { storage_path?: unknown }).storage_path === 'string' &&
+        typeof (entry as { storage_path?: unknown }).storage_path ===
+          'string' &&
         (entry as { storage_path: string }).storage_path.trim().length > 0,
     )
-    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+    .sort(
+      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
+    );
 }
 
 async function createGenerationPdfPreviewPages(input: {
@@ -109,8 +118,8 @@ async function createGenerationPdfPreviewPages(input: {
     }),
   );
 
-  return signedPages.filter(
-    (page): page is GenerationPdfPreviewPage => Boolean(page),
+  return signedPages.filter((page): page is GenerationPdfPreviewPage =>
+    Boolean(page),
   );
 }
 
@@ -132,7 +141,7 @@ export async function GET(
     const { data: item, error: itemError } = await supabase
       .from('generation_task_items')
       .select(
-        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, started_at, finished_at',
+        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, slot_fill_llm_usage, started_at, finished_at',
       )
       .eq('id', taskItemId)
       .single();
@@ -203,9 +212,12 @@ export async function GET(
         }>();
 
       templatePreviewHtml = template?.upload_html ?? null;
-      templatePreviewDocument = template?.slot_review_payload?.parsedDocument ?? null;
-      templatePreviewSlots = template?.slot_review_payload?.extractionResult ?? null;
-      templatePreviewUploadText = template?.slot_review_payload?.uploadText ?? null;
+      templatePreviewDocument =
+        template?.slot_review_payload?.parsedDocument ?? null;
+      templatePreviewSlots =
+        template?.slot_review_payload?.extractionResult ?? null;
+      templatePreviewUploadText =
+        template?.slot_review_payload?.uploadText ?? null;
     }
 
     return NextResponse.json({
@@ -226,7 +238,10 @@ export async function GET(
     return NextResponse.json(
       {
         code: 'GENERATION_TASK_ITEM_FETCH_FAILED',
-        message: error instanceof Error ? error.message : '读取任务项详情失败，请稍后重试。',
+        message:
+          error instanceof Error
+            ? error.message
+            : '读取任务项详情失败，请稍后重试。',
       },
       { status: 500 },
     );
@@ -252,7 +267,9 @@ export async function DELETE(
 
     const { data: item, error: itemError } = await admin
       .from('generation_task_items')
-      .select('id, owner_id, task_id, template_id, source_pdf_path, output_docx_path, llm_input')
+      .select(
+        'id, owner_id, task_id, template_id, source_pdf_path, output_docx_path, llm_input',
+      )
       .eq('id', taskItemId)
       .single();
 
@@ -283,7 +300,8 @@ export async function DELETE(
               .llm_input?.ocr_image_assets,
           ).map((asset) => asset.storage_path),
         ].filter(
-          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+          (value): value is string =>
+            typeof value === 'string' && value.trim().length > 0,
         ),
       ),
     );
@@ -360,7 +378,10 @@ export async function DELETE(
       actorEmail: user.email ?? null,
       level: 'error',
       eventType: 'generation_task_item_delete_failed',
-      message: error instanceof Error ? error.message : 'Failed to delete generation task item.',
+      message:
+        error instanceof Error
+          ? error.message
+          : 'Failed to delete generation task item.',
       route: '/api/generation-task-items/[taskItemId]',
       taskItemId,
     });
@@ -368,7 +389,10 @@ export async function DELETE(
     return NextResponse.json(
       {
         code: 'GENERATION_TASK_ITEM_DELETE_FAILED',
-        message: error instanceof Error ? error.message : '删除任务项失败，请稍后重试。',
+        message:
+          error instanceof Error
+            ? error.message
+            : '删除任务项失败，请稍后重试。',
       },
       { status: 500 },
     );

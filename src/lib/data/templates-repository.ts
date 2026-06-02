@@ -409,14 +409,13 @@ async function persistTemplateReferencePdfPages(input: {
     ),
   );
 
-  // Debug: keep temporary PDF extraction page images in Storage for inspection.
-  // await cleanupTemplateExtractionPages({
-  //   supabase: input.supabase,
-  //   user: input.user,
-  //   extractionTaskId: pdfEvidence.extractionTaskId,
-  //   originalPages: pdfEvidence.pages,
-  //   persistedPages: pages,
-  // });
+  await cleanupTemplateExtractionPages({
+    supabase: input.supabase,
+    user: input.user,
+    extractionTaskId: pdfEvidence.extractionTaskId,
+    originalPages: pdfEvidence.pages,
+    persistedPages: pages,
+  });
 
   return {
     ...input.slotReviewPayload,

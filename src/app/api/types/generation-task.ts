@@ -74,40 +74,42 @@ export const generationTaskDetailResponseSchema = z.object({
   items: z.array(generationTaskItemSummarySchema),
 });
 
-export const generationTaskItemDetailSchema = generationTaskItemSummarySchema.extend({
-  llm_input: z.any().nullable().optional(),
-  llm_output: z.any().nullable().optional(),
-  review_payload: z.any().nullable().optional(),
-  pdf_preview_url: z.string().nullable().optional(),
-  pdf_preview_pages: z
-    .array(
-      z.object({
-        pageNumber: z.number().int().positive(),
-        originalPageNumber: z.number().int().positive(),
-        imageUrl: z.string(),
-        storagePath: z.string(),
-        rotationApplied: z.number().nullable().optional(),
-        crop: z
-          .object({
-            left: z.number(),
-            top: z.number(),
-            width: z.number(),
-            height: z.number(),
-            originalWidth: z.number(),
-            originalHeight: z.number(),
-            contentRatio: z.number(),
-          })
-          .nullable()
-          .optional(),
-      }),
-    )
-    .optional()
-    .default([]),
-  template_preview_html: z.string().nullable().optional(),
-  template_preview_document: z.any().nullable().optional(),
-  template_preview_slots: z.any().nullable().optional(),
-  template_preview_upload_text: z.string().nullable().optional(),
-});
+export const generationTaskItemDetailSchema =
+  generationTaskItemSummarySchema.extend({
+    llm_input: z.any().nullable().optional(),
+    llm_output: z.any().nullable().optional(),
+    review_payload: z.any().nullable().optional(),
+    slot_fill_llm_usage: z.any().nullable().optional(),
+    pdf_preview_url: z.string().nullable().optional(),
+    pdf_preview_pages: z
+      .array(
+        z.object({
+          pageNumber: z.number().int().positive(),
+          originalPageNumber: z.number().int().positive(),
+          imageUrl: z.string(),
+          storagePath: z.string(),
+          rotationApplied: z.number().nullable().optional(),
+          crop: z
+            .object({
+              left: z.number(),
+              top: z.number(),
+              width: z.number(),
+              height: z.number(),
+              originalWidth: z.number(),
+              originalHeight: z.number(),
+              contentRatio: z.number(),
+            })
+            .nullable()
+            .optional(),
+        }),
+      )
+      .optional()
+      .default([]),
+    template_preview_html: z.string().nullable().optional(),
+    template_preview_document: z.any().nullable().optional(),
+    template_preview_slots: z.any().nullable().optional(),
+    template_preview_upload_text: z.string().nullable().optional(),
+  });
 
 export const generationTaskItemDetailResponseSchema = z.object({
   item: generationTaskItemDetailSchema,
@@ -128,16 +130,32 @@ export const generationTemplateTaskEntrySchema = z.object({
   error_message: z.string().nullable().optional(),
 });
 
-export const generationTemplateTaskListResponseSchema = z.array(generationTemplateTaskEntrySchema);
+export const generationTemplateTaskListResponseSchema = z.array(
+  generationTemplateTaskEntrySchema,
+);
 
-export type GenerationTaskItemSummary = z.infer<typeof generationTaskItemSummarySchema>;
+export type GenerationTaskItemSummary = z.infer<
+  typeof generationTaskItemSummarySchema
+>;
 export type GenerationTaskSummary = z.infer<typeof generationTaskSummarySchema>;
-export type GenerationReviewedItem = z.infer<typeof generationReviewedItemSchema>;
-export type CreateGenerationTaskResponse = z.infer<typeof createGenerationTaskResponseSchema>;
-export type GenerationTaskDetailResponse = z.infer<typeof generationTaskDetailResponseSchema>;
-export type GenerationTaskItemDetail = z.infer<typeof generationTaskItemDetailSchema>;
-export type GenerationTaskItemDetailResponse = z.infer<typeof generationTaskItemDetailResponseSchema>;
-export type GenerationTemplateTaskEntry = z.infer<typeof generationTemplateTaskEntrySchema>;
+export type GenerationReviewedItem = z.infer<
+  typeof generationReviewedItemSchema
+>;
+export type CreateGenerationTaskResponse = z.infer<
+  typeof createGenerationTaskResponseSchema
+>;
+export type GenerationTaskDetailResponse = z.infer<
+  typeof generationTaskDetailResponseSchema
+>;
+export type GenerationTaskItemDetail = z.infer<
+  typeof generationTaskItemDetailSchema
+>;
+export type GenerationTaskItemDetailResponse = z.infer<
+  typeof generationTaskItemDetailResponseSchema
+>;
+export type GenerationTemplateTaskEntry = z.infer<
+  typeof generationTemplateTaskEntrySchema
+>;
 export type GenerationTemplateTaskListResponse = z.infer<
   typeof generationTemplateTaskListResponseSchema
 >;
