@@ -209,6 +209,61 @@ function removeOrphanPdfEvidenceMatches(
   };
 }
 
+function getPdfEvidenceMatchesFromItems(items: EditableExtractionItem[]) {
+  return items
+    .map((item) => item.pdf_evidence_match)
+    .filter((match): match is PdfEvidenceMatch => Boolean(match));
+}
+
+function buildPdfEvidenceFromItems(
+  pdfEvidence: SlotReviewSessionPayload['pdfEvidence'],
+  items: EditableExtractionItem[],
+) {
+  if (!pdfEvidence) {
+    return undefined;
+  }
+
+  return {
+    ...pdfEvidence,
+    matches: getPdfEvidenceMatchesFromItems(items),
+  };
+}
+
+function buildSlotReviewPayloadFromItems(input: {
+  payload: SlotReviewSessionPayload;
+  items: EditableExtractionItem[];
+  templateName?: string;
+}) {
+  const extractionResult = groupExtractionItemsByParagraph(
+    input.items,
+    input.payload.extractionResult,
+  );
+
+  return removeOrphanPdfEvidenceMatches({
+    ...input.payload,
+    ...(input.templateName === undefined
+      ? {}
+      : { templateName: input.templateName }),
+    extractionResult,
+    pdfEvidence: buildPdfEvidenceFromItems(
+      input.payload.pdfEvidence,
+      input.items,
+    ),
+  });
+}
+
+function persistSlotReviewItemsToSession(
+  payload: SlotReviewSessionPayload,
+  items: EditableExtractionItem[],
+) {
+  persistSlotReviewPayloadToSession(
+    buildSlotReviewPayloadFromItems({
+      payload,
+      items,
+    }),
+  );
+}
+
 function extractParagraphTextsFromUploadText(uploadText: string) {
   return uploadText
     .split(/\n{2,}/)
@@ -1035,36 +1090,12 @@ function parseSlotItemIdentity(item: EditableExtractionItem) {
   };
 }
 
-function isPdfEvidenceMatchForItem(
-  match: PdfEvidenceMatch,
-  item: EditableExtractionItem,
-) {
-  const itemSlotKey = item.slot_key?.trim() || item.id;
-
-  return getPdfEvidenceMatchSlotKey(match) === itemSlotKey;
-}
-
-function findPdfEvidenceMatchForItem(
-  item: EditableExtractionItem | null,
-  payload: SlotReviewSessionPayload | null,
-) {
+function findPdfEvidenceMatchForItem(item: EditableExtractionItem | null) {
   if (!item) {
     return null;
   }
 
-  if (item.pdf_evidence_match) {
-    return item.pdf_evidence_match;
-  }
-
-  if (!payload?.pdfEvidence) {
-    return null;
-  }
-
-  return (
-    payload.pdfEvidence.matches.find((match) =>
-      isPdfEvidenceMatchForItem(match, item),
-    ) ?? null
-  );
+  return item.pdf_evidence_match;
 }
 
 function clampPdfCoordinate(value: number) {
@@ -2280,6 +2311,20 @@ export function SlotReviewWorkspace() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!payload) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      persistSlotReviewItemsToSession(payload, items);
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [items, payload]);
+
   const visibleItems = useMemo(() => {
     if (!payload) {
       return [];
@@ -2438,8 +2483,8 @@ export function SlotReviewWorkspace() {
     (item) => item.id === activeItemId,
   );
   const activeEvidenceMatch = useMemo(
-    () => findPdfEvidenceMatchForItem(activeItem, payload),
-    [activeItem, payload],
+    () => findPdfEvidenceMatchForItem(activeItem),
+    [activeItem],
   );
   const editingItem = useMemo(
     () => visibleItems.find((item) => item.id === editingItemId) ?? null,
@@ -2676,10 +2721,7 @@ export function SlotReviewWorkspace() {
       return;
     }
 
-    const targetEvidenceMatch = findPdfEvidenceMatchForItem(
-      targetItem,
-      payload,
-    );
+    const targetEvidenceMatch = findPdfEvidenceMatchForItem(targetItem);
 
     setPdfLocationEditState({
       itemId: targetItem.id,
@@ -2805,45 +2847,13 @@ export function SlotReviewWorkspace() {
       const currentItem =
         currentState.items.find((item) => item.id === activeItem.id) ??
         activeItem;
-      const existingMatch = findPdfEvidenceMatchForItem(
-        currentItem,
-        currentState.payload,
-      );
+      const existingMatch = findPdfEvidenceMatchForItem(currentItem);
       const nextMatch = buildManualPdfEvidenceMatch({
         item: currentItem,
         pageNumber: pdfLocationEditState.draftPageNumber!,
         bbox: pdfLocationEditState.draftBbox!,
         existingMatch,
       });
-      const currentMatches = currentState.payload.pdfEvidence.matches;
-      const hasExistingMatch = currentMatches.some((match) =>
-        isPdfEvidenceMatchForItem(match, currentItem),
-      );
-      let nextMatches: PdfEvidenceMatch[];
-
-      if (hasExistingMatch) {
-        nextMatches = currentMatches.map((match) => {
-          const isCurrentItemMatch = isPdfEvidenceMatchForItem(
-            match,
-            currentItem,
-          );
-
-          if (isCurrentItemMatch) {
-            return nextMatch;
-          }
-
-          return match;
-        });
-      } else {
-        nextMatches = [...currentMatches, nextMatch];
-      }
-      const nextPayload: SlotReviewSessionPayload = {
-        ...currentState.payload,
-        pdfEvidence: {
-          ...currentState.payload.pdfEvidence,
-          matches: nextMatches,
-        },
-      };
       const nextItems = currentState.items.map((item) =>
         item.id === currentItem.id
           ? {
@@ -2853,12 +2863,9 @@ export function SlotReviewWorkspace() {
           : item,
       );
 
-      persistSlotReviewPayloadToSession(nextPayload);
-
       return {
         ...currentState,
         items: nextItems,
-        payload: nextPayload,
       };
     });
 
@@ -2876,31 +2883,27 @@ export function SlotReviewWorkspace() {
     }
 
     return JSON.stringify(
-      buildJsonPreviewPayload(visibleItems, payload),
+      buildJsonPreviewPayload(items, payload),
       null,
       2,
     );
-  }, [payload, visibleItems]);
+  }, [items, payload]);
 
   const saveTemplateWithName = async (templateName: string) => {
     if (!payload) {
       throw new Error('当前模板数据还未加载完成，请稍后再试。');
     }
 
-    const nextExtractionResult = groupExtractionItemsByParagraph(
-      visibleItems,
-      payload.extractionResult,
-    );
-    const nextPayload = removeOrphanPdfEvidenceMatches({
-      ...payload,
+    const nextPayload = buildSlotReviewPayloadFromItems({
+      payload,
+      items,
       templateName,
-      extractionResult: nextExtractionResult,
     });
     const savedTemplate = await saveTemplateMutation.mutateAsync({
       templateId: payload.templateId,
       templateName,
       slotReviewPayload: nextPayload,
-      slotPreview: buildJsonPreviewPayload(visibleItems, nextPayload),
+      slotPreview: buildJsonPreviewPayload(items, nextPayload),
     });
     let annotatedPayload: SlotReviewSessionPayload = {
       ...nextPayload,
@@ -3418,10 +3421,7 @@ export function SlotReviewWorkspace() {
                     );
                     const pendingSelection =
                       pendingSelectionByItemId[item.id] ?? '';
-                    const evidenceMatch = findPdfEvidenceMatchForItem(
-                      item,
-                      payload,
-                    );
+                    const evidenceMatch = findPdfEvidenceMatchForItem(item);
 
                     return (
                       <Card
@@ -3560,24 +3560,26 @@ export function SlotReviewWorkspace() {
                                     setWorkspaceState((currentState) => ({
                                       ...currentState,
                                       items: currentState.items.map(
-                                        (currentItem) =>
-                                          currentItem.id === item.id
-                                            ? {
-                                                ...currentItem,
-                                                original_value:
-                                                  currentState
-                                                    .pendingSelectionByItemId[
-                                                    item.id
-                                                  ] ??
-                                                  currentItem.original_value,
-                                                original_doc_position:
-                                                  currentState
-                                                    .pendingSelectionByItemId[
-                                                    item.id
-                                                  ] ??
-                                                  currentItem.original_doc_position,
-                                              }
-                                            : currentItem,
+                                        (currentItem) => {
+                                          if (currentItem.id !== item.id) {
+                                            return currentItem;
+                                          }
+
+                                          const pendingSelection =
+                                            currentState.pendingSelectionByItemId[
+                                              item.id
+                                            ];
+                                          const nextOriginalValue =
+                                            pendingSelection ??
+                                            currentItem.original_value;
+
+                                          return {
+                                            ...currentItem,
+                                            original_value: nextOriginalValue,
+                                            original_doc_position:
+                                              nextOriginalValue,
+                                          };
+                                        },
                                       ),
                                       editingItemId: null,
                                       pendingSelectionByItemId:
@@ -3636,57 +3638,10 @@ export function SlotReviewWorkspace() {
                                       (currentItem) =>
                                         currentItem.id !== item.id,
                                     );
-                                    const removedSlotKey =
-                                      item.slot_key?.trim() || item.id;
                                     const nextActiveItemId =
                                       currentState.activeItemId === item.id
                                         ? nextVisibleItemId
                                         : currentState.activeItemId;
-                                    const nextPayload = (() => {
-                                      const currentPayload =
-                                        currentState.payload;
-
-                                      if (!currentPayload) {
-                                        return currentPayload;
-                                      }
-
-                                      const nextExtractionResult =
-                                        groupExtractionItemsByParagraph(
-                                          nextItems,
-                                          currentPayload.extractionResult,
-                                        );
-                                      const currentPdfEvidence =
-                                        currentPayload.pdfEvidence;
-                                      let nextPdfEvidence = currentPdfEvidence;
-
-                                      if (currentPdfEvidence) {
-                                        const nextPdfEvidenceMatches =
-                                          currentPdfEvidence.matches.filter(
-                                            (match) => {
-                                              const matchSlotKey =
-                                                getPdfEvidenceMatchSlotKey(
-                                                  match,
-                                                );
-                                              const shouldKeepMatch =
-                                                matchSlotKey !== removedSlotKey;
-
-                                              return shouldKeepMatch;
-                                            },
-                                          );
-
-                                        nextPdfEvidence = {
-                                          ...currentPdfEvidence,
-                                          matches: nextPdfEvidenceMatches,
-                                        };
-                                      }
-
-                                      return removeOrphanPdfEvidenceMatches({
-                                        ...currentPayload,
-                                        extractionResult: nextExtractionResult,
-                                        pdfEvidence: nextPdfEvidence,
-                                      });
-                                    })();
-
                                     const nextPendingSelectionByItemId =
                                       Object.fromEntries(
                                         Object.entries(
@@ -3697,16 +3652,9 @@ export function SlotReviewWorkspace() {
                                         ),
                                       );
 
-                                    if (nextPayload) {
-                                      persistSlotReviewPayloadToSession(
-                                        nextPayload,
-                                      );
-                                    }
-
                                     return {
                                       ...currentState,
                                       items: nextItems,
-                                      payload: nextPayload,
                                       activeItemId: nextActiveItemId,
                                       editingItemId:
                                         currentState.editingItemId === item.id

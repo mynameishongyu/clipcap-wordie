@@ -93,38 +93,40 @@ export function groupExtractionItemsByParagraph(
   sourceParagraphs: ExtractionParagraph[],
 ): ExtractionParagraph[] {
   const matchedItemIds = new Set<string>();
-  const groupedSourceParagraphs = sourceParagraphs.flatMap(
-    (paragraph, paragraphIndex) => {
-      const paragraphGroupKey = getSourceParagraphGroupKey(
-        paragraph,
-        paragraphIndex,
-      );
-      const paragraphItems = items
-        .filter((item) => {
-          if (matchedItemIds.has(item.id)) {
-            return false;
-          }
+  const groupedSourceParagraphs: ExtractionParagraph[] = [];
 
-          return getItemParagraphGroupKey(item) === paragraphGroupKey;
-        })
-        .map((item) => {
-          matchedItemIds.add(item.id);
-          return toExtractionItem(item);
-        });
+  sourceParagraphs.forEach((paragraph, paragraphIndex) => {
+    const paragraphGroupKey = getSourceParagraphGroupKey(
+      paragraph,
+      paragraphIndex,
+    );
+    const paragraphItems: ExtractionParagraph['items'] = [];
 
-      if (paragraphItems.length === 0) {
-        return [];
+    items.forEach((item) => {
+      if (matchedItemIds.has(item.id)) {
+        return;
       }
 
-      return [
-        {
-          paragraph_index: paragraph.paragraph_index ?? paragraphIndex,
-          paragraph_title: paragraph.paragraph_title,
-          items: paragraphItems,
-        },
-      ];
-    },
-  );
+      const itemGroupKey = getItemParagraphGroupKey(item);
+
+      if (itemGroupKey !== paragraphGroupKey) {
+        return;
+      }
+
+      matchedItemIds.add(item.id);
+      paragraphItems.push(toExtractionItem(item));
+    });
+
+    if (paragraphItems.length === 0) {
+      return;
+    }
+
+    groupedSourceParagraphs.push({
+      paragraph_index: paragraph.paragraph_index ?? paragraphIndex,
+      paragraph_title: paragraph.paragraph_title,
+      items: paragraphItems,
+    });
+  });
 
   const manualParagraphMap = new Map<
     string,

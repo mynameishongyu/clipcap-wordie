@@ -345,6 +345,42 @@ function getProviderExtraBody(
   return {};
 }
 
+type ChatCompletionMessage = Parameters<typeof buildChatCompletionBody>[1]['messages'][number];
+
+function convertGeminiFilePartForChatCompletions(
+  part: Extract<ChatCompletionMessage['content'], unknown[]>[number],
+) {
+  if (part.type !== 'gemini_file') {
+    return part;
+  }
+
+  return {
+    type: 'image_url',
+    image_url: {
+      url: part.gemini_file.uri,
+    },
+  } as const;
+}
+
+function normalizeChatCompletionMessageForProvider(
+  config: LlmRuntimeConfig,
+  message: ChatCompletionMessage,
+) {
+  const providerAcceptsGeminiFileParts = config.provider === 'gemini';
+
+  if (
+    providerAcceptsGeminiFileParts ||
+    !Array.isArray(message.content)
+  ) {
+    return message;
+  }
+
+  return {
+    ...message,
+    content: message.content.map(convertGeminiFilePartForChatCompletions),
+  };
+}
+
 export function getLlmRuntimeConfig(
   role: LlmRole,
   options?: LlmRuntimeConfigOptions,
@@ -421,27 +457,9 @@ export function buildChatCompletionBody(
     }>;
   },
 ) {
-  const messages = input.messages.map((message) => {
-    if (!Array.isArray(message.content) || config.provider === 'gemini') {
-      return message;
-    }
-
-    return {
-      ...message,
-      content: message.content.map((part) => {
-        if (part.type !== 'gemini_file') {
-          return part;
-        }
-
-        return {
-          type: 'image_url',
-          image_url: {
-            url: part.gemini_file.uri,
-          },
-        } as const;
-      }),
-    };
-  });
+  const messages = input.messages.map((message) =>
+    normalizeChatCompletionMessageForProvider(config, message),
+  );
 
   return {
     model: config.model,

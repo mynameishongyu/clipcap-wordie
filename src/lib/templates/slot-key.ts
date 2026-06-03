@@ -45,13 +45,31 @@ export function getPdfEvidenceMatchSlotKey(
 export function ensureExtractionResultSlotKeys(
   extractionResult: ExtractionParagraph[],
 ) {
-  return extractionResult.map((paragraph, paragraphIndex) => ({
-    ...paragraph,
-    items: paragraph.items.map((item, itemIndex) => ({
-      ...item,
-      slot_key: getExtractionItemSlotKey(item, paragraphIndex, itemIndex),
-    })),
-  }));
+  const paragraphsWithSlotKeys: ExtractionParagraph[] = [];
+
+  extractionResult.forEach((paragraph, paragraphIndex) => {
+    const itemsWithSlotKeys: ExtractionParagraph['items'] = [];
+
+    paragraph.items.forEach((item, itemIndex) => {
+      const slotKey = getExtractionItemSlotKey(
+        item,
+        paragraphIndex,
+        itemIndex,
+      );
+
+      itemsWithSlotKeys.push({
+        ...item,
+        slot_key: slotKey,
+      });
+    });
+
+    paragraphsWithSlotKeys.push({
+      ...paragraph,
+      items: itemsWithSlotKeys,
+    });
+  });
+
+  return paragraphsWithSlotKeys;
 }
 
 export function getExtractionResultSlotKeySet(
