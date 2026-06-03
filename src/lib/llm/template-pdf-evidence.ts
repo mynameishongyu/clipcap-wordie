@@ -1203,24 +1203,31 @@ async function locateSlotsInPageBatch(input: {
         content.push({
           type: 'image_url',
           image_url: {
-            url: page.image_data_url,
+            url: page.image_url ?? page.image_data_url,
           },
         });
       }
     });
 
-    const requestBody = buildChatCompletionBody(llmConfig, {
-      messages: [
-        {
-          role: 'system',
-          content: PDF_BBOX_SYSTEM_PROMPT,
-        },
-        {
-          role: 'user',
-          content,
-        },
-      ],
-    });
+    const requestBody = withGeminiOpenAiJsonResponseFormat(
+      buildChatCompletionBody(llmConfig, {
+        messages: [
+          {
+            role: 'system',
+            content: PDF_BBOX_SYSTEM_PROMPT,
+          },
+          {
+            role: 'user',
+            content,
+          },
+        ],
+      }),
+      {
+        provider: llmConfig.provider,
+        name: 'template_pdf_locate',
+        schema: geminiTemplatePdfLocateResponseSchema,
+      },
+    );
 
     let payload: {
       usage?: unknown;
@@ -1284,7 +1291,7 @@ async function locateSlotsInPageBatch(input: {
             request_label: requestLabel,
             request_body: summarizeChatCompletionBodyForTrace(requestBody),
             image_url_note:
-              'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request uses the full data:image/... base64 URL.',
+              'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request keeps the original image URL.',
           }),
       });
 

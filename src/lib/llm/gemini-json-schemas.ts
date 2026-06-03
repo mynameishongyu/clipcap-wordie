@@ -255,7 +255,7 @@ export function withGeminiOpenAiJsonResponseFormat<
     strict?: boolean;
   },
 ) {
-  if (input.provider !== 'gemini') {
+  if (input.provider !== 'gemini' && input.provider !== 'doubao') {
     return body;
   }
 

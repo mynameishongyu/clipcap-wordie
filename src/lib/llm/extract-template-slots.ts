@@ -12,6 +12,7 @@ import {
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
   buildChatCompletionBody,
+  buildChatCompletionHeaders,
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
@@ -188,6 +189,8 @@ function getTemplateExtractionRequestIntervalMs() {
 function buildLlmTraceConfigPayload(
   traceConfig: ReturnType<typeof getLlmRuntimeTraceConfig>,
 ) {
+  const textTraceConfig = getLlmRuntimeTraceConfig('text');
+
   return {
     [traceConfig.modelEnvName]: traceConfig.model,
     [traceConfig.thinkingEnabledEnvName]: traceConfig.thinkingEnabled,
@@ -533,10 +536,7 @@ async function requestTextLlmJson(input: {
 
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${llmConfig.apiKey}`,
-        },
+        headers: buildChatCompletionHeaders(llmConfig),
         dispatcher: templateExtractionFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify(requestBody),
@@ -1156,7 +1156,11 @@ export async function extractTemplateSlotsFromDocx(
     totalParagraphs: paragraphExtraction.totalParagraphs,
     succeededParagraphs: paragraphExtraction.succeededParagraphs,
     failedParagraphs: paragraphExtraction.failedParagraphs,
-    llmUsage: summarizeLlmUsage(usageAccumulator),
+    llmUsage: summarizeLlmUsage(usageAccumulator, {
+      provider: textTraceConfig.provider,
+      model: textTraceConfig.model,
+      modelEnvName: textTraceConfig.modelEnvName,
+    }),
   };
 }
 

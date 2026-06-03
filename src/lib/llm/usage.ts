@@ -15,6 +15,9 @@ export type LlmUsageCall = LlmUsageTokenSummary & {
 };
 
 export type LlmUsageSummary = LlmUsageTokenSummary & {
+  provider?: string;
+  model?: string;
+  model_env_name?: string;
   phases: Record<string, LlmUsageTokenSummary>;
   calls: LlmUsageCall[];
 };
@@ -39,6 +42,10 @@ function asRecord(value: unknown) {
 }
 
 function readNumber(record: Record<string, unknown>, keys: string[]) {
+  return readOptionalNumber(record, keys) ?? 0;
+}
+
+function readOptionalNumber(record: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const value = record[key];
 
@@ -47,7 +54,7 @@ function readNumber(record: Record<string, unknown>, keys: string[]) {
     }
   }
 
-  return 0;
+  return null;
 }
 
 function addTokenSummary(
@@ -81,7 +88,7 @@ export function extractLlmUsageTokenSummary(
     return null;
   }
 
-  const promptTokens = readNumber(usage, [
+  const explicitPromptTokens = readOptionalNumber(usage, [
     'prompt_tokens',
     'promptTokenCount',
     'input_tokens',
@@ -93,15 +100,26 @@ export function extractLlmUsageTokenSummary(
     'output_tokens',
     'outputTokenCount',
   ]);
-  const totalTokens =
-    readNumber(usage, ['total_tokens', 'totalTokenCount']) ||
-    promptTokens + completionTokens;
   const promptDetails = asRecord(
     usage.prompt_tokens_details ?? usage.promptTokensDetails,
   );
   const completionDetails = asRecord(
     usage.completion_tokens_details ?? usage.completionTokensDetails,
   );
+  const reasoningTokens =
+    readNumber(usage, ['thoughtsTokenCount', 'reasoning_tokens']) ||
+    readNumber(completionDetails, ['reasoning_tokens', 'reasoningTokens']);
+  const explicitTotalTokens = readOptionalNumber(usage, [
+    'total_tokens',
+    'totalTokenCount',
+  ]);
+  const promptTokens =
+    explicitPromptTokens ??
+    (explicitTotalTokens !== null
+      ? Math.max(0, explicitTotalTokens - completionTokens - reasoningTokens)
+      : 0);
+  const totalTokens =
+    explicitTotalTokens ?? promptTokens + completionTokens + reasoningTokens;
 
   return {
     call_count: 1,
@@ -114,9 +132,7 @@ export function extractLlmUsageTokenSummary(
         'cachedContentTokenCount',
         'cacheReadInputTokens',
       ]) || readNumber(promptDetails, ['cached_tokens', 'cachedTokens']),
-    reasoning_tokens:
-      readNumber(usage, ['thoughtsTokenCount', 'reasoning_tokens']) ||
-      readNumber(completionDetails, ['reasoning_tokens', 'reasoningTokens']),
+    reasoning_tokens: reasoningTokens,
   };
 }
 
@@ -151,9 +167,19 @@ export function recordLlmUsageFromPayload(
 
 export function summarizeLlmUsage(
   accumulator: LlmUsageAccumulator,
+  metadata?: {
+    provider?: string;
+    model?: string;
+    modelEnvName?: string;
+  },
 ): LlmUsageSummary {
   const summary: LlmUsageSummary = {
     ...EMPTY_TOKEN_SUMMARY,
+    ...(metadata?.provider ? { provider: metadata.provider } : {}),
+    ...(metadata?.model ? { model: metadata.model } : {}),
+    ...(metadata?.modelEnvName
+      ? { model_env_name: metadata.modelEnvName }
+      : {}),
     phases: {},
     calls: accumulator.calls,
   };

@@ -12,7 +12,10 @@ import {
 import { extractTemplateSlotsFromDocx } from '@/src/lib/llm/extract-template-slots';
 import { buildTemplatePdfEvidence } from '@/src/lib/llm/template-pdf-evidence';
 import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
-import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
+import {
+  getLlmRuntimeConfig,
+  getLlmRuntimeTraceConfig,
+} from '@/src/lib/llm/provider';
 import {
   createLlmUsageAccumulator,
   summarizeLlmUsage,
@@ -95,11 +98,12 @@ function normalizePdfVisionPages(value: unknown) {
           : {};
       const pageNumber = Number(record.page_number);
       const imageDataUrl = String(record.image_data_url ?? '');
+      const imageUrl = String(record.image_url ?? '').trim();
 
       if (
         !Number.isInteger(pageNumber) ||
         pageNumber < 1 ||
-        !imageDataUrl.startsWith('data:image/')
+        (!imageDataUrl.startsWith('data:image/') && !imageUrl)
       ) {
         return null;
       }
@@ -107,6 +111,7 @@ function normalizePdfVisionPages(value: unknown) {
       return {
         page_number: pageNumber,
         image_data_url: imageDataUrl,
+        ...(imageUrl ? { image_url: imageUrl } : {}),
       };
     })
     .filter((item): item is PdfVisionPageInput => Boolean(item));
@@ -117,46 +122,48 @@ function normalizePdfVisionPageAssets(value: unknown) {
     return [] as PdfPageImageAsset[];
   }
 
-  return value
-    .map((item) => {
-      const record =
-        item && typeof item === 'object'
-          ? (item as Record<string, unknown>)
-          : {};
-      const uploadedPageNumber = Number(record.uploaded_page_number);
-      const originalPageNumber = Number(record.original_page_number);
-      const storagePath = String(record.storage_path ?? '').trim();
-      const contentType = String(record.content_type ?? '').trim();
-      const size = Number(record.size);
-      const rotationApplied = Number(record.rotation_applied);
+  const assets: PdfPageImageAsset[] = [];
 
-      if (
-        !Number.isInteger(uploadedPageNumber) ||
-        uploadedPageNumber < 1 ||
-        !Number.isInteger(originalPageNumber) ||
-        originalPageNumber < 1 ||
-        !storagePath
-      ) {
-        return null;
-      }
+  for (const item of value) {
+    const record =
+      item && typeof item === 'object'
+        ? (item as Record<string, unknown>)
+        : {};
+    const uploadedPageNumber = Number(record.uploaded_page_number);
+    const originalPageNumber = Number(record.original_page_number);
+    const storagePath = String(record.storage_path ?? '').trim();
+    const hasRequiredFields =
+      Number.isInteger(uploadedPageNumber) &&
+      uploadedPageNumber >= 1 &&
+      Number.isInteger(originalPageNumber) &&
+      originalPageNumber >= 1 &&
+      storagePath.length > 0;
 
-      const asset: PdfPageImageAsset = {
-        uploaded_page_number: uploadedPageNumber,
-        original_page_number: originalPageNumber,
-        storage_path: storagePath,
-        ...(contentType ? { content_type: contentType } : {}),
-        ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
-        ...(Number.isFinite(rotationApplied)
-          ? {
-              rotation_applied:
-                rotationApplied as PdfPageImageAsset['rotation_applied'],
-            }
-          : {}),
-      };
+    if (!hasRequiredFields) {
+      continue;
+    }
 
-      return asset;
-    })
-    .filter((item): item is PdfPageImageAsset => Boolean(item));
+    const contentType = String(record.content_type ?? '').trim();
+    const size = Number(record.size);
+    const rotationApplied = Number(record.rotation_applied);
+    const asset: PdfPageImageAsset = {
+      uploaded_page_number: uploadedPageNumber,
+      original_page_number: originalPageNumber,
+      storage_path: storagePath,
+      ...(contentType ? { content_type: contentType } : {}),
+      ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+      ...(Number.isFinite(rotationApplied)
+        ? {
+            rotation_applied:
+              rotationApplied as PdfPageImageAsset['rotation_applied'],
+          }
+        : {}),
+    };
+
+    assets.push(asset);
+  }
+
+  return assets;
 }
 
 async function resolvePdfVisionPages(input: {
@@ -172,7 +179,7 @@ async function resolvePdfVisionPages(input: {
   if (storedAssets.length > 0) {
     const llmConfig = getLlmRuntimeConfig('vision');
 
-    if (llmConfig.provider === 'gemini') {
+    if (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao') {
       return buildStoredPageImageProxyVisionPages({
         pageImageAssets: storedAssets,
         requestLabel: `template pdf evidence ${input.taskId} ${
@@ -491,6 +498,7 @@ export async function POST(
     await appendMemoryTrace(routeAdmin, task.id, 'task_persist_start', {
       status: 'completed',
     });
+    const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
     await routeAdmin
       .from('template_extraction_tasks')
       .update({
@@ -506,7 +514,11 @@ export async function POST(
         pdf_evidence: pdfEvidence,
         docx_slot_extraction_llm_usage: result.llmUsage,
         pdf_evidence_location_llm_usage: hasPdfEvidence
-          ? summarizeLlmUsage(pdfEvidenceUsageAccumulator)
+          ? summarizeLlmUsage(pdfEvidenceUsageAccumulator, {
+              provider: visionTraceConfig.provider,
+              model: visionTraceConfig.model,
+              modelEnvName: visionTraceConfig.modelEnvName,
+            })
           : null,
         error_message: partialCompletionMessage,
         finished_at: new Date().toISOString(),

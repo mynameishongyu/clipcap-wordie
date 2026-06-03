@@ -421,9 +421,31 @@ export function buildChatCompletionBody(
     }>;
   },
 ) {
+  const messages = input.messages.map((message) => {
+    if (!Array.isArray(message.content) || config.provider === 'gemini') {
+      return message;
+    }
+
+    return {
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== 'gemini_file') {
+          return part;
+        }
+
+        return {
+          type: 'image_url',
+          image_url: {
+            url: part.gemini_file.uri,
+          },
+        } as const;
+      }),
+    };
+  });
+
   return {
     model: config.model,
     ...config.extraBody,
-    messages: input.messages,
+    messages,
   };
 }

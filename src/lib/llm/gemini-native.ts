@@ -137,6 +137,131 @@ function buildGeminiNativeRequestBody(
 
 type GeminiNativeRequestBody = ReturnType<typeof buildGeminiNativeRequestBody>;
 
+function shouldCountGeminiNativePromptTokens(model: string) {
+  return normalizeGeminiModelForPath(model) === 'gemini-3-flash-preview';
+}
+
+function buildGeminiCountTokensRequestBody(requestBody: GeminiNativeRequestBody) {
+  return {
+    generateContentRequest: requestBody,
+  };
+}
+
+export async function countGeminiNativePromptTokens(params: {
+  config: LlmRuntimeConfig;
+  requestBody: GeminiNativeRequestBody;
+  requestLabel: string;
+  dispatcher?: GeminiNativeDispatcher;
+  signal?: AbortSignal;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  if (!shouldCountGeminiNativePromptTokens(params.config.model)) {
+    return null;
+  }
+
+  const countTokensStartedAt = Date.now();
+  const generateBaseUrl = resolveGeminiGenerateBaseUrl(params.config);
+  const countTokensBody = buildGeminiCountTokensRequestBody(params.requestBody);
+
+  try {
+    const upstream = await undiciFetch(
+      `${generateBaseUrl}/models/${encodeURIComponent(
+        normalizeGeminiModelForPath(params.config.model),
+      )}:countTokens`,
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': params.config.apiKey,
+          'Content-Type': 'application/json',
+        },
+        dispatcher: params.dispatcher,
+        signal: params.signal,
+        body: JSON.stringify(countTokensBody),
+      } as UndiciFetchInit,
+    );
+
+    if (!upstream.ok) {
+      const details = await upstream.text();
+
+      await params.onTrace?.({
+        message: `[Gemini Native][CountTokensFailed] ${JSON.stringify({
+          request_label: params.requestLabel,
+          model: params.config.model,
+          status: upstream.status,
+          details,
+          duration_ms: Date.now() - countTokensStartedAt,
+        })}`,
+      });
+
+      return null;
+    }
+
+    const payload = (await upstream.json()) as {
+      totalTokens?: number;
+      total_tokens?: number;
+    };
+    const totalTokens =
+      typeof payload.totalTokens === 'number'
+        ? payload.totalTokens
+        : typeof payload.total_tokens === 'number'
+          ? payload.total_tokens
+          : null;
+
+    await params.onTrace?.({
+      message: `[Gemini Native][CountTokensComplete] ${JSON.stringify({
+        request_label: params.requestLabel,
+        model: params.config.model,
+        prompt_token_count: totalTokens,
+        duration_ms: Date.now() - countTokensStartedAt,
+      })}`,
+    });
+
+    return totalTokens;
+  } catch (error) {
+    await params.onTrace?.({
+      message: `[Gemini Native][CountTokensFailed] ${JSON.stringify({
+        request_label: params.requestLabel,
+        model: params.config.model,
+        error_message: error instanceof Error ? error.message : String(error),
+        duration_ms: Date.now() - countTokensStartedAt,
+      })}`,
+    });
+
+    return null;
+  }
+}
+
+function readGeminiUsageTokenCount(
+  usageMetadata: Record<string, unknown> | undefined,
+  key: string,
+) {
+  const value = usageMetadata?.[key];
+
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function inferGeminiNativePromptTokenCount(
+  usageMetadata: Record<string, unknown> | undefined,
+) {
+  const totalTokenCount = readGeminiUsageTokenCount(
+    usageMetadata,
+    'totalTokenCount',
+  );
+  const candidatesTokenCount =
+    readGeminiUsageTokenCount(usageMetadata, 'candidatesTokenCount') ?? 0;
+  const thoughtsTokenCount =
+    readGeminiUsageTokenCount(usageMetadata, 'thoughtsTokenCount') ?? 0;
+
+  if (totalTokenCount === null) {
+    return null;
+  }
+
+  const promptTokenCount =
+    totalTokenCount - candidatesTokenCount - thoughtsTokenCount;
+
+  return promptTokenCount >= 0 ? promptTokenCount : null;
+}
+
 export async function callGeminiNativeChatCompletion(params: {
   config: LlmRuntimeConfig;
   body: GeminiNativeChatCompletionBody;
@@ -203,13 +328,35 @@ export async function callGeminiNativeChatCompletion(params: {
         parts?: Array<{ text?: string }>;
       };
     }>;
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+      thoughtsTokenCount?: number;
+      totalTokenCount?: number;
+      [key: string]: unknown;
+    };
   };
+  const inferredPromptTokens = inferGeminiNativePromptTokenCount(
+    responsePayload.usageMetadata,
+  );
+  if (
+    typeof inferredPromptTokens === 'number' &&
+    typeof responsePayload.usageMetadata?.promptTokenCount !== 'number'
+  ) {
+    responsePayload.usageMetadata = {
+      ...(responsePayload.usageMetadata ?? {}),
+      promptTokenCount: inferredPromptTokens,
+    };
+  }
   const generateContentDurationMs = Date.now() - generateContentStartedAt;
 
   await params.onTrace?.({
     message: `[Gemini Native][GenerateContentComplete] ${JSON.stringify({
       request_label: requestLabel,
       candidate_count: responsePayload.candidates?.length ?? 0,
+      inferred_prompt_tokens: inferredPromptTokens,
+      usage_prompt_token_count:
+        responsePayload.usageMetadata?.promptTokenCount ?? null,
       text_length:
         responsePayload.candidates?.[0]?.content?.parts
           ?.map((part) => part.text ?? '')

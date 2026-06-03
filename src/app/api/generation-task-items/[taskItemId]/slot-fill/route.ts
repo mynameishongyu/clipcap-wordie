@@ -6,8 +6,14 @@ import {
   normalizedBboxToGeminiBox2d,
   type ReferencePdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
-import { createGeminiImageProxyFile } from '@/src/lib/gemini/image-proxy';
-import { getLlmRuntimeConfig } from '@/src/lib/llm/provider';
+import {
+  createGeminiImageProxyFile,
+  createGeminiImageProxyUrl,
+} from '@/src/lib/gemini/image-proxy';
+import {
+  getLlmRuntimeConfig,
+  getLlmRuntimeTraceConfig,
+} from '@/src/lib/llm/provider';
 import {
   createLlmUsageAccumulator,
   summarizeLlmUsage,
@@ -295,6 +301,13 @@ async function loadReferenceExamplePagesWithBbox(params: {
           admin: params.admin,
           storagePath: annotatedStoragePath,
         });
+        const annotatedMimeType = getMimeTypeFromStoragePath(
+          annotatedStoragePath,
+        );
+        const annotatedImageUrl = createGeminiImageProxyUrl({
+          storagePath: annotatedStoragePath,
+          mimeType: annotatedMimeType,
+        });
 
         console.info(
           '[PDF Fill][ReferenceExample] Using browser-saved annotated reference page image',
@@ -310,11 +323,12 @@ async function loadReferenceExamplePagesWithBbox(params: {
             page_number: asset.pageNumber,
             original_page_number: asset.pageNumber,
             image_data_url: '',
+            image_url: annotatedImageUrl,
             annotated_preview_url: annotatedPreviewUrl,
             annotated_storage_path: annotatedStoragePath,
             gemini_file: createGeminiImageProxyFile({
               storagePath: annotatedStoragePath,
-              mimeType: getMimeTypeFromStoragePath(annotatedStoragePath),
+              mimeType: annotatedMimeType,
               sizeBytes: 0,
               displayName: `annotated-reference-page-${asset.pageNumber}`,
             }),
@@ -525,9 +539,10 @@ async function runGenerationTaskItemSlotFill(params: {
     });
 
     const llmConfig = getLlmRuntimeConfig('vision');
-    const usesGeminiImageProxy =
-      llmConfig.provider === 'gemini' && pageImageAssets.length > 0;
-    const visionPages = usesGeminiImageProxy
+    const usesLlmImageProxy =
+      (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao') &&
+      pageImageAssets.length > 0;
+    const visionPages = usesLlmImageProxy
       ? await buildStoredPageImageProxyVisionPages({
           pageImageAssets,
           requestLabel: `slot fill ${params.item.id}`,
@@ -547,9 +562,9 @@ async function runGenerationTaskItemSlotFill(params: {
       params.item.id,
       `[Gemini Image Proxy][SlotFillSource] ${JSON.stringify({
         provider: llmConfig.provider,
-        proxy_page_count: usesGeminiImageProxy ? visionPages.length : 0,
+        proxy_page_count: usesLlmImageProxy ? visionPages.length : 0,
         fallback_to_supabase_download:
-          !usesGeminiImageProxy && precomputedVisionPages.length === 0,
+          !usesLlmImageProxy && precomputedVisionPages.length === 0,
         required_page_count: pageImageAssets.length,
       })}`,
     );
@@ -561,7 +576,7 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendMemoryTrace(admin, params.item.id, 'vision_page_urls_ready', {
       vision_page_count: visionPages.length,
       source:
-        llmConfig.provider === 'gemini'
+        usesLlmImageProxy
           ? 'vercel_gemini_image_proxy'
           : 'data_url',
     });
@@ -774,13 +789,19 @@ async function runGenerationTaskItemSlotFill(params: {
       })}`,
     );
 
+    const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+    const slotFillLlmUsage = summarizeLlmUsage(slotFillUsageAccumulator, {
+      provider: visionTraceConfig.provider,
+      model: visionTraceConfig.model,
+      modelEnvName: visionTraceConfig.modelEnvName,
+    });
     const { error: updateError } = await admin
       .from('generation_task_items')
       .update({
         status: 'review_pending',
         elapsed_seconds: elapsedSeconds,
         llm_output: llmOutput,
-        slot_fill_llm_usage: summarizeLlmUsage(slotFillUsageAccumulator),
+        slot_fill_llm_usage: slotFillLlmUsage,
         slot_total_count: slotSchema.length,
         slot_completed_count: completedSlots,
         finished_at: finishedAt.toISOString(),
@@ -823,6 +844,12 @@ async function runGenerationTaskItemSlotFill(params: {
     });
   } catch (error) {
     const fallbackReviewPayload = buildFallbackReviewPayload(slotSchema);
+    const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+    const slotFillLlmUsage = summarizeLlmUsage(slotFillUsageAccumulator, {
+      provider: visionTraceConfig.provider,
+      model: visionTraceConfig.model,
+      modelEnvName: visionTraceConfig.modelEnvName,
+    });
 
     await admin
       .from('generation_task_items')
@@ -830,7 +857,7 @@ async function runGenerationTaskItemSlotFill(params: {
         status: 'review_pending',
         error_message: null,
         llm_output: fallbackReviewPayload,
-        slot_fill_llm_usage: summarizeLlmUsage(slotFillUsageAccumulator),
+        slot_fill_llm_usage: slotFillLlmUsage,
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
         finished_at: new Date().toISOString(),

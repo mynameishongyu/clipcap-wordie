@@ -88,6 +88,8 @@ export type GenerationTaskItemRecord = {
       drop_example_count?: number;
       model?: string;
       provider?: string;
+      skipped?: boolean;
+      skipped_reason?: string;
       error_message?: string;
     };
   } | null;
@@ -345,6 +347,7 @@ export async function buildStoredPageImageProxyVisionPages(params: {
     pages.push({
       page_number: asset.uploaded_page_number,
       image_data_url: '',
+      image_url: geminiFile.uri,
       original_page_number: asset.original_page_number,
       gemini_file: geminiFile,
     });

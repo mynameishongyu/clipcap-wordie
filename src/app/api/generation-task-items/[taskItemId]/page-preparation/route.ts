@@ -21,14 +21,21 @@ import {
   callGeminiNativeChatCompletion,
 } from '@/src/lib/llm/gemini-native';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
-import { geminiPageFilterResponseSchema } from '@/src/lib/llm/gemini-json-schemas';
+import {
+  geminiPageFilterResponseSchema,
+  withGeminiOpenAiJsonResponseFormat,
+} from '@/src/lib/llm/gemini-json-schemas';
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
   buildChatCompletionBody,
+  buildChatCompletionHeaders,
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
-import type { PdfVisionPageInput } from '@/src/lib/llm/fill-template-from-pdf';
+import type {
+  GenerationSlotSchemaItem,
+  PdfVisionPageInput,
+} from '@/src/lib/llm/fill-template-from-pdf';
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
@@ -74,6 +81,24 @@ type PageFilterGeminiFileReference = {
   uploaded_at: string;
   request_label: string;
 };
+
+function hasUsableReferencePdfEvidence(slot: GenerationSlotSchemaItem) {
+  const reference = slot.reference_pdf_evidence;
+  const bbox = reference?.example_bbox;
+
+  return (
+    typeof reference?.example_page_number === 'number' &&
+    Number.isInteger(reference.example_page_number) &&
+    reference.example_page_number > 0 &&
+    Boolean(bbox) &&
+    typeof bbox?.x === 'number' &&
+    typeof bbox?.y === 'number' &&
+    typeof bbox?.width === 'number' &&
+    typeof bbox?.height === 'number' &&
+    bbox.width > 0 &&
+    bbox.height > 0
+  );
+}
 
 function toPageFilterGeminiFileReference(
   file: GeminiVisionFile,
@@ -493,7 +518,7 @@ async function classifyVisionPagesForSlotFill(params: {
         } else {
           content.push({
             type: 'image_url',
-            image_url: { url: page.image_data_url },
+            image_url: { url: page.image_url ?? page.image_data_url },
           });
         }
       });
@@ -583,19 +608,26 @@ async function classifyVisionPagesForSlotFill(params: {
         )}`,
       });
 
-      const requestBody = buildChatCompletionBody(llmConfig, {
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
-          },
-          {
-            role: 'user',
-            content,
-          },
-        ],
-      });
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ],
+        }),
+        {
+          provider: llmConfig.provider,
+          name: 'pdf_fill_page_filter',
+          schema: geminiPageFilterResponseSchema,
+        },
+      );
       let payload: {
         choices?: Array<{ message?: { content?: string } }>;
       };
@@ -658,10 +690,7 @@ async function classifyVisionPagesForSlotFill(params: {
       } else {
         const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${llmConfig.apiKey}`,
-          },
+          headers: buildChatCompletionHeaders(llmConfig),
           dispatcher: llmFetchDispatcher,
           signal: controller.signal,
           body: JSON.stringify(requestBody),
@@ -731,9 +760,14 @@ async function runGenerationTaskItemPagePreparation(params: {
 }) {
   const admin = createSupabaseAdminClient();
   const startedAt = new Date();
-  const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
+  const slotSchema: GenerationSlotSchemaItem[] = Array.isArray(
+    params.item.llm_input?.slot_schema,
+  )
     ? params.item.llm_input.slot_schema
     : [];
+  const hasReferencePdfEvidence = slotSchema.some(
+    hasUsableReferencePdfEvidence,
+  );
   const precomputedVisionPages = normalizeVisionPages(
     params.item.llm_input?.vision_pages,
   );
@@ -819,6 +853,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         visionPageCount: precomputedVisionPages.length,
         pageImageAssetCount: pageImageAssets.length,
         pageFilterDropExampleCount: pageFilterDropExamples.length,
+        hasReferencePdfEvidence,
         selectedPageCount: selectedOriginalPageNumbers.length,
       },
     });
@@ -830,17 +865,46 @@ async function runGenerationTaskItemPagePreparation(params: {
       PageFilterGeminiFileReference
     >();
 
-    if (pageImageAssets.length > 0) {
+    if (pageImageAssets.length > 0 && hasReferencePdfEvidence) {
+      nextPageImageAssets = pageImageAssets.map((asset) => ({
+        ...asset,
+        filter_decision: 'keep',
+        filter_reason:
+          'Template has reviewed PDF reference bbox evidence; page filtering is skipped so reference-page alignment can choose matching pages during slot fill.',
+        filter_confidence: null,
+        used_for_slot_fill: true,
+      }));
+
+      await appendProcessingTrace(
+        admin,
+        params.item.id,
+        `[PDF Fill][PageFilterSkipped] ${JSON.stringify({
+          source_pdf_name: params.item.source_pdf_name,
+          reason: 'reference_pdf_evidence_available',
+          page_count: nextPageImageAssets.length,
+          referenced_slot_count: slotSchema.filter(
+            hasUsableReferencePdfEvidence,
+          ).length,
+        })}`,
+      );
+      await appendMemoryTrace(admin, params.item.id, 'page_filter_skipped', {
+        source_pdf_name: params.item.source_pdf_name,
+        reason: 'reference_pdf_evidence_available',
+        page_count: nextPageImageAssets.length,
+      });
+    } else if (pageImageAssets.length > 0) {
       try {
         const llmConfig = getLlmRuntimeConfig('vision');
         const precomputedVisionPagesForFilter: PdfVisionPageInput[] =
           precomputedVisionPages.map((page) => ({
             page_number: page.page_number,
             image_data_url: page.image_data_url,
+            image_url: page.image_url,
             original_page_number: page.original_page_number ?? page.page_number,
           }));
         const pipelineVisionPages =
-          precomputedVisionPages.length === 0 && llmConfig.provider === 'gemini'
+          precomputedVisionPages.length === 0 &&
+          (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao')
             ? await buildStoredPageImageProxyVisionPages({
                 pageImageAssets,
                 requestLabel: `page filter ${params.item.id}`,
@@ -1002,6 +1066,12 @@ async function runGenerationTaskItemPagePreparation(params: {
             drop_example_count: pageFilterDropExamples.length,
             model: getLlmRuntimeTraceConfig('vision').model,
             provider: getLlmRuntimeTraceConfig('vision').provider,
+            ...(hasReferencePdfEvidence
+              ? {
+                  skipped: true,
+                  skipped_reason: 'reference_pdf_evidence_available',
+                }
+              : {}),
             ...(pageFilterErrorMessage
               ? { error_message: pageFilterErrorMessage }
               : {}),
@@ -1058,7 +1128,9 @@ async function runGenerationTaskItemPagePreparation(params: {
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[PDF Fill][PageFilter] PDF page images prepared and visually filtered: total=${nextPageImageAssets.length}, kept=${keptPageCount}, dropped=${droppedPageCount}, review=${reviewPageCount}. Browser will automatically start slot fill with kept/review pages.`,
+      hasReferencePdfEvidence
+        ? `[PDF Fill][PageFilter] PDF page images prepared; visual filtering was skipped because reviewed PDF reference bbox evidence is available. total=${nextPageImageAssets.length}, kept=${keptPageCount}, dropped=${droppedPageCount}, review=${reviewPageCount}. Slot fill will align reference pages to uploaded PDF pages.`
+        : `[PDF Fill][PageFilter] PDF page images prepared and visually filtered: total=${nextPageImageAssets.length}, kept=${keptPageCount}, dropped=${droppedPageCount}, review=${reviewPageCount}. Browser will automatically start slot fill with kept/review pages.`,
     );
     await appendProcessingTrace(
       admin,
@@ -1101,6 +1173,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         keptPageCount,
         droppedPageCount,
         reviewPageCount,
+        hasReferencePdfEvidence,
       },
     });
   } catch (error) {

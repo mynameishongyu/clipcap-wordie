@@ -90,6 +90,7 @@ export interface PdfPageInput {
 export interface PdfVisionPageInput {
   page_number: number;
   image_data_url: string;
+  image_url?: string;
   original_page_number?: number;
   gemini_file?: GeminiVisionFile;
 }
@@ -112,6 +113,16 @@ export interface ReferencePdfVisionPageInput extends PdfVisionPageInput {
 
 function hasUsableVisionPageImage(page: PdfVisionPageInput) {
   return (
+    Boolean(page.image_url) ||
+    page.image_data_url.startsWith('data:image/') ||
+    Boolean(page.gemini_file?.uri)
+  );
+}
+
+function hasUsableReferencePageImage(page: ReferencePdfVisionPageInput) {
+  return (
+    Boolean(page.image_url) ||
+    page.annotated_image_data_url?.startsWith('data:image/') ||
     page.image_data_url.startsWith('data:image/') ||
     Boolean(page.gemini_file?.uri)
   );
@@ -1020,10 +1031,7 @@ async function extractSlotWithTextModel(input: {
       );
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${llmConfig.apiKey}`,
-        },
+        headers: buildChatCompletionHeaders(llmConfig),
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify(requestBody),
@@ -1269,7 +1277,7 @@ async function extractTextFromVisionPages(input: {
         content.push({
           type: 'image_url',
           image_url: {
-            url: page.image_data_url,
+            url: page.image_url ?? page.image_data_url,
           },
         });
       });
@@ -1309,10 +1317,7 @@ async function extractTextFromVisionPages(input: {
       });
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${llmConfig.apiKey}`,
-        },
+        headers: buildChatCompletionHeaders(llmConfig),
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify(requestBody),
@@ -2123,10 +2128,7 @@ async function extractAllSlotsWithTextModel(input: {
       });
       const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${llmConfig.apiKey}`,
-        },
+        headers: buildChatCompletionHeaders(llmConfig),
         dispatcher: llmFetchDispatcher,
         signal: controller.signal,
         body: JSON.stringify(requestBody),
@@ -2512,6 +2514,7 @@ async function alignReferencePagesToVisionPages(input: {
   documentName: string;
   referenceExamplePages: ReferencePdfVisionPageInput[];
   visionPages: PdfVisionPageInput[];
+  usageAccumulator?: LlmUsageAccumulator;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
   processStartedAtMs?: number;
   processHardTimeoutMs?: number;
@@ -2633,7 +2636,10 @@ async function alignReferencePagesToVisionPages(input: {
           content.push({
             type: 'image_url',
             image_url: {
-              url: page.annotated_image_data_url ?? page.image_data_url,
+              url:
+                page.annotated_image_data_url ??
+                page.image_url ??
+                page.image_data_url,
             },
           });
         }
@@ -2653,26 +2659,33 @@ async function alignReferencePagesToVisionPages(input: {
           content.push({
             type: 'image_url',
             image_url: {
-              url: page.image_data_url,
+              url: page.image_url ?? page.image_data_url,
             },
           });
         }
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');
-      const requestBody = buildChatCompletionBody(llmConfig, {
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a visual PDF page alignment assistant. Match annotated reference pages to uploaded new PDF pages by page-level layout, labels, titles, and form structure. Return compact JSON only.',
-          },
-          {
-            role: 'user',
-            content,
-          },
-        ],
-      });
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF page alignment assistant. Match annotated reference pages to uploaded new PDF pages by page-level layout, labels, titles, and form structure. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ],
+        }),
+        {
+          provider: llmConfig.provider,
+          name: 'reference_page_alignment',
+          schema: geminiReferencePageAlignmentResponseSchema,
+        },
+      );
 
       let payload: {
         choices?: Array<{
@@ -2723,9 +2736,9 @@ async function alignReferencePagesToVisionPages(input: {
               model: llmConfig.model,
               provider: visionTraceConfig.provider,
               request_label: 'reference page alignment',
-              request_body: summarizeChatCompletionBodyForTrace(requestBody),
-              image_url_note:
-                'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
+            request_body: summarizeChatCompletionBodyForTrace(requestBody),
+            image_url_note:
+                'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request keeps the original image URL.',
             },
           )}`,
         });
@@ -2747,6 +2760,13 @@ async function alignReferencePagesToVisionPages(input: {
 
         payload = (await upstream.json()) as typeof payload;
       }
+      recordLlmUsageFromPayload(input.usageAccumulator, {
+        payload,
+        phase: 'slot_fill_reference_page_alignment',
+        provider: llmConfig.provider,
+        model: llmConfig.model,
+        requestLabel: 'reference page alignment',
+      });
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -2841,6 +2861,16 @@ function buildDirectVisionSlotFillJobs(input: {
   const referencePageByNumber = new Map(
     input.referenceExamplePages.map((page) => [page.page_number, page]),
   );
+  const alignedUploadedPageNumbers = new Set(
+    Array.from(input.alignmentsByReferencePageNumber.values()).map(
+      (alignment) => alignment.matched_uploaded_page_number,
+    ),
+  );
+  const alignedVisionPages = input.visionPages.filter((page) =>
+    alignedUploadedPageNumbers.has(page.page_number),
+  );
+  const fallbackVisionPages =
+    alignedVisionPages.length > 0 ? alignedVisionPages : input.visionPages;
   const slotsByReferencePageNumber = new Map<
     number,
     GenerationSlotSchemaItem[]
@@ -2894,7 +2924,7 @@ function buildDirectVisionSlotFillJobs(input: {
   });
 
   if (fallbackSlots.length > 0) {
-    buildDirectVisionPageBatches(input.visionPages).forEach(
+    buildDirectVisionPageBatches(fallbackVisionPages).forEach(
       (visionPageBatch, batchIndex, batches) => {
         jobs.push({
           slots: fallbackSlots,
@@ -3149,7 +3179,10 @@ async function extractSlotsFromVisionPageBatch(input: {
           content.push({
             type: 'image_url',
             image_url: {
-              url: page.annotated_image_data_url ?? page.image_data_url,
+              url:
+                page.annotated_image_data_url ??
+                page.image_url ??
+                page.image_data_url,
             },
           });
         }
@@ -3169,7 +3202,7 @@ async function extractSlotsFromVisionPageBatch(input: {
           content.push({
             type: 'image_url',
             image_url: {
-              url: page.image_data_url,
+              url: page.image_url ?? page.image_data_url,
             },
           });
         }
@@ -3179,19 +3212,26 @@ async function extractSlotsFromVisionPageBatch(input: {
         'vision',
         PDF_SLOT_EXTRACTION_LLM_OPTIONS,
       );
-      const requestBody = buildChatCompletionBody(llmConfig, {
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
-          },
-          {
-            role: 'user',
-            content,
-          },
-        ],
-      });
+      const requestBody = withGeminiOpenAiJsonResponseFormat(
+        buildChatCompletionBody(llmConfig, {
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ],
+        }),
+        {
+          provider: llmConfig.provider,
+          name: 'pdf_slot_fill_direct_vision',
+          schema: geminiPdfSlotExtractionResponseSchema,
+        },
+      );
 
       let payload: {
         choices?: Array<{
@@ -3253,9 +3293,9 @@ async function extractSlotsFromVisionPageBatch(input: {
               model: llmConfig.model,
               provider: visionTraceConfig.provider,
               request_label: requestLabel,
-              request_body: summarizeChatCompletionBodyForTrace(requestBody),
-              image_url_note:
-                'image_url.url is summarized for browser console and storage logs; the actual Gemini request uses the full data:image/... base64 URL.',
+            request_body: summarizeChatCompletionBodyForTrace(requestBody),
+            image_url_note:
+                'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request keeps the original image URL.',
             },
           )}`,
         });
@@ -3510,21 +3550,65 @@ export async function fillSlotsFromVisionPages(params: {
 
   const startedAt = Date.now();
   const llmConcurrency = getDirectVisionPagesLlmConcurrency();
-  const referenceExamplePages = params.referenceExamplePages ?? [];
+  const referenceExamplePages = (params.referenceExamplePages ?? []).filter(
+    hasUsableReferencePageImage,
+  );
   const referenceExamplePageCount = referenceExamplePages.length;
-  const slotFillJobs: DirectVisionSlotFillJob[] = [
-    {
-      slots: params.slots,
-      visionPages: validVisionPages,
-      referenceExamplePages,
-      requestLabel: 'visual slot fill batch 1/1',
-    },
-  ];
+  const alignmentsByReferencePageNumber =
+    referenceExamplePageCount > 0
+      ? await alignReferencePagesToVisionPages({
+          documentName: params.pdfFileName,
+          referenceExamplePages,
+          visionPages: validVisionPages,
+          usageAccumulator: params.usageAccumulator,
+          onTrace: params.onTrace,
+          processStartedAtMs: params.processStartedAtMs,
+          processHardTimeoutMs: params.processHardTimeoutMs,
+        })
+      : new Map<number, ReferencePageAlignment>();
+  const slotFillJobs: DirectVisionSlotFillJob[] =
+    referenceExamplePageCount > 0
+      ? buildDirectVisionSlotFillJobs({
+          slots: params.slots,
+          visionPages: validVisionPages,
+          referenceExamplePages,
+          alignmentsByReferencePageNumber,
+        })
+      : [
+          {
+            slots: params.slots,
+            visionPages: validVisionPages,
+            referenceExamplePages,
+            requestLabel: 'visual slot fill batch 1/1',
+          },
+        ];
   const startedMessage =
     `[PDF Fill][DirectVision] Direct visual slot fill started for ${params.pdfFileName} ` +
-    `(mode: single_prompt, vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, jobs: ${slotFillJobs.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
+    `(mode: ${
+      referenceExamplePageCount > 0 ? 'reference_aligned' : 'single_prompt'
+    }, vision pages: ${validVisionPages.length}, reference example pages with bbox: ${referenceExamplePageCount}, reference alignments: ${
+      alignmentsByReferencePageNumber.size
+    }, jobs: ${slotFillJobs.length}, llm concurrency: ${llmConcurrency}, slots: ${params.slots.length}).`;
   console.info(startedMessage);
   await params.onTrace?.({ message: startedMessage });
+  await params.onTrace?.({
+    message: `[PDF Fill][DirectVisionJobs] ${stringifyTraceJson({
+      document_name: params.pdfFileName,
+      mode:
+        referenceExamplePageCount > 0 ? 'reference_aligned' : 'single_prompt',
+      reference_alignments: Array.from(
+        alignmentsByReferencePageNumber.values(),
+      ),
+      jobs: slotFillJobs.map((job) => ({
+        request_label: job.requestLabel,
+        slot_keys: job.slots.map((slot) => slot.slot_key),
+        vision_page_numbers: job.visionPages.map((page) => page.page_number),
+        reference_page_numbers: job.referenceExamplePages.map(
+          (page) => page.page_number,
+        ),
+      })),
+    })}`,
+  });
 
   const batchResults: z.infer<typeof generationPdfFillResultSchema>[] = [];
   const completedSlotKeys = new Set<string>();
