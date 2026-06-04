@@ -7,7 +7,7 @@ import {
 import { getOptionalEnv, getTextLlmModel } from '@/src/lib/llm/env';
 import {
   geminiTemplateSlotExtractionResponseSchema,
-  withGeminiOpenAiJsonResponseFormat,
+  withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
@@ -502,10 +502,11 @@ async function requestTextLlmJson(input: {
       const chatCompletionBody = buildChatCompletionBody(llmConfig, {
         messages,
       });
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         chatCompletionBody,
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'template_slot_extraction',
           schema: geminiTemplateSlotExtractionResponseSchema,
         },

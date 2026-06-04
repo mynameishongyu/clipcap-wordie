@@ -11,7 +11,7 @@ import {
 } from '@/src/lib/llm/gemini-native';
 import {
   geminiTemplatePdfLocateResponseSchema,
-  withGeminiOpenAiJsonResponseFormat,
+  withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
 import {
   buildJsonParseCandidates,
@@ -333,7 +333,7 @@ async function repairVisionLocationJsonWithLlm(input: {
   await input.onTrace?.({ message: startedMessage });
 
   try {
-    const requestBody = withGeminiOpenAiJsonResponseFormat(
+    const requestBody = withProviderJsonResponseFormat(
       buildChatCompletionBody(llmConfig, {
         messages: [
           {
@@ -355,6 +355,7 @@ async function repairVisionLocationJsonWithLlm(input: {
       }),
       {
         provider: llmConfig.provider,
+        model: llmConfig.model,
         name: 'template_pdf_locate_json_repair',
         schema: geminiTemplatePdfLocateResponseSchema,
       },
@@ -1209,7 +1210,7 @@ async function locateSlotsInPageBatch(input: {
       }
     });
 
-    const requestBody = withGeminiOpenAiJsonResponseFormat(
+    const requestBody = withProviderJsonResponseFormat(
       buildChatCompletionBody(llmConfig, {
         messages: [
           {
@@ -1224,6 +1225,7 @@ async function locateSlotsInPageBatch(input: {
       }),
       {
         provider: llmConfig.provider,
+        model: llmConfig.model,
         name: 'template_pdf_locate',
         schema: geminiTemplatePdfLocateResponseSchema,
       },

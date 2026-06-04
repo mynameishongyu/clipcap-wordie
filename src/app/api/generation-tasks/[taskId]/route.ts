@@ -3,7 +3,6 @@ import { markTimedOutGenerationTaskItems } from '@/src/lib/generation-task-items
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
-import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 type GenerationTaskItemListRecord = {
   id: string;
@@ -27,79 +26,83 @@ type GenerationTaskItemListRecord = {
   } | null;
 };
 
+type PageFilterAsset = {
+  uploaded_page_number: number;
+  original_page_number: number;
+  storage_path: string;
+  rotation_applied?: number;
+  filter_decision?: string | null;
+  filter_reason?: string | null;
+  filter_confidence?: number | null;
+  used_for_slot_fill?: boolean;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object';
+}
+
+function hasPositiveIntegerField(
+  record: Record<string, unknown>,
+  fieldName: string,
+) {
+  const value = record[fieldName];
+
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+function hasNonEmptyStringField(
+  record: Record<string, unknown>,
+  fieldName: string,
+) {
+  const value = record[fieldName];
+
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPageFilterAsset(value: unknown): value is PageFilterAsset {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    hasPositiveIntegerField(value, 'uploaded_page_number') &&
+    hasPositiveIntegerField(value, 'original_page_number') &&
+    hasNonEmptyStringField(value, 'storage_path')
+  );
+}
+
 function normalizePageFilterAssets(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
   }
 
   return value
-    .filter(
-      (
-        entry,
-      ): entry is {
-        uploaded_page_number: number;
-        original_page_number: number;
-        storage_path: string;
-        rotation_applied?: number;
-        filter_decision?: string | null;
-        filter_reason?: string | null;
-        filter_confidence?: number | null;
-        used_for_slot_fill?: boolean;
-      } =>
-        !!entry &&
-        typeof entry === 'object' &&
-        typeof (entry as { uploaded_page_number?: unknown }).uploaded_page_number === 'number' &&
-        Number.isInteger((entry as { uploaded_page_number: number }).uploaded_page_number) &&
-        (entry as { uploaded_page_number: number }).uploaded_page_number > 0 &&
-        typeof (entry as { original_page_number?: unknown }).original_page_number === 'number' &&
-        Number.isInteger((entry as { original_page_number: number }).original_page_number) &&
-        (entry as { original_page_number: number }).original_page_number > 0 &&
-        typeof (entry as { storage_path?: unknown }).storage_path === 'string' &&
-        (entry as { storage_path: string }).storage_path.trim().length > 0,
-    )
+    .filter(isPageFilterAsset)
     .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
 }
 
-async function buildPageFilterPages(input: {
-  admin: ReturnType<typeof createSupabaseAdminClient>;
-  item: GenerationTaskItemListRecord;
-}) {
+function buildPageFilterPages(input: { item: GenerationTaskItemListRecord }) {
   const assets = normalizePageFilterAssets(input.item.llm_input?.ocr_image_assets);
 
   if (assets.length === 0) {
     return [];
   }
 
-  const signedPages = await Promise.all(
-    assets.map(async (asset) => {
-      const { data } = await input.admin.storage
-        .from('generation-pdfs')
-        .createSignedUrl(
-          asset.storage_path,
-          getSupabaseSignedUrlExpiresInSeconds(),
-        );
-
-      return {
-        uploadedPageNumber: asset.uploaded_page_number,
-        originalPageNumber: asset.original_page_number,
-        storagePath: asset.storage_path,
-        imageUrl: data?.signedUrl ?? null,
-        rotationApplied:
-          typeof asset.rotation_applied === 'number'
-            ? asset.rotation_applied
-            : null,
-        filterDecision: asset.filter_decision ?? null,
-        filterReason: asset.filter_reason ?? null,
-        filterConfidence:
-          typeof asset.filter_confidence === 'number'
-            ? asset.filter_confidence
-            : null,
-        selectedForSlotFill: asset.used_for_slot_fill !== false,
-      };
-    }),
-  );
-
-  return signedPages;
+  return assets.map((asset) => ({
+    uploadedPageNumber: asset.uploaded_page_number,
+    originalPageNumber: asset.original_page_number,
+    storagePath: asset.storage_path,
+    imageUrl: null,
+    rotationApplied:
+      typeof asset.rotation_applied === 'number' ? asset.rotation_applied : null,
+    filterDecision: asset.filter_decision ?? null,
+    filterReason: asset.filter_reason ?? null,
+    filterConfidence:
+      typeof asset.filter_confidence === 'number'
+        ? asset.filter_confidence
+        : null,
+    selectedForSlotFill: asset.used_for_slot_fill !== false,
+  }));
 }
 
 function createUnauthorizedResponse() {
@@ -196,13 +199,11 @@ export async function GET(
       nextItems = refreshedItems ?? [];
     }
 
-    const itemsWithPageFilters = await Promise.all(
-      nextItems.map(async (item) => ({
-        ...item,
-        pdf_page_filter_pages: await buildPageFilterPages({ admin, item }),
-        llm_input: undefined,
-      })),
-    );
+    const itemsWithPageFilters = nextItems.map((item) => ({
+      ...item,
+      pdf_page_filter_pages: buildPageFilterPages({ item }),
+      llm_input: undefined,
+    }));
 
     return NextResponse.json({
       data: {

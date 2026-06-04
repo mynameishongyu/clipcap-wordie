@@ -49,14 +49,6 @@ interface UploadRow {
 
 declare global {
   interface Window {
-    clipcapPdfPageImages?: Array<{
-      fileName: string;
-      originalPageNumber: number;
-      uploadedPageNumber: number;
-      previewUrl: string;
-      imageDataUrl?: string;
-      rotationApplied?: number;
-    }>;
     clipcapSlotFillInputs?: Array<{
       fileName: string;
       label: string;
@@ -238,6 +230,50 @@ function formatCompactPageRanges(pageNumbers: number[]) {
     rangeStart === previous ? `${rangeStart}` : `${rangeStart}-${previous}`,
   );
   return ranges.join('、');
+}
+
+function buildUploadedPageNumberMapping(pageNumbers: number[]) {
+  return pageNumbers.map((originalPageNumber, index) => ({
+    uploaded_page_number: index + 1,
+    original_page_number: originalPageNumber,
+  }));
+}
+
+export function resolveUserSelectedPagePreparation(input: {
+  rowId: string;
+  rowSelectionStates: Array<{
+    rowId: string;
+    selectedPageNumbers: number[];
+    selectedPageRangeLabel: string;
+  }>;
+}) {
+  const rowSelectionState = input.rowSelectionStates.find(
+    (state) => state.rowId === input.rowId,
+  );
+
+  if (!rowSelectionState) {
+    return null;
+  }
+
+  return {
+    selectedOriginalPageNumbers: rowSelectionState.selectedPageNumbers,
+    uploadedPageNumberMapping: buildUploadedPageNumberMapping(
+      rowSelectionState.selectedPageNumbers,
+    ),
+    selectedPageRangeLabel: rowSelectionState.selectedPageRangeLabel,
+  };
+}
+
+function resolveAllPagePreparation(totalPages: number) {
+  const selectedOriginalPageNumbers = buildFullPageNumbers(totalPages);
+
+  return {
+    selectedOriginalPageNumbers,
+    uploadedPageNumberMapping: buildUploadedPageNumberMapping(
+      selectedOriginalPageNumbers,
+    ),
+    selectedPageRangeLabel: '',
+  };
 }
 
 function parseTraceJson<T>(raw: string, label: string): T | null {
@@ -2598,22 +2634,16 @@ export function BatchGenerateModal({
         rowsWithFiles.map(async (row, rowIndex) => {
           const file = row.file;
           const parsedPdf = row.parsedPdf;
-          const rowSelectionState = rowSelectionStates.find(
-            (state) => state.rowId === row.id,
-          );
 
-          if (!parsedPdf || !rowSelectionState) {
+          if (!parsedPdf) {
             throw new Error('当前 PDF 尚未解析完成，请稍候再试。');
           }
 
-          const selectedOriginalPageNumbers =
-            rowSelectionState.selectedPageNumbers;
-          const uploadedPageNumberMapping = selectedOriginalPageNumbers.map(
-            (originalPageNumber, index) => ({
-              uploaded_page_number: index + 1,
-              original_page_number: originalPageNumber,
-            }),
-          );
+          const {
+            selectedOriginalPageNumbers,
+            uploadedPageNumberMapping,
+            selectedPageRangeLabel,
+          } = resolveAllPagePreparation(parsedPdf.pages.length);
           const pdfPageRenderConcurrency = getPdfVisionRenderConcurrency();
           const pdfRenderConfig = getPdfRenderConfig();
           logSubmissionStage({
@@ -2706,11 +2736,6 @@ export function BatchGenerateModal({
             description: `${file.name}：已生成 ${pdfVisionPages.length} 张 PDF 页面图片，准备上传到存储。`,
           });
 
-          const currentImages = window.clipcapPdfPageImages ?? [];
-          const nextImages = currentImages.filter(
-            (entry) => entry.fileName !== file.name,
-          );
-
           pdfVisionPages.forEach((visionPage, index) => {
             const uploadedPageNumber =
               uploadedPageNumberMapping[index]?.uploaded_page_number ??
@@ -2719,43 +2744,6 @@ export function BatchGenerateModal({
               uploadedPageNumberMapping[index]?.original_page_number ??
               visionPage.pageNumber;
             const previewUrl = pdfVisionPageToObjectUrl(visionPage);
-
-            nextImages.push({
-              fileName: file.name,
-              originalPageNumber,
-              uploadedPageNumber,
-              previewUrl,
-              rotationApplied: visionPage.rotationApplied ?? 0,
-              ...(visionPage.imageDataUrl
-                ? { imageDataUrl: visionPage.imageDataUrl }
-                : {}),
-            });
-          });
-
-          window.clipcapPdfPageImages = nextImages.sort((left, right) => {
-            if (left.fileName === right.fileName) {
-              return left.uploadedPageNumber - right.uploadedPageNumber;
-            }
-
-            return left.fileName.localeCompare(right.fileName);
-          });
-
-          console.info(
-            `[Batch Generate][${file.name}] PDF page images prepared: ${pdfVisionPages.length} page(s). Use window.clipcapPdfPageImages in the browser console, or run window.open(window.clipcapPdfPageImages[0].previewUrl).`,
-          );
-          pdfVisionPages.forEach((visionPage, index) => {
-            const uploadedPageNumber =
-              uploadedPageNumberMapping[index]?.uploaded_page_number ??
-              index + 1;
-            const originalPageNumber =
-              uploadedPageNumberMapping[index]?.original_page_number ??
-              visionPage.pageNumber;
-            const previewUrl =
-              window.clipcapPdfPageImages?.find(
-                (entry) =>
-                  entry.fileName === file.name &&
-                  entry.uploadedPageNumber === uploadedPageNumber,
-              )?.previewUrl ?? '';
 
             console.info(
               `[Batch Generate][${file.name}][PDF Page Image] uploaded page ${uploadedPageNumber}, original PDF page ${originalPageNumber}, rotation=${visionPage.rotationApplied ?? 0}: ${previewUrl}`,
@@ -2769,8 +2757,7 @@ export function BatchGenerateModal({
             uploadedPageNumberMapping,
             originalTotalPages: parsedPdf.pages.length,
             forceVisionPageFill: true,
-            selectedPageRangeLabel:
-              rowSelectionState.selectedPageRangeLabel || '',
+            selectedPageRangeLabel,
           };
         }),
       );

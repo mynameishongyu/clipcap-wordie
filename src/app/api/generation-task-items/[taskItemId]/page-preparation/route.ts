@@ -23,7 +23,7 @@ import {
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
   geminiPageFilterResponseSchema,
-  withGeminiOpenAiJsonResponseFormat,
+  withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
@@ -608,7 +608,7 @@ async function classifyVisionPagesForSlotFill(params: {
         )}`,
       });
 
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
             {
@@ -624,6 +624,7 @@ async function classifyVisionPagesForSlotFill(params: {
         }),
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'pdf_fill_page_filter',
           schema: geminiPageFilterResponseSchema,
         },

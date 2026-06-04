@@ -244,30 +244,64 @@ export const geminiOcrPagesResponseSchema = {
   required: ['pages'],
 } as const;
 
-export function withGeminiOpenAiJsonResponseFormat<
+function normalizeJsonResponseFormatModel(model: string) {
+  return model.trim().toLowerCase();
+}
+
+function supportsDoubaoJsonSchema(model: string) {
+  const normalizedModel = normalizeJsonResponseFormatModel(model);
+
+  return normalizedModel === 'doubao-seed-2-0-lite-260215';
+}
+
+function getProviderJsonResponseFormatMode(input: {
+  provider: string;
+  model: string;
+}) {
+  if (input.provider === 'gemini') {
+    return 'json_schema';
+  }
+
+  if (
+    input.provider === 'doubao' &&
+    supportsDoubaoJsonSchema(input.model)
+  ) {
+    return 'json_schema';
+  }
+
+  return 'none';
+}
+
+export function withProviderJsonResponseFormat<
   TBody extends Record<string, unknown>,
 >(
   body: TBody,
   input: {
     provider: string;
+    model: string;
     name: string;
     schema: unknown;
     strict?: boolean;
   },
 ) {
-  if (input.provider !== 'gemini' && input.provider !== 'doubao') {
-    return body;
+  const responseFormatMode = getProviderJsonResponseFormatMode({
+    provider: input.provider,
+    model: input.model,
+  });
+
+  if (responseFormatMode === 'json_schema') {
+    return {
+      ...body,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: input.name,
+          schema: input.schema,
+          strict: input.strict ?? false,
+        },
+      },
+    };
   }
 
-  return {
-    ...body,
-    response_format: {
-      type: 'json_schema',
-      json_schema: {
-        name: input.name,
-        schema: input.schema,
-        strict: input.strict ?? false,
-      },
-    },
-  };
+  return body;
 }

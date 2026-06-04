@@ -15,6 +15,7 @@ _ocr_tmp_qin/
 png_slot_key/
 pdf_filter_by_rule/
 pdf_filter_by_llm/
+pdf_page_filter_drop_examples/
 .codex_tmp_pdf_filter_by_llm.err.log
 .codex_tmp_pdf_filter_by_llm.out.log
 ocr_qin.txt

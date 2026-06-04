@@ -156,7 +156,8 @@ function buildSlotSchemaFromPayload(
       field_category: item.field_category,
       meaning_to_applicant: item.meaning_to_applicant,
       template_original_value: item.original_value,
-      template_original_doc_position: item.original_doc_position,
+      // template_original_doc_position is intentionally not passed into the
+      // slot-fill flow for now.
       reference_pdf_evidence: buildReferenceEvidence(paragraphIndex, itemIndex, item),
     })),
   );

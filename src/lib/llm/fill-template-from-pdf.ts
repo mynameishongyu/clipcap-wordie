@@ -10,7 +10,7 @@ import {
   geminiPdfSlotExtractionResponseSchema,
   geminiPdfSlotFillResponseSchema,
   geminiReferencePageAlignmentResponseSchema,
-  withGeminiOpenAiJsonResponseFormat,
+  withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
@@ -20,7 +20,6 @@ import {
   getLlmRuntimeConfig,
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
-import { removeTemplateFixedSuffixFromValue } from '@/src/lib/templates/fixed-suffix';
 import {
   recordLlmUsageFromPayload,
   type LlmUsageAccumulator,
@@ -31,7 +30,6 @@ export interface GenerationSlotSchemaItem {
   field_category: string;
   meaning_to_applicant: string;
   template_original_value?: string;
-  template_original_doc_position?: string;
   reference_pdf_evidence?: GenerationSlotReferencePdfEvidence | null;
 }
 
@@ -566,7 +564,7 @@ function stringifyTraceJson(value: unknown) {
 }
 
 const TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT =
-  'final_value is the replacement for template_original_value in the DOCX template, not necessarily the full field phrase seen in the PDF. Match the granularity of template_original_value. If template_original_value omits a fixed suffix/unit that appears immediately after it in template_original_context, such as %, ％, yuan/元, or 族, final_value must omit that suffix/unit too. Examples: template_original_value "0.4" in context "0.4％" -> return "0.4167", not "0.4167%"; template_original_value "40800" in context "40800元" -> return "17,500", not "17,500元"; template_original_value "汉" in context "汉族" -> return "汉", not "汉族".';
+  'final_value is the replacement for template_original_value in the DOCX template, not necessarily the full field phrase seen in the PDF. Match the granularity of template_original_value and do not add extra suffixes, units, or duplicated fixed text unless they are part of template_original_value. Examples: template_original_value "0.4" -> return "0.4167", not "0.4167%"; template_original_value "40800" -> return "17,500", not "17,500元"; template_original_value "汉" -> return "汉", not "汉族".';
 
 export function buildTextSlotFillPromptPayload(input: {
   documentName: string;
@@ -826,7 +824,6 @@ function buildSlotDefinitionForPrompt(
     slot_key: slot.slot_key,
     slot_name: slot.field_category,
     template_original_value: slot.template_original_value ?? '',
-    template_original_context: slot.template_original_doc_position ?? '',
     slot_source:
       slot.meaning_to_applicant || getSlotSemanticHint(slot.field_category),
     reference_example_pdf_evidence: shouldIncludeReferenceEvidence
@@ -977,7 +974,7 @@ async function extractSlotWithTextModel(input: {
         'vision',
         PDF_SLOT_EXTRACTION_LLM_OPTIONS,
       );
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
             {
@@ -1025,6 +1022,7 @@ async function extractSlotWithTextModel(input: {
         }),
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'pdf_slot_fill_text_single',
           schema: geminiPdfSlotFillResponseSchema,
         },
@@ -1283,7 +1281,7 @@ async function extractTextFromVisionPages(input: {
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
             {
@@ -1299,6 +1297,7 @@ async function extractTextFromVisionPages(input: {
         }),
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'pdf_fill_ocr_pages',
           schema: geminiOcrPagesResponseSchema,
         },
@@ -1620,7 +1619,6 @@ function resolveExtractedValue(
     | 'field_category'
     | 'meaning_to_applicant'
     | 'template_original_value'
-    | 'template_original_doc_position'
   >,
   result: ModelResultCandidate | null,
   firstMatch?: ModelMatch,
@@ -1636,11 +1634,7 @@ function resolveExtractedValue(
     ? normalizeDateValue(rawValue)
     : rawValue;
 
-  return removeTemplateFixedSuffixFromValue({
-    value: normalizedValue,
-    templateOriginalValue: slot.template_original_value,
-    templateContext: slot.template_original_doc_position,
-  });
+  return normalizedValue;
 }
 
 function resolveEvidenceSnippet(
@@ -1789,36 +1783,6 @@ function sanitizeExtractedItemEvidencePages(
       fallbackUploadedPageNumbers,
     ),
   }));
-}
-
-function normalizeExtractedItemTemplateSuffixes(
-  items: Array<z.infer<typeof generationExtractedItemSchema>>,
-  slots: GenerationSlotSchemaItem[],
-) {
-  const slotByKey = new Map(slots.map((slot) => [slot.slot_key, slot]));
-
-  return items.map((item) => {
-    const slot = slotByKey.get(item.slot_key);
-
-    if (!slot) {
-      return item;
-    }
-
-    const originalValue = removeTemplateFixedSuffixFromValue({
-      value: item.original_value,
-      templateOriginalValue: slot.template_original_value,
-      templateContext: slot.template_original_doc_position,
-    });
-
-    if (originalValue === item.original_value) {
-      return item;
-    }
-
-    return {
-      ...item,
-      original_value: originalValue,
-    };
-  });
 }
 
 function buildSlotBatches<T>(items: T[], batchSize: number) {
@@ -2065,7 +2029,7 @@ async function extractAllSlotsWithTextModel(input: {
         'vision',
         PDF_SLOT_EXTRACTION_LLM_OPTIONS,
       );
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
             {
@@ -2104,6 +2068,7 @@ async function extractAllSlotsWithTextModel(input: {
         }),
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'pdf_slot_fill_text_batch',
           schema: geminiPdfSlotFillResponseSchema,
         },
@@ -2666,7 +2631,7 @@ async function alignReferencePagesToVisionPages(input: {
       });
 
       const llmConfig = getLlmRuntimeConfig('vision');
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
             {
@@ -2682,6 +2647,7 @@ async function alignReferencePagesToVisionPages(input: {
         }),
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'reference_page_alignment',
           schema: geminiReferencePageAlignmentResponseSchema,
         },
@@ -3212,7 +3178,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         'vision',
         PDF_SLOT_EXTRACTION_LLM_OPTIONS,
       );
-      const requestBody = withGeminiOpenAiJsonResponseFormat(
+      const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
           messages: [
             {
@@ -3228,6 +3194,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         }),
         {
           provider: llmConfig.provider,
+          model: llmConfig.model,
           name: 'pdf_slot_fill_direct_vision',
           schema: geminiPdfSlotExtractionResponseSchema,
         },
@@ -3367,13 +3334,10 @@ async function extractSlotsFromVisionPageBatch(input: {
         extracted_items: normalized.extracted_items ?? [],
       });
       const extractedItemsFromSchema = parsedExtractedItems.success
-        ? normalizeExtractedItemTemplateSuffixes(
-            sanitizeExtractedItemEvidencePages(
-              parsedExtractedItems.data.extracted_items,
-              allUploadedPageNumbers,
-              pageNumbers,
-            ),
-            input.slots,
+        ? sanitizeExtractedItemEvidencePages(
+            parsedExtractedItems.data.extracted_items,
+            allUploadedPageNumbers,
+            pageNumbers,
           )
         : [];
       const extractedItemsFromResults = input.slots.flatMap((slot) => {
