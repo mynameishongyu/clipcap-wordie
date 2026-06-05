@@ -141,7 +141,7 @@ export async function GET(
     const { data: item, error: itemError } = await supabase
       .from('generation_task_items')
       .select(
-        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, slot_fill_llm_usage, started_at, finished_at',
+        'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, page_filter_llm_usage, slot_fill_llm_usage, started_at, finished_at',
       )
       .eq('id', taskItemId)
       .single();

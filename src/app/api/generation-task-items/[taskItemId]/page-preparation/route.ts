@@ -7,12 +7,12 @@ import {
   buildFallbackReviewPayload,
   createUnauthorizedResponse,
   generationTaskItemSelect,
+  type PdfPageImageAsset,
   type GenerationTaskItemRecord,
   getErrorMessage,
   buildStoredPageImageProxyVisionPages,
   loadVisionPagesFromStoredAssets,
   normalizePdfPageImageAssets,
-  normalizeSelectedOriginalPageNumbers,
   normalizeVisionPages,
   recalculateTaskSummary,
 } from '@/src/lib/generation-task-items/runtime';
@@ -26,6 +26,12 @@ import {
   withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
+import {
+  createLlmUsageAccumulator,
+  recordLlmUsageFromPayload,
+  summarizeLlmUsage,
+  type LlmUsageAccumulator,
+} from '@/src/lib/llm/usage';
 import {
   buildChatCompletionBody,
   buildChatCompletionHeaders,
@@ -44,7 +50,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const PAGE_FILTER_BATCH_SIZE_DEFAULT = 4;
-const PAGE_FILTER_BATCH_SIZE_MAX = 20;
+const PAGE_FILTER_BATCH_SIZE_MAX = 32;
 const PAGE_FILTER_REQUEST_TIMEOUT_MS = 180000;
 const PAGE_FILTER_DROP_EXAMPLES_DIR_DEFAULT = 'pdf_page_filter_drop_examples';
 const PAGE_FILTER_DROP_EXAMPLES_MAX = 4;
@@ -54,6 +60,8 @@ const PAGE_FILTER_DROP_EXAMPLE_MIME_TYPES = new Map([
   ['.jpeg', 'image/jpeg'],
   ['.webp', 'image/webp'],
 ]);
+const PAGE_FILTER_SYSTEM_PROMPT =
+  '你是一个视觉 PDF 页面过滤助手。请根据内置过滤规则判断候选页面是否适合后续文档槽位回填。只返回紧凑 JSON，不要输出额外解释。';
 const llmFetchDispatcher = new Agent({
   connect: {
     timeout: 60000,
@@ -98,6 +106,44 @@ function hasUsableReferencePdfEvidence(slot: GenerationSlotSchemaItem) {
     bbox.width > 0 &&
     bbox.height > 0
   );
+}
+
+function buildPageFilterPages(pageImageAssets: PdfPageImageAsset[]) {
+  return pageImageAssets
+    .slice()
+    .sort(
+      (left, right) =>
+        left.uploaded_page_number - right.uploaded_page_number,
+    )
+    .map((asset) => ({
+      uploadedPageNumber: asset.uploaded_page_number,
+      originalPageNumber: asset.original_page_number,
+      storagePath: asset.storage_path,
+      imageUrl: null,
+      rotationApplied:
+        typeof asset.rotation_applied === 'number'
+          ? asset.rotation_applied
+          : null,
+      filterDecision: asset.filter_decision ?? null,
+      filterReason: asset.filter_reason ?? null,
+      filterConfidence:
+        typeof asset.filter_confidence === 'number'
+          ? asset.filter_confidence
+          : null,
+      selectedForSlotFill: asset.used_for_slot_fill !== false,
+    }));
+}
+
+function buildPagePreparationResponseItem(item: GenerationTaskItemRecord) {
+  const pageImageAssets = normalizePdfPageImageAssets(
+    item.llm_input?.ocr_image_assets,
+  );
+
+  return {
+    ...item,
+    pdf_page_filter_pages: buildPageFilterPages(pageImageAssets),
+    llm_input: undefined,
+  };
 }
 
 function toPageFilterGeminiFileReference(
@@ -329,6 +375,8 @@ function getPageFilterDropExamplesDir() {
     : resolve(process.cwd(), rawValue);
 }
 
+// Kept for future/manual page-filter tuning, but intentionally not used by
+// the current automated page-preparation flow.
 async function loadPageFilterDropExamplesFromFolder(): Promise<
   PageFilterDropExample[]
 > {
@@ -374,52 +422,47 @@ async function loadPageFilterDropExamplesFromFolder(): Promise<
 function buildPageFilterPromptPayload(input: {
   documentName: string;
   pageNumbers: number[];
-  dropExampleCount: number;
 }) {
   return {
-    task: 'Classify scanned PDF page images before a document slot-fill workflow.',
+    task: '在文档槽位回填前，对扫描 PDF 页面图片进行页面过滤分类。',
     document_name: input.documentName,
     render_note:
-      'Candidate pages were rendered with the same PDF-to-image process used by the production slot-fill workflow.',
+      '候选页面图片由生产槽位回填流程使用的 PDF 转图片流程生成。',
     decision_options: {
-      keep: 'Keep this page for later visual slot filling.',
-      drop: 'Drop this page because it is similar to the provided irrelevant examples, because it is a dense contract terms/body page with only tiny incidental handwriting, or because it is a handwritten collateral/pledge/mortgage list page that should not be used as a slot-fill source. Do not use drop for real contract signing/confirmation pages with actual signatures, stamps, dates, IDs, responsible-person names, or borrower/bank acknowledgement text.',
+      keep: '保留该页面，用于后续视觉槽位回填。',
+      drop: '丢弃该页面。适用情况包括：密集合同条款页、长篇说明页、空白表单、没有真实填写值的空白联系/尾页、手写抵押物/质押物/担保物清单页，或只有极少量附带手写痕迹的合同正文页。不要把真实签署页、确认页、回执页、盖章页、签署日期页、身份证号页、责任人姓名页、借款人或银行确认文字页判为 drop。',
     },
-    drop_examples_meaning:
-      input.dropExampleCount > 0
-        ? 'Drop examples are pages that should be filtered out. They are usually dense contract terms, long explanation pages, contract body pages with mostly printed text and only very small incidental handwriting, blank forms, empty contact/tail pages with no real filled values, or handwritten collateral/mortgage/pledge list pages. Even if a handwritten collateral list contains car plates, amounts, or dates, classify it as drop. However, do not generalize drop examples to contract signing or acknowledgement pages that contain real signatures, stamps, signing dates, ID numbers, borrower names, bank/agent stamps, or confirmation statements.'
-        : 'No user-provided drop examples are attached. Use the built-in rules to identify dense contract terms, long explanation pages, blank forms, empty contact/tail pages with no real filled values, and handwritten collateral/mortgage/pledge list pages.',
     keep_guidance:
-      'Keep pages that may contain identity cards, names, addresses, phone numbers, signatures, stamps, bank system screenshots, repayment/account/balance fields, amounts, dates, purchase agreement values, contract signing/confirmation/acknowledgement content, or official motor vehicle registration certificate / registration summary information.',
+      '保留可能包含身份证、姓名、地址、电话、签名、印章、银行系统截图、还款/账户/余额字段、金额、日期、购车协议数值、合同签署/确认/回执内容、机动车登记证书或机动车登记摘要信息的页面。',
     vehicle_field_rule:
-      'For vehicle-related slots, keep only official vehicle registration certificate / registration summary pages as source pages. Drop handwritten collateral/mortgage/pledge list pages even when they contain vehicle information.',
+      '车辆相关槽位只应保留官方机动车登记证书或登记摘要页面作为来源页。手写抵押物/质押物/担保物清单页即使包含车牌、金额或日期，也应判为 drop。',
     dense_terms_sparse_handwriting_rule:
-      'If the page is dominated by dense printed contract clauses, terms, explanations, or body text, and handwriting occupies only a tiny area such as one name, a short underline, a check mark, a brief note, or a small date, classify it as drop unless the page is clearly a signing/confirmation/acknowledgement page or contains strong reusable slot values such as full signature block, official stamp, ID number, amount, account/balance, vehicle registration certificate data, or bank system data.',
+      '如果页面主体是密集打印合同条款、说明或正文，手写内容只占很小区域，例如一个姓名、短下划线、勾选、简短备注或小日期，应判为 drop。除非该页面明显是签署页、确认页、回执页，或包含完整签名栏、正式印章、身份证号、金额、账户/余额、机动车登记证数据、银行系统数据等强可复用槽位值。',
     signature_page_guardrail:
-      'A candidate page that has a title or content like contract signing page / acknowledgement page / confirmation page, plus real handwriting signatures, red seals/stamps, signing date, ID number, borrower/guarantor/bank representative fields, or confirmation text, must be classified as keep. If it visually resembles a contract tail page but contains these filled signature or stamp values, use keep. If uncertain, use keep, never drop.',
+      '如果候选页面具有合同签署页、确认页、回执页等标题或内容，并且包含真实手写签名、红色印章/盖章、签署日期、身份证号、借款人/担保人/银行代表字段或确认文字，必须判为 keep。即使视觉上像合同尾页，只要有这些已填写的签名或印章信息，也应判为 keep。不确定时使用 keep，不要使用 drop。',
     page_numbers: input.pageNumbers,
     output_schema: {
       pages: [
         {
-          page_number: 'one of page_numbers',
-          decision: 'keep | drop',
+          page_number: 'page_numbers 中的一个页码',
+          decision: 'keep | drop | review，必须使用英文枚举值',
           page_type:
             'id_card | agreement | signature_page | table | system_screenshot | vehicle_info | terms_page | dense_terms_sparse_handwriting | blank | other',
-          reason: 'short reason in Chinese',
+          reason: '简短中文原因',
           confidence: 0.9,
         },
       ],
     },
     strict_requirements: [
-      'Return compact JSON only.',
-      'Return one result for every page_number.',
-      'Do not transcribe full page text.',
-      'Do not drop identity cards, agreement signature pages, contract acknowledgement/confirmation pages, pages with real signatures/stamps/signing dates/ID numbers, system screenshots, repayment/account/balance pages, or official vehicle registration certificate/summary pages.',
-      'Drop dense contract terms/body pages when handwriting is visually minor and incidental, even if there is a handwritten name, underline, check mark, brief note, or small date.',
-      'Drop handwritten collateral/mortgage/pledge list pages even if they contain handwritten car plates, amounts, or dates.',
-      'Do not keep a page merely because it has table lines or handwriting; keep it only when it is a reliable source page for the current slot-fill workflow.',
-      'If a page has both drop-like layout and keep-worthy signature/stamp/date/ID/acknowledgement values, choose decision="keep".',
-      'If uncertain, use decision="keep" instead of decision="drop".',
+      '只返回紧凑 JSON，不要输出 Markdown、解释文字或全文转录。',
+      '必须为每一个 page_number 返回一个结果。',
+      'decision 字段只能使用英文值：keep、drop 或 review。',
+      '不要丢弃身份证页、协议签署页、合同确认页、合同回执页、真实签名页、盖章页、签署日期页、身份证号页、系统截图页、还款/账户/余额页、机动车登记证书或登记摘要页。',
+      '当页面是密集合同条款/正文页，且手写内容只是很小的附带痕迹时，即使有手写姓名、下划线、勾选、简短备注或小日期，也应判为 drop。',
+      '手写抵押物/质押物/担保物清单页应判为 drop，即使其中包含手写车牌、金额或日期。',
+      '不要仅因为页面有表格线或手写痕迹就保留；只有当它是当前槽位回填流程可靠的来源页时才判为 keep。',
+      '如果页面同时具有 drop 特征和可用于回填的签名、印章、日期、身份证号、确认文字等强槽位值，应选择 decision="keep"。',
+      '不确定时使用 decision="keep"，不要使用 decision="drop"。',
     ],
   };
 }
@@ -427,7 +470,7 @@ function buildPageFilterPromptPayload(input: {
 async function classifyVisionPagesForSlotFill(params: {
   documentName: string;
   visionPages: PdfVisionPageInput[];
-  dropExamples: PageFilterDropExample[];
+  usageAccumulator?: LlmUsageAccumulator;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
 }) {
   if (params.visionPages.length === 0) {
@@ -463,12 +506,12 @@ async function classifyVisionPagesForSlotFill(params: {
       extra_body: traceConfig.extraBody,
       batch_size: batchSize,
       total_pages: params.visionPages.length,
-      drop_example_count: params.dropExamples.length,
     })}`,
   });
 
   for (const [batchIndex, batch] of batches.entries()) {
     const controller = new AbortController();
+    const requestLabel = `page filter batch ${batchIndex + 1}/${batches.length}`;
     const timeoutId = setTimeout(
       () => controller.abort(),
       PAGE_FILTER_REQUEST_TIMEOUT_MS,
@@ -478,7 +521,6 @@ async function classifyVisionPagesForSlotFill(params: {
       const pageFilterPromptPayload = buildPageFilterPromptPayload({
         documentName: params.documentName,
         pageNumbers: batch.map((page) => page.page_number),
-        dropExampleCount: params.dropExamples.length,
       });
       const content: Array<
         | { type: 'text'; text: string }
@@ -493,17 +535,6 @@ async function classifyVisionPagesForSlotFill(params: {
           text: JSON.stringify(pageFilterPromptPayload),
         },
       ];
-
-      params.dropExamples.forEach((example, index) => {
-        content.push({
-          type: 'text',
-          text: `Drop example ${index + 1} (${example.file_name}): pages visually similar to this example should usually be filtered out unless they contain concrete slot-fill values. Do not treat signed/stamped contract acknowledgement or confirmation pages as drop examples.`,
-        });
-        content.push({
-          type: 'image_url',
-          image_url: { url: example.image_data_url },
-        });
-      });
 
       batch.forEach((page) => {
         content.push({
@@ -523,19 +554,6 @@ async function classifyVisionPagesForSlotFill(params: {
         }
       });
 
-      const dropExampleImageSummaries = params.dropExamples.map(
-        (example, index) => {
-          const imageBytes = estimateDataUrlBytes(example.image_data_url);
-
-          return {
-            index: index + 1,
-            file_name: example.file_name,
-            has_image_data_url: Boolean(example.image_data_url),
-            image_bytes: imageBytes,
-            image_size: formatBytes(imageBytes),
-          };
-        },
-      );
       const candidateImageSummaries = batch.map((page) => {
         const imageBytes =
           page.gemini_file?.sizeBytes ??
@@ -550,23 +568,17 @@ async function classifyVisionPagesForSlotFill(params: {
           image_size: formatBytes(imageBytes),
         };
       });
-      const dropExampleImageTotalBytes = dropExampleImageSummaries.reduce(
-        (sum, example) => sum + example.image_bytes,
-        0,
-      );
       const candidateImageTotalBytes = candidateImageSummaries.reduce(
         (sum, page) => sum + page.image_bytes,
         0,
       );
-      const requestImageTotalBytes =
-        dropExampleImageTotalBytes + candidateImageTotalBytes;
+      const requestImageTotalBytes = candidateImageTotalBytes;
       await params.onTrace?.({
         message:
           `[PDF Fill][PageFilter] Starting visual page filter batch ${batchIndex + 1}/${batches.length} ` +
           `for ${params.documentName}, pages=${batch.map((page) => page.page_number).join(',')}, ` +
           `vision image total size=${formatBytes(requestImageTotalBytes)}, ` +
-          `candidate page images=${formatBytes(candidateImageTotalBytes)}, ` +
-          `drop example images=${formatBytes(dropExampleImageTotalBytes)}.`,
+          `candidate page images=${formatBytes(candidateImageTotalBytes)}.`,
       });
       await params.onTrace?.({
         message: `[PDF Fill][PageFilterPrompt][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
@@ -578,25 +590,18 @@ async function classifyVisionPagesForSlotFill(params: {
             thinking_enabled: traceConfig.thinkingEnabled,
             reasoning_effort: traceConfig.reasoningEffort,
             extra_body: traceConfig.extraBody,
-            request_label: `page filter batch ${batchIndex + 1}/${batches.length}`,
+            request_label: requestLabel,
             image_payload: {
               request_image_total_bytes: requestImageTotalBytes,
               request_image_total_size: formatBytes(requestImageTotalBytes),
               candidate_page_count: candidateImageSummaries.length,
               candidate_image_total_bytes: candidateImageTotalBytes,
               candidate_image_total_size: formatBytes(candidateImageTotalBytes),
-              drop_example_count: dropExampleImageSummaries.length,
-              drop_example_image_total_bytes: dropExampleImageTotalBytes,
-              drop_example_image_total_size: formatBytes(
-                dropExampleImageTotalBytes,
-              ),
             },
-            drop_examples: dropExampleImageSummaries,
             messages: [
               {
                 role: 'system',
-                content:
-                  'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
+                content: PAGE_FILTER_SYSTEM_PROMPT,
               },
               {
                 role: 'user',
@@ -613,8 +618,7 @@ async function classifyVisionPagesForSlotFill(params: {
           messages: [
             {
               role: 'system',
-              content:
-                'You are a visual PDF page filtering assistant. Compare candidate page images with drop examples when provided, then classify pages for a later slot-fill workflow. Return compact JSON only.',
+              content: PAGE_FILTER_SYSTEM_PROMPT,
             },
             {
               role: 'user',
@@ -632,15 +636,9 @@ async function classifyVisionPagesForSlotFill(params: {
       let payload: {
         choices?: Array<{ message?: { content?: string } }>;
       };
+      let usagePayload: unknown;
 
       if (llmConfig.provider === 'gemini') {
-        const requestLabel = `page filter batch ${batchIndex + 1}/${batches.length}`;
-        await inspectGeminiImageProxyUrls({
-          pages: batch,
-          batchLabel: `batch ${batchIndex + 1}/${batches.length}`,
-          signal: controller.signal,
-          onTrace: params.onTrace,
-        });
         const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
@@ -688,6 +686,7 @@ async function classifyVisionPagesForSlotFill(params: {
         });
 
         payload = geminiResult.payload;
+        usagePayload = geminiResult.responsePayload;
       } else {
         const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
           method: 'POST',
@@ -705,7 +704,15 @@ async function classifyVisionPagesForSlotFill(params: {
         }
 
         payload = (await upstream.json()) as typeof payload;
+        usagePayload = payload;
       }
+      recordLlmUsageFromPayload(params.usageAccumulator, {
+        phase: 'pdf_fill_page_filter',
+        provider: llmConfig.provider,
+        model: llmConfig.model,
+        requestLabel,
+        payload: usagePayload,
+      });
       const rawContent = payload.choices?.[0]?.message?.content ?? '';
       const batchResults = parsePageFilterJson(rawContent);
 
@@ -761,6 +768,7 @@ async function runGenerationTaskItemPagePreparation(params: {
 }) {
   const admin = createSupabaseAdminClient();
   const startedAt = new Date();
+  const pageFilterUsageAccumulator = createLlmUsageAccumulator();
   const slotSchema: GenerationSlotSchemaItem[] = Array.isArray(
     params.item.llm_input?.slot_schema,
   )
@@ -775,10 +783,8 @@ async function runGenerationTaskItemPagePreparation(params: {
   const pageImageAssets = normalizePdfPageImageAssets(
     params.item.llm_input?.ocr_image_assets,
   );
-  const pageFilterDropExamples = await loadPageFilterDropExamplesFromFolder();
-  const selectedOriginalPageNumbers = normalizeSelectedOriginalPageNumbers(
-    params.item.llm_input?.selected_original_page_numbers,
-  );
+  // normalizeSelectedOriginalPageNumbers is kept in runtime.ts for compatibility,
+  // but this flow now relies on prepared page image assets directly.
 
   try {
     if (slotSchema.length === 0) {
@@ -787,8 +793,7 @@ async function runGenerationTaskItemPagePreparation(params: {
 
     if (
       precomputedVisionPages.length === 0 &&
-      pageImageAssets.length === 0 &&
-      selectedOriginalPageNumbers.length === 0
+      pageImageAssets.length === 0
     ) {
       throw new Error(
         '当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。',
@@ -805,6 +810,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         updated_at: startedAt.toISOString(),
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
+        page_filter_llm_usage: null,
         processing_trace: '',
       })
       .eq('id', params.item.id);
@@ -853,9 +859,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         slotCount: slotSchema.length,
         visionPageCount: precomputedVisionPages.length,
         pageImageAssetCount: pageImageAssets.length,
-        pageFilterDropExampleCount: pageFilterDropExamples.length,
         hasReferencePdfEvidence,
-        selectedPageCount: selectedOriginalPageNumbers.length,
       },
     });
 
@@ -903,17 +907,20 @@ async function runGenerationTaskItemPagePreparation(params: {
             image_url: page.image_url,
             original_page_number: page.original_page_number ?? page.page_number,
           }));
-        const pipelineVisionPages =
+        const shouldBuildProxyVisionPages =
           precomputedVisionPages.length === 0 &&
-          (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao')
-            ? await buildStoredPageImageProxyVisionPages({
-                pageImageAssets,
-                requestLabel: `page filter ${params.item.id}`,
-                onTrace: async ({ message }) => {
-                  await appendProcessingTrace(admin, params.item.id, message);
-                },
-              })
-            : [];
+          (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao');
+        let pipelineVisionPages: PdfVisionPageInput[] = [];
+
+        if (shouldBuildProxyVisionPages) {
+          pipelineVisionPages = await buildStoredPageImageProxyVisionPages({
+            pageImageAssets,
+            requestLabel: `page filter ${params.item.id}`,
+            onTrace: async ({ message }) => {
+              await appendProcessingTrace(admin, params.item.id, message);
+            },
+          });
+        }
         geminiFileByPageNumberFromPipeline = new Map(
           pipelineVisionPages.flatMap((page) =>
             page.gemini_file
@@ -929,15 +936,18 @@ async function runGenerationTaskItemPagePreparation(params: {
               : [],
           ),
         );
-        const visionPagesForFilter =
-          precomputedVisionPages.length > 0
-            ? precomputedVisionPagesForFilter
-            : pipelineVisionPages.length > 0
-              ? pipelineVisionPages
-              : await loadVisionPagesFromStoredAssets({
-                  admin,
-                  pageImageAssets,
-                });
+        let visionPagesForFilter: PdfVisionPageInput[];
+
+        if (precomputedVisionPagesForFilter.length > 0) {
+          visionPagesForFilter = precomputedVisionPagesForFilter;
+        } else if (pipelineVisionPages.length > 0) {
+          visionPagesForFilter = pipelineVisionPages;
+        } else {
+          visionPagesForFilter = await loadVisionPagesFromStoredAssets({
+            admin,
+            pageImageAssets,
+          });
+        }
         await appendMemoryTrace(admin, params.item.id, 'page_filter_start', {
           source_pdf_name: params.item.source_pdf_name,
           page_count: visionPagesForFilter.length,
@@ -945,7 +955,7 @@ async function runGenerationTaskItemPagePreparation(params: {
         const pageFilterResult = await classifyVisionPagesForSlotFill({
           documentName: params.item.source_pdf_name,
           visionPages: visionPagesForFilter,
-          dropExamples: pageFilterDropExamples,
+          usageAccumulator: pageFilterUsageAccumulator,
           onTrace: async ({ message }) => {
             await appendProcessingTrace(admin, params.item.id, message);
           },
@@ -1047,12 +1057,22 @@ async function runGenerationTaskItemPagePreparation(params: {
           1000,
       ),
     );
+    const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+    const pageFilterLlmUsage =
+      pageFilterUsageAccumulator.calls.length > 0
+        ? summarizeLlmUsage(pageFilterUsageAccumulator, {
+            provider: visionTraceConfig.provider,
+            model: visionTraceConfig.model,
+            modelEnvName: visionTraceConfig.modelEnvName,
+          })
+        : null;
 
     const { data: updatedItem, error: updatedItemError } = await admin
       .from('generation_task_items')
       .update({
         status: 'pdf_pages_ready',
         elapsed_seconds: elapsedSeconds,
+        page_filter_llm_usage: pageFilterLlmUsage,
         llm_input: {
           ...(params.item.llm_input ?? {}),
           pages: [],
@@ -1064,9 +1084,8 @@ async function runGenerationTaskItemPagePreparation(params: {
             kept_page_count: keptPageCount,
             dropped_page_count: droppedPageCount,
             review_page_count: reviewPageCount,
-            drop_example_count: pageFilterDropExamples.length,
-            model: getLlmRuntimeTraceConfig('vision').model,
-            provider: getLlmRuntimeTraceConfig('vision').provider,
+            model: visionTraceConfig.model,
+            provider: visionTraceConfig.provider,
             ...(hasReferencePdfEvidence
               ? {
                   skipped: true,
@@ -1292,7 +1311,7 @@ export async function POST(
     ) {
       return NextResponse.json({
         data: {
-          item,
+          item: buildPagePreparationResponseItem(item),
         },
       });
     }
@@ -1300,7 +1319,7 @@ export async function POST(
     if (['running', 'page_preparing', 'ocr_running'].includes(item.status)) {
       return NextResponse.json({
         data: {
-          item,
+          item: buildPagePreparationResponseItem(item),
         },
       });
     }
@@ -1317,7 +1336,7 @@ export async function POST(
     return NextResponse.json(
       {
         data: {
-          item: {
+          item: buildPagePreparationResponseItem({
             ...item,
             status: 'page_preparing',
             slot_total_count: Array.isArray(item.llm_input?.slot_schema)
@@ -1327,7 +1346,7 @@ export async function POST(
             processing_trace: '',
             error_message: null,
             updated_at: phaseStartedAt,
-          },
+          }),
         },
       },
       { status: 202 },

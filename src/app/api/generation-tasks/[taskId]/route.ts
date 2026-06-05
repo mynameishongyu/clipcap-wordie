@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
-import { markTimedOutGenerationTaskItems } from '@/src/lib/generation-task-items/runtime';
+import {
+  markTimedOutGenerationTaskItems,
+  normalizePdfPageImageAssets,
+} from '@/src/lib/generation-task-items/runtime';
 import { logEvent } from '@/src/lib/logging/log-event';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
@@ -21,89 +24,7 @@ type GenerationTaskItemListRecord = {
   reviewed_at?: string | null;
   output_docx_path?: string | null;
   error_message?: string | null;
-  llm_input?: {
-    ocr_image_assets?: unknown;
-  } | null;
 };
-
-type PageFilterAsset = {
-  uploaded_page_number: number;
-  original_page_number: number;
-  storage_path: string;
-  rotation_applied?: number;
-  filter_decision?: string | null;
-  filter_reason?: string | null;
-  filter_confidence?: number | null;
-  used_for_slot_fill?: boolean;
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object';
-}
-
-function hasPositiveIntegerField(
-  record: Record<string, unknown>,
-  fieldName: string,
-) {
-  const value = record[fieldName];
-
-  return typeof value === 'number' && Number.isInteger(value) && value > 0;
-}
-
-function hasNonEmptyStringField(
-  record: Record<string, unknown>,
-  fieldName: string,
-) {
-  const value = record[fieldName];
-
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-function isPageFilterAsset(value: unknown): value is PageFilterAsset {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  return (
-    hasPositiveIntegerField(value, 'uploaded_page_number') &&
-    hasPositiveIntegerField(value, 'original_page_number') &&
-    hasNonEmptyStringField(value, 'storage_path')
-  );
-}
-
-function normalizePageFilterAssets(value: unknown) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .filter(isPageFilterAsset)
-    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
-}
-
-function buildPageFilterPages(input: { item: GenerationTaskItemListRecord }) {
-  const assets = normalizePageFilterAssets(input.item.llm_input?.ocr_image_assets);
-
-  if (assets.length === 0) {
-    return [];
-  }
-
-  return assets.map((asset) => ({
-    uploadedPageNumber: asset.uploaded_page_number,
-    originalPageNumber: asset.original_page_number,
-    storagePath: asset.storage_path,
-    imageUrl: null,
-    rotationApplied:
-      typeof asset.rotation_applied === 'number' ? asset.rotation_applied : null,
-    filterDecision: asset.filter_decision ?? null,
-    filterReason: asset.filter_reason ?? null,
-    filterConfidence:
-      typeof asset.filter_confidence === 'number'
-        ? asset.filter_confidence
-        : null,
-    selectedForSlotFill: asset.used_for_slot_fill !== false,
-  }));
-}
 
 function createUnauthorizedResponse() {
   return NextResponse.json(
@@ -149,7 +70,7 @@ export async function GET(
     }
 
     const itemSelect =
-      'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input';
+      'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message';
 
     let { data: items, error: itemsError } = await supabase
       .from('generation_task_items')
@@ -199,16 +120,10 @@ export async function GET(
       nextItems = refreshedItems ?? [];
     }
 
-    const itemsWithPageFilters = nextItems.map((item) => ({
-      ...item,
-      pdf_page_filter_pages: buildPageFilterPages({ item }),
-      llm_input: undefined,
-    }));
-
     return NextResponse.json({
       data: {
         task: nextTask,
-        items: itemsWithPageFilters,
+        items: nextItems,
       },
     });
   } catch (error) {
@@ -278,7 +193,7 @@ export async function DELETE(
               ? null
               : item.source_pdf_path,
             item.output_docx_path,
-            ...normalizePageFilterAssets(
+            ...normalizePdfPageImageAssets(
               (item as { llm_input?: { ocr_image_assets?: unknown } | null })
                 .llm_input?.ocr_image_assets,
             ).map((asset) => asset.storage_path),

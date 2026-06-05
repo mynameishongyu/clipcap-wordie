@@ -79,6 +79,7 @@ export const generationTaskItemDetailSchema =
     llm_input: z.any().nullable().optional(),
     llm_output: z.any().nullable().optional(),
     review_payload: z.any().nullable().optional(),
+    page_filter_llm_usage: z.any().nullable().optional(),
     slot_fill_llm_usage: z.any().nullable().optional(),
     pdf_preview_url: z.string().nullable().optional(),
     pdf_preview_pages: z

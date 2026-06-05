@@ -767,8 +767,6 @@ export function BatchGenerateModal({
   const itemTraceRef = useRef<Map<string, string>>(new Map());
   const pageFilterStartedAtRef = useRef<Map<string, number>>(new Map());
   const pageFilterDurationLoggedItemIdsRef = useRef<Set<string>>(new Set());
-  const [confirmedPageNumbersByItemId, setConfirmedPageNumbersByItemId] =
-    useState<Record<string, number[]>>({});
   const refreshTaskLists = async () => {
     await Promise.all([
       taskId
@@ -830,12 +828,11 @@ export function BatchGenerateModal({
         `[Batch Generate][${item.source_pdf_name}] Starting slot fill for task item ${item.id} via /api/generation-task-items/${item.id}/slot-fill (trigger: ${trigger}, current status: ${item.status}).`,
       );
       console.log(
-        `[Batch Generate][${item.source_pdf_name}] User confirmed pages for slot fill`,
+        `[Batch Generate][${item.source_pdf_name}] Starting slot fill with backend-selected pages`,
         {
           taskItemId: item.id,
           trigger,
           confirmedPageNumbers,
-          pageFilterPages: item.pdf_page_filter_pages ?? [],
         },
       );
       launchedSlotFillItemIdsRef.current.add(item.id);
@@ -1045,79 +1042,19 @@ export function BatchGenerateModal({
       return;
     }
 
-    let isDisposed = false;
-
-    queueMicrotask(() => {
-      if (isDisposed) {
-        return;
-      }
-
-      setConfirmedPageNumbersByItemId((current) => {
-        let hasChanges = false;
-        const next = { ...current };
-
-        taskQuery.data.items.forEach((item) => {
-          if (item.status !== 'pdf_pages_ready' || next[item.id]) {
-            return;
-          }
-
-          const selectedPageNumbers = (item.pdf_page_filter_pages ?? [])
-            .filter((page) => page.selectedForSlotFill !== false)
-            .map((page) => page.uploadedPageNumber);
-
-          next[item.id] = selectedPageNumbers;
-          hasChanges = true;
-        });
-
-        return hasChanges ? next : current;
-      });
-    });
-
-    return () => {
-      isDisposed = true;
-    };
-  }, [taskId, taskQuery.data]);
-
-  useEffect(() => {
-    if (!taskId || !taskQuery.data) {
-      return;
-    }
-
     taskQuery.data.items.forEach((item) => {
       if (item.status !== 'pdf_pages_ready') {
         return;
       }
 
-      const pageFilterPages = item.pdf_page_filter_pages ?? [];
-      const confirmedPageNumbers = pageFilterPages
-        .filter((page) => page.selectedForSlotFill !== false)
-        .map((page) => page.uploadedPageNumber);
-      const filteredPageNumbers = pageFilterPages
-        .filter((page) => page.selectedForSlotFill === false)
-        .map((page) => page.uploadedPageNumber);
-
       console.info(
-        `[Batch Generate][${item.source_pdf_name}] 页面过滤完成，自动使用保留页面进入槽位回填`,
+        `[Batch Generate][${item.source_pdf_name}] 页面准备完成，自动进入槽位回填`,
         {
           taskItemId: item.id,
-          keptPageNumbers: confirmedPageNumbers,
-          filteredPageNumbers,
-          pageFilterPages,
         },
       );
 
-      if (confirmedPageNumbers.length === 0) {
-        console.warn(
-          `[Batch Generate][${item.source_pdf_name}] 页面过滤没有保留页面，暂不自动启动回填`,
-          {
-            taskItemId: item.id,
-            pageFilterPages,
-          },
-        );
-        return;
-      }
-
-      launchSlotFillForItem(item, 'polling', confirmedPageNumbers);
+      launchSlotFillForItem(item, 'polling');
     });
   }, [launchSlotFillForItem, taskId, taskQuery.data]);
 

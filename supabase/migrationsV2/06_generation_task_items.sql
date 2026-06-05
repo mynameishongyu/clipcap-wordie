@@ -12,6 +12,7 @@ create table if not exists public.generation_task_items (
   processing_trace text not null default '',
   llm_input jsonb,
   llm_output jsonb,
+  page_filter_llm_usage jsonb,
   slot_fill_llm_usage jsonb,
   review_payload jsonb,
   output_docx_path text,

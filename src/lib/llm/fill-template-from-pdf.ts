@@ -2660,6 +2660,7 @@ async function alignReferencePagesToVisionPages(input: {
           };
         }>;
       };
+      let usagePayload: unknown;
       let modelRequestDurationMs: number | null = null;
       let requestMode = 'chat_completions';
 
@@ -2693,6 +2694,7 @@ async function alignReferencePagesToVisionPages(input: {
         });
 
         payload = geminiResult.payload;
+        usagePayload = geminiResult.responsePayload;
       } else {
         await input.onTrace?.({
           message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
@@ -2725,9 +2727,10 @@ async function alignReferencePagesToVisionPages(input: {
         }
 
         payload = (await upstream.json()) as typeof payload;
+        usagePayload = payload;
       }
       recordLlmUsageFromPayload(input.usageAccumulator, {
-        payload,
+        payload: usagePayload,
         phase: 'slot_fill_reference_page_alignment',
         provider: llmConfig.provider,
         model: llmConfig.model,

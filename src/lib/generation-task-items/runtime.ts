@@ -61,6 +61,7 @@ export type GenerationTaskItemRecord = {
   reviewed_at?: string | null;
   output_docx_path?: string | null;
   error_message?: string | null;
+  page_filter_llm_usage?: unknown;
   slot_fill_llm_usage?: unknown;
   llm_input?: {
     template_name?: string;
@@ -96,7 +97,7 @@ export type GenerationTaskItemRecord = {
 };
 
 export const generationTaskItemSelect =
-  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input, slot_fill_llm_usage';
+  'id, task_id, owner_id, template_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, started_at, finished_at, updated_at, reviewed_at, output_docx_path, error_message, llm_input, page_filter_llm_usage, slot_fill_llm_usage';
 
 export const GENERATION_TASK_ITEM_RUNNING_STATUSES = [
   'uploaded',
@@ -190,6 +191,40 @@ export function normalizeSelectedOriginalPageNumbers(value: unknown) {
   );
 }
 
+function isPositiveInteger(value: unknown) {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+function isValidPdfPageImageAsset(value: unknown): value is PdfPageImageAsset {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const asset = value as Partial<PdfPageImageAsset>;
+
+  return (
+    isPositiveInteger(asset.uploaded_page_number) &&
+    isPositiveInteger(asset.original_page_number) &&
+    typeof asset.storage_path === 'string' &&
+    asset.storage_path.trim().length > 0
+  );
+}
+
+function normalizePdfPageImageAssetMetadata(asset: PdfPageImageAsset) {
+  const contentType =
+    typeof asset.content_type === 'string' ? asset.content_type : null;
+  const size =
+    typeof asset.size === 'number' && Number.isFinite(asset.size)
+      ? asset.size
+      : null;
+
+  return {
+    ...asset,
+    content_type: contentType,
+    size,
+  };
+}
+
 export function normalizePdfPageImageAssets(
   value: unknown,
 ): PdfPageImageAsset[] {
@@ -197,35 +232,15 @@ export function normalizePdfPageImageAssets(
     return [];
   }
 
-  return value
-    .filter(
-      (entry): entry is PdfPageImageAsset =>
-        !!entry &&
-        typeof entry === 'object' &&
-        typeof entry.uploaded_page_number === 'number' &&
-        Number.isInteger(entry.uploaded_page_number) &&
-        entry.uploaded_page_number > 0 &&
-        typeof entry.original_page_number === 'number' &&
-        Number.isInteger(entry.original_page_number) &&
-        entry.original_page_number > 0 &&
-        typeof entry.storage_path === 'string' &&
-        entry.storage_path.trim().length > 0,
-    )
-    .map((entry) => ({
-      ...entry,
-      content_type:
-        typeof (entry as { content_type?: unknown }).content_type === 'string'
-          ? (entry as { content_type: string }).content_type
-          : null,
-      size:
-        typeof (entry as { size?: unknown }).size === 'number' &&
-        Number.isFinite((entry as { size: number }).size)
-          ? (entry as { size: number }).size
-          : null,
-    }))
-    .sort(
-      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
-    );
+  const validAssets = value.filter(isValidPdfPageImageAsset);
+  const assetsWithNormalizedMetadata = validAssets.map(
+    normalizePdfPageImageAssetMetadata,
+  );
+  const sortedAssets = assetsWithNormalizedMetadata.sort(
+    (left, right) => left.uploaded_page_number - right.uploaded_page_number,
+  );
+
+  return sortedAssets;
 }
 
 export function filterPdfPageImageAssetsForSlotFill(
