@@ -43,12 +43,16 @@ const templateExtractionFetchDispatcher = new Agent({
 let templateExtractionRequestQueue = Promise.resolve();
 let lastTemplateExtractionRequestStartedAt = 0;
 
-const MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE =
+const MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE_ZH =
   'meaning_to_applicant 必须根据同一段落中 original_value 附近的标签、字段名、句子或描述得出。不要只根据 original_value 本身推断含义，也不要使用距离较远或无关的上下文。original_doc_position 应包含能支撑该含义的附近原文。';
-const TEMPLATE_STATIC_TEXT_EXCLUSION_RULE =
+const TEMPLATE_STATIC_TEXT_EXCLUSION_RULE_ZH =
   '除非用户额外抽取要求明确点名，否则不要抽取模板固定文本、文书标题、合同名称、机构名称、法院/仲裁委名称、法律依据、管辖/仲裁条款、引号中的固定合同条款正文、落款说明、提示性说明文字。例如不要抽取“金穗信用卡合同”“石家庄仲裁委员会”“本合同履行中发生争议，提交石家庄仲裁委员会按其仲裁规则进行仲裁”“仲裁依据”等固定文本。不要抽取与目标主体无关的申请人/原告/银行/机构及其负责人、统一社会信用代码、地址、电话等信息；只有被申请人/被告/借款人/乙方/客户等目标主体或需要回填变化的案件事实字段才作为槽位。';
+const MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE =
+  'meaning_to_applicant must be derived from labels, field names, sentences, or descriptions near original_value in the same paragraph. Do not infer meaning only from original_value itself, and do not use distant or unrelated context. original_doc_position should include nearby source text that supports this meaning.';
+const TEMPLATE_STATIC_TEXT_EXCLUSION_RULE =
+  'Unless the user explicitly asks for them in the extra extraction requirement, do not extract fixed template text, document titles, contract names, institution names, court/arbitration commission names, legal bases, jurisdiction/arbitration clauses, quoted fixed contract terms, signature-block instructions, or reminder/instruction text. For example, do not extract fixed text such as "金穗信用卡合同", "石家庄仲裁委员会", "本合同履行中发生争议，提交石家庄仲裁委员会按其仲裁规则进行仲裁", or "仲裁依据". Do not extract applicant/plaintiff/bank/institution information, responsible persons, unified social credit codes, addresses, or phone numbers that are unrelated to the target subject. Only target-subject fields such as respondent/defendant/borrower/party B/customer information, or variable case-fact fields that need filling, should be extracted as slots.';
 
-const EXTRACTION_SYSTEM_PROMPT = `
+const EXTRACTION_SYSTEM_PROMPT_ZH = `
 你是中文法律文书模板槽位抽取助手。
 
 你的基础抽取任务如下：
@@ -65,9 +69,9 @@ const EXTRACTION_SYSTEM_PROMPT = `
 6. 同一段中如果出现多个不同含义的日期、金额、百分比、利率等，必须分别抽取，不能合并，也不能遗漏。
 7. field_category 必须返回中文，不要返回 vehicle_plate_number、vehicle_brand 这种英文字段名。
 8. 除非用户明确要求，否则忽略与目标主体无关的申请人、法院、仲裁委、代理人等主体信息。
-9. ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}
+9. ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE_ZH}
 
-${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}
+${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE_ZH}
 固定 JSON 结构：
 {
   "document_info": {
@@ -84,6 +88,47 @@ ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}
           "original_value": "原文中的具体值",
           "meaning_to_applicant": "从 original_value 附近字段名、标签或描述得到的槽位含义",
           "original_doc_position": "来自原文的定位片段"
+        }
+      ]
+    }
+  ]
+}`.trim();
+const EXTRACTION_SYSTEM_PROMPT = `
+You are a Chinese legal document template slot extraction assistant.
+
+Base extraction task:
+1. Process only the single paragraph or paragraph batch provided in the user message. Extract slots only from the provided paragraph text.
+2. By default, prioritize information directly related to the target subject, such as respondent, defendant, borrower, party B, or customer.
+3. Default fields of interest include but are not limited to: name, ID number, ethnicity, gender, birth date, address, contact phone number, amount, date, percentage, interest rate, and installment count.
+
+Extraction rules:
+1. Return JSON only. Do not return explanations, Markdown, code fences, or any extra text.
+2. Extract only information that truly appears in the provided paragraph text. Do not invent values and do not complete values that are not present.
+3. items must follow the original source order.
+4. original_value must preserve the original source text format.
+5. original_doc_position must be an exact short phrase or snippet from the current paragraph that can locate the source text.
+6. If one paragraph contains multiple dates, amounts, percentages, interest rates, or similar values with different meanings, extract them separately. Do not merge or omit them.
+7. field_category must be Chinese. Do not return English field names such as vehicle_plate_number or vehicle_brand.
+8. Unless explicitly requested by the user, ignore subjects unrelated to the target subject, such as applicant, court, arbitration commission, or attorney information.
+9. ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}
+
+${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE}
+Required JSON structure:
+{
+  "document_info": {
+    "document_name": "file name"
+  },
+  "extraction_result": [
+    {
+      "paragraph_index": 0,
+      "items": [
+        {
+          "sequence": 1,
+          "paragraph_index": 0,
+          "field_category": "Chinese field category",
+          "original_value": "exact value from the source paragraph",
+          "meaning_to_applicant": "slot meaning derived from nearby field name, label, sentence, or description around original_value",
+          "original_doc_position": "source snippet from the paragraph"
         }
       ]
     }
@@ -823,6 +868,81 @@ async function extractSlotsForParagraph(params: {
 
 */
 
+function buildTemplateExtractionPromptPayloadZh(params: {
+  fileName: string;
+  prompt: string;
+  paragraphs: ExtractedParagraph[];
+}) {
+  return {
+    document_name: params.fileName,
+    extra_extraction_requirement: params.prompt || null,
+    strict_requirement: `请逐段独立处理。只返回 JSON。extraction_result 只输出包含已抽取 items 的段落；不要输出 items 为空的段落。paragraph_index 必须原样复制输入段落的 paragraph_index。${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE_ZH} ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE_ZH}`,
+    paragraphs: params.paragraphs.map((paragraph) => ({
+      paragraph_index: paragraph.paragraph_index,
+      paragraph_text: paragraph.paragraph_text,
+    })),
+    output_schema: {
+      document_info: {
+        document_name: params.fileName,
+      },
+      extraction_result: [
+        {
+          paragraph_index: '从输入段落复制 paragraph_index',
+          items: [
+            {
+              sequence: 1,
+              paragraph_index: '与外层 paragraph_index 相同',
+              field_category: '中文字段类别',
+              original_value: '段落原文中的精确值',
+              meaning_to_applicant:
+                '根据 original_value 附近标签、字段名、句子或描述得到的槽位含义',
+              original_doc_position: '能定位该值的原文短句',
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+function buildTemplateExtractionPromptPayloadEn(params: {
+  fileName: string;
+  prompt: string;
+  paragraphs: ExtractedParagraph[];
+}) {
+  return {
+    document_name: params.fileName,
+    extra_extraction_requirement: params.prompt || null,
+    strict_requirement: `Process each paragraph independently. Return JSON only. extraction_result should include only paragraphs that contain extracted items; do not output paragraphs with empty items. paragraph_index must be copied exactly from the input paragraph. ${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE} ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}`,
+    paragraphs: params.paragraphs.map((paragraph) => ({
+      paragraph_index: paragraph.paragraph_index,
+      paragraph_text: paragraph.paragraph_text,
+    })),
+    output_schema: {
+      document_info: {
+        document_name: params.fileName,
+      },
+      extraction_result: [
+        {
+          paragraph_index: 'copy paragraph_index from the input paragraph',
+          items: [
+            {
+              sequence: 1,
+              paragraph_index: 'same as the outer paragraph_index',
+              field_category: 'Chinese field category',
+              original_value: 'exact value from the paragraph source text',
+              meaning_to_applicant:
+                'slot meaning derived from nearby labels, field names, sentences, or descriptions around original_value',
+              original_doc_position:
+                'short source phrase that can locate the value in the paragraph',
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
 async function extractSlotsForParagraphBatch(params: {
   fileName: string;
   prompt: string;
@@ -850,36 +970,11 @@ async function extractSlotsForParagraphBatch(params: {
   }
   */
 
-  const promptPayload = {
-    document_name: params.fileName,
-    extra_extraction_requirement: params.prompt || null,
-    strict_requirement: `请逐段独立处理。只返回 JSON。extraction_result 只输出包含已抽取 items 的段落；不要输出 items 为空的段落。paragraph_index 必须原样复制输入段落的 paragraph_index。${MEANING_TO_APPLICANT_NEARBY_CONTEXT_RULE} ${TEMPLATE_STATIC_TEXT_EXCLUSION_RULE}`,
-    paragraphs: params.paragraphs.map((paragraph) => ({
-      paragraph_index: paragraph.paragraph_index,
-      paragraph_text: paragraph.paragraph_text,
-    })),
-    output_schema: {
-      document_info: {
-        document_name: params.fileName,
-      },
-      extraction_result: [
-        {
-          paragraph_index: '从输入段落复制 paragraph_index',
-          items: [
-            {
-              sequence: 1,
-              paragraph_index: '与外层 paragraph_index 相同',
-              field_category: '中文字段类别',
-              original_value: '段落原文中的精确值',
-              meaning_to_applicant:
-                '根据 original_value 附近标签、字段名、句子或描述得到的槽位含义',
-              original_doc_position: '能定位该值的原文短句',
-            },
-          ],
-        },
-      ],
-    },
-  };
+  const promptPayload = buildTemplateExtractionPromptPayloadEn({
+    fileName: params.fileName,
+    prompt: params.prompt,
+    paragraphs: params.paragraphs,
+  });
   const rawJson = await requestTextLlmJson({
     prompt: JSON.stringify(promptPayload),
     fileName: params.fileName,

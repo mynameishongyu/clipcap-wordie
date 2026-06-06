@@ -112,6 +112,17 @@ function inferMimeTypeFromUrl(url) {
   return 'image/jpeg';
 }
 
+function parseUrlList(value) {
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  return value
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 function base64UrlEncode(value) {
   return Buffer.from(value).toString('base64url');
 }
@@ -295,7 +306,7 @@ async function testLocalFetch(url) {
   };
 }
 
-async function testGeminiFetch({ url, mimeType }) {
+async function testGeminiFetch({ urls, mimeType }) {
   const model = process.env.GEMINI_SIGNED_URL_TEST_MODEL ?? process.env.VISION_LLM_MODEL ?? 'gemini-3-flash-preview';
   const baseUrl =
     process.env.GEMINI_SIGNED_URL_TEST_BASE_URL ??
@@ -326,14 +337,19 @@ async function testGeminiFetch({ url, mimeType }) {
         role: 'user',
         parts: [
           {
-            text: 'Read this image and return {"can_read_image":true,"brief_description":"..."} if it is visible.',
+            text: `Read these ${urls.length} image URL(s). Return compact JSON with {"can_read_images":true,"image_count":${urls.length},"brief_description":"..." } if all images are visible.`,
           },
-          {
-            file_data: {
-              mime_type: mimeType,
-              file_uri: url,
+          ...urls.flatMap((url, index) => [
+            {
+              text: `Image ${index + 1}`,
             },
-          },
+            {
+              file_data: {
+                mime_type: mimeType,
+                file_uri: url,
+              },
+            },
+          ]),
         ],
       },
     ],
@@ -376,6 +392,7 @@ async function handleTest(request, response) {
   const body = await readJsonBody(request);
   const storagePath = typeof body.storagePath === 'string' ? body.storagePath.trim() : '';
   const providedUrl = typeof body.url === 'string' ? body.url.trim() : '';
+  const providedUrls = parseUrlList(providedUrl);
   const publicBaseUrl =
     typeof body.publicBaseUrl === 'string' ? body.publicBaseUrl.trim() : '';
   const bucket = typeof body.bucket === 'string' && body.bucket.trim()
@@ -385,20 +402,21 @@ async function handleTest(request, response) {
   const mimeType =
     typeof body.mimeType === 'string' && body.mimeType.trim()
       ? body.mimeType.trim()
-      : providedUrl
-        ? inferMimeTypeFromUrl(providedUrl)
+      : providedUrls.length > 0
+        ? inferMimeTypeFromUrl(providedUrls[0])
         : 'image/jpeg';
-  const url = providedUrl
-    ? providedUrl
-    : requestedMode === 'proxy'
-      ? storagePath && publicBaseUrl
-        ? buildProxyUrl({ publicBaseUrl, bucket, storagePath, mimeType })
-        : ''
-      : storagePath
-        ? await createSignedUrl({ storagePath, bucket })
-        : '';
+  const urls =
+    providedUrls.length > 0
+      ? providedUrls
+      : requestedMode === 'proxy'
+        ? storagePath && publicBaseUrl
+          ? [buildProxyUrl({ publicBaseUrl, bucket, storagePath, mimeType })]
+          : []
+        : storagePath
+          ? [await createSignedUrl({ storagePath, bucket })]
+          : [];
 
-  if (!url) {
+  if (urls.length === 0) {
     json(response, 400, {
       error:
         requestedMode === 'proxy'
@@ -408,12 +426,18 @@ async function handleTest(request, response) {
     return;
   }
 
-  const localFetch = await testLocalFetch(url);
-  const geminiFetch = await testGeminiFetch({ url, mimeType });
+  const localFetches = [];
+
+  for (const url of urls) {
+    localFetches.push(await testLocalFetch(url));
+  }
+
+  const geminiFetch = await testGeminiFetch({ urls, mimeType });
+  const allLocalFetchesOk = localFetches.every((localFetch) => localFetch.ok);
 
   json(response, 200, {
     input: {
-      source: providedUrl
+      source: providedUrls.length > 0
         ? 'provided_url'
         : requestedMode === 'proxy'
           ? 'ngrok_proxy_signed_url'
@@ -421,16 +445,17 @@ async function handleTest(request, response) {
       bucket: storagePath ? bucket : null,
       storagePath: storagePath || null,
       publicBaseUrl: publicBaseUrl || null,
-      url,
+      urlCount: urls.length,
+      urls,
       mimeType,
     },
-    localFetch,
+    localFetches,
     geminiFetch,
     result:
-      localFetch.ok && geminiFetch.ok
-        ? 'Local fetch OK, Gemini fetch OK.'
-        : localFetch.ok
-          ? 'Local fetch OK, Gemini fetch FAILED.'
+      allLocalFetchesOk && geminiFetch.ok
+        ? 'All local fetches OK, Gemini fetch OK.'
+        : allLocalFetchesOk
+          ? 'All local fetches OK, Gemini fetch FAILED.'
           : 'Local fetch FAILED.',
   });
 }

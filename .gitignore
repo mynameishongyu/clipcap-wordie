@@ -27,3 +27,5 @@ gemini_signed_url/
 png_pdf/output/
 .vscode/
 delete_supabase/
+gemini_signed_urlV2/
+test_gemini_api.py

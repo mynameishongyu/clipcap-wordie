@@ -930,10 +930,12 @@ function buildLocateSlots(extractionResult: ExtractionParagraph[]) {
   );
 }
 
-const PDF_BBOX_SYSTEM_PROMPT =
+const PDF_BBOX_SYSTEM_PROMPT_ZH =
   '你是一个精确的视觉文档版面定位助手。请在扫描 PDF 页面图片中定位给定槽位值，并按照指定的 bbox_target_mode 返回 bounding boxes。只返回紧凑且合法的 JSON，不要返回 markdown 或解释文字。如果返回的 box 与 evidence_text 在空间上不对应同一个请求值，请省略该 match。';
+const PDF_BBOX_SYSTEM_PROMPT =
+  'You are a precise visual document layout localization assistant. Locate the requested DOCX template slot values in scanned PDF page images, and return bounding boxes according to the specified bbox_target_mode. Return compact valid JSON only. Do not return Markdown or explanations. If a returned box is not spatially aligned with the same requested value reported in evidence_text, omit that match.';
 
-function getProviderBboxFormat(provider: LlmProvider) {
+function getProviderBboxFormatZh(provider: LlmProvider) {
   if (provider === 'qwen' || provider === 'kimi' || provider === 'doubao') {
     const providerHint =
       provider === 'doubao'
@@ -969,7 +971,7 @@ function getProviderBboxFormat(provider: LlmProvider) {
   } as const;
 }
 
-function getTargetModeRules(input: {
+function getTargetModeRulesZh(input: {
   bboxField: string;
   targetMode: PdfBboxTargetMode;
 }) {
@@ -994,7 +996,7 @@ function getTargetModeRules(input: {
   ];
 }
 
-function getTargetModeNegativeExamples(input: {
+function getTargetModeNegativeExamplesZh(input: {
   bboxField: string;
   targetMode: PdfBboxTargetMode;
 }) {
@@ -1020,14 +1022,14 @@ function getTargetModeNegativeExamples(input: {
   ];
 }
 
-function buildPdfBboxLocatePrompt(input: {
+function buildPdfBboxLocatePromptZh(input: {
   pdfFileName: string;
   pageNumbers: number[];
   provider: LlmProvider;
   targetMode: PdfBboxTargetMode;
   slots: TemplatePdfLocateSlot[];
 }) {
-  const bboxFormat = getProviderBboxFormat(input.provider);
+  const bboxFormat = getProviderBboxFormatZh(input.provider);
 
   return {
     task:
@@ -1062,7 +1064,7 @@ function buildPdfBboxLocatePrompt(input: {
       `不要返回正确的 evidence_text，却把 ${bboxFormat.field} 框在另一个附近值、另一个电话号码、另一个签名块、印章、标签或空白区域上。`,
       `返回 match 前必须视觉复查 proposed ${bboxFormat.field}：如果它不包含请求的可见值，请省略该 match。`,
       `如果你能在页面某处读到该值，但不能按照 bbox_target_mode 可信地绘制 ${bboxFormat.field}，请省略该 match，不要猜 box。`,
-      ...getTargetModeRules({
+      ...getTargetModeRulesZh({
         bboxField: bboxFormat.field,
         targetMode: input.targetMode,
       }),
@@ -1070,6 +1072,169 @@ function buildPdfBboxLocatePrompt(input: {
       '如果精确槽位值不可见，但可见缩写或格式等价值，只定位该可见等价值，并将可见文本放入 evidence_text。',
       `evidence_text 必须是 ${bboxFormat.field} 内部或紧贴其边缘的可见文本。它应包含定位到的值，而不只是字段标签。`,
       '如果不确定，请省略 match，不要猜测。',
+    ],
+    negative_examples: getTargetModeNegativeExamplesZh({
+      bboxField: bboxFormat.field,
+      targetMode: input.targetMode,
+    }),
+    slots: input.slots.map((slot) => ({
+      slot_key: slot.slot_key,
+      field_category: slot.field_category,
+      original_value: slot.original_value,
+      meaning_to_applicant: slot.meaning_to_applicant,
+    })),
+    output_schema: {
+      matches: [
+        {
+          slot_key: 'slot key from input slots',
+          page_number: 'one of the provided page_numbers',
+          bbox_target: input.targetMode,
+          [bboxFormat.field]: bboxFormat.example,
+          evidence_text: 'short visible text around the located value',
+          confidence: 0.85,
+        },
+      ],
+    },
+  };
+}
+
+function getProviderBboxFormat(provider: LlmProvider) {
+  if (provider === 'qwen' || provider === 'kimi' || provider === 'doubao') {
+    const providerHint =
+      provider === 'doubao'
+        ? 'This follows Seed/Doubao visual-grounding semantics: equivalent to <bbox>x1 y1 x2 y2</bbox>, but it must be returned as JSON bbox_2d.'
+        : 'Use the x-first visual-grounding format.';
+
+    return {
+      field: 'bbox_2d',
+      coordinateSystem: `${providerHint} bbox_2d must be [x1, y1, x2, y2], normalized against the whole image as integers from 0 to 999 or 0 to 1000.`,
+      example: [100, 200, 400, 240],
+    } as const;
+  }
+
+  if (provider === 'gemini') {
+    return {
+      field: 'box_2d',
+      coordinateSystem:
+        'Use Gemini bounding-box format: box_2d must be [ymin, xmin, ymax, xmax], normalized against the whole image as integers from 0 to 1000.',
+      example: [200, 100, 240, 400],
+    } as const;
+  }
+
+  return {
+    field: 'bbox',
+    coordinateSystem:
+      'Use normalized bbox object format: bbox must be {x, y, width, height}; all values are ratios from 0 to 1 relative to the whole image.',
+    example: {
+      x: 0.1,
+      y: 0.2,
+      width: 0.3,
+      height: 0.04,
+    },
+  } as const;
+}
+
+function getTargetModeRules(input: {
+  bboxField: string;
+  targetMode: PdfBboxTargetMode;
+}) {
+  if (input.targetMode === 'cell') {
+    return [
+      `When bbox_target_mode is "cell", ${input.bboxField} should enclose the table cell or compact evidence region containing the requested value, not only the text strokes of the value itself.`,
+      `If the value is in a table, ${input.bboxField} should follow the visible cell boundary as closely as possible. It may include label/value text within the same cell when needed.`,
+      'For table amount, date, status, and small numeric values, prefer the complete cell containing the value instead of a tiny text-only box.',
+      'For headers, footers, system timestamps, screenshots, or corner metadata, return the local compact evidence region containing the value. Do not box the whole page or whole screenshot.',
+      `${input.bboxField} may include the field label, table border, and whitespace inside the same cell/evidence region, but must not cross into adjacent cells, adjacent rows, or unrelated regions.`,
+      'evidence_text should describe the visible value and nearby label/context inside the selected cell or evidence region, for example "overdue installment fee: 3400".',
+      `If the value is inside a multi-line cell or evidence region, ${input.bboxField} may cover the whole cell/region, but must not include unrelated adjacent cells.`,
+    ];
+  }
+
+  return [
+    `When bbox_target_mode is "text", ${input.bboxField} must enclose only the slot value text itself.`,
+    'Do not include field labels such as name, gender, birth date, address, amount, phone, or ID number, and do not include nearby form labels.',
+    'Do not include adjacent rows, adjacent columns, explanatory text, table borders, stamps, photos, icons, or blank regions unless the value text visually requires that area.',
+    `Each match should return the tightest usable ${input.bboxField} around the visible value text. Do not box the whole row, whole card, whole cell, or whole page.`,
+    `If the value spans multiple lines, ${input.bboxField} may cover only those value lines. If the value is on one line, the box must stay on that line.`,
+  ];
+}
+
+function getTargetModeNegativeExamples(input: {
+  bboxField: string;
+  targetMode: PdfBboxTargetMode;
+}) {
+  if (input.targetMode === 'cell') {
+    return [
+      'For a table amount value, do not box only tiny amount text strokes when the containing cell boundary is clearly visible.',
+      'For table cells, do not cross into adjacent rows or adjacent columns.',
+      'For a system date/time in a corner, do not box the whole page or whole screenshot; box only the local corner evidence region.',
+      'For original_value "18803308383", do not return evidence_text "0311-66568703", because that is another phone number.',
+      `If the proposed ${input.bboxField} on a page does not contain visible printed or handwritten original_value text, do not return evidence_text equal to original_value.`,
+    ];
+  }
+
+  return [
+    'For a name value, box only the person name itself; do not box the "name" label.',
+    'For a gender value, box only the gender value itself; do not box the gender label or adjacent ethnicity value.',
+    'For a birth date, box only the date value itself; do not box the birth-date label or the next address line.',
+    'For an address, box only the address text itself; do not box the address label, birth-date line, ID-number line, or photo.',
+    'For original_value "18803308383", do not return evidence_text "0311-66568703", because that is another phone number.',
+    `For original_value "18103108407", if the visible number is actually in the right-side personal phone area, do not return evidence_text "18103108407" while placing ${input.bboxField} on the left-side company phone/stamp area.`,
+    `If the proposed ${input.bboxField} on a page does not contain visible printed or handwritten original_value text, do not return evidence_text equal to original_value.`,
+    `For pages with multiple phone labels, ${input.bboxField} must cover the exact phone-number characters, not only the nearest phone label or another phone line.`,
+  ];
+}
+
+function buildPdfBboxLocatePrompt(input: {
+  pdfFileName: string;
+  pageNumbers: number[];
+  provider: LlmProvider;
+  targetMode: PdfBboxTargetMode;
+  slots: TemplatePdfLocateSlot[];
+}) {
+  const bboxFormat = getProviderBboxFormat(input.provider);
+
+  return {
+    task:
+      input.targetMode === 'cell'
+        ? 'Directly locate the given DOCX template slot values in these PDF page images. Each matched value should return the containing table cell or compact evidence region. Do not OCR the whole page. Return compact valid JSON only.'
+        : 'Directly locate the given DOCX template slot values in these PDF page images. Do not OCR the whole page. Return compact valid JSON only.',
+    document_name: input.pdfFileName,
+    page_numbers: input.pageNumbers,
+    provider: input.provider,
+    bbox_target_mode: input.targetMode,
+    coordinate_system: bboxFormat.coordinateSystem,
+    json_output_rules: [
+      'Return exactly one compact JSON object and nothing else.',
+      'The response must start with {"matches": and must be directly parseable by JSON.parse.',
+      'Do not use Markdown fences, comments, explanations, line prefixes, trailing commas, single quotes, non-JSON punctuation as separators, NaN, Infinity, or undefined.',
+      'If there is no trustworthy match, return {"matches":[]}.',
+    ],
+    strict_requirements: [
+      `Each match must use the field name ${bboxFormat.field}; do not use any other bbox field name.`,
+      `Each match must include bbox_target, and its value must be exactly "${input.targetMode}".`,
+      'Return a match only when the visual page image contains the exact value or a visually equivalent value.',
+      'Matching only the field label or field type is not sufficient. The visible value must match original_value after common format normalization.',
+      'For phone numbers, first ignore spaces, hyphens, parentheses, and country-code formatting when comparing digit sequences. Do not return another phone number just because it is near a phone label.',
+      'For ID numbers, dates, and amounts, the visible value must match the input value after normalizing common formatting such as spaces, commas, Chinese date units, and currency symbols.',
+      'For dates, Chinese date text and slash/hyphen/dot numeric formats are equivalent when year, month, and day are the same. For example, original_value year=2026, month=3, day=30 can match visible text "2026/3/30", "2026-3-30", "2026.3.30", "2026/03/30", and "2026-03-30".',
+      'For dates, ignore leading zeros in month/day during comparison, but evidence_text must still be the exact visible date text from the PDF image.',
+      'If a page contains the same label with a different value, omit that slot from matches.',
+      `Spatial consistency is mandatory: ${bboxFormat.field} must physically contain the exact visible value reported in evidence_text.`,
+      `Page consistency is mandatory: page_number must be the page image where ${bboxFormat.field} and evidence_text are actually visible. Do not copy values from other pages, other slots, memory, or document context.`,
+      `evidence_text may only transcribe visible characters on the same page_number image that are inside, or immediately adjacent to, the returned ${bboxFormat.field}.`,
+      'If original_value comes from the input but is not visible in the current page image, do not return it as evidence_text for that page.',
+      `Do not return correct evidence_text while placing ${bboxFormat.field} on another nearby value, another phone number, another signature block, stamp, label, or blank region.`,
+      `Before returning a match, visually re-check the proposed ${bboxFormat.field}. If it does not contain the requested visible value, omit the match.`,
+      `If you can read the value somewhere on the page but cannot draw a trustworthy ${bboxFormat.field} according to bbox_target_mode, omit the match instead of guessing the box.`,
+      ...getTargetModeRules({
+        bboxField: bboxFormat.field,
+        targetMode: input.targetMode,
+      }),
+      'If the same value appears multiple times, choose the occurrence that best matches the field label or surrounding context.',
+      'If the exact slot value is not visible but a visible abbreviation or format-equivalent value is visible, locate that visible equivalent and put the visible text in evidence_text.',
+      `evidence_text must be visible text inside, or immediately adjacent to, ${bboxFormat.field}. It should include the located value, not only the field label.`,
+      'If uncertain, omit the match instead of guessing.',
     ],
     negative_examples: getTargetModeNegativeExamples({
       bboxField: bboxFormat.field,

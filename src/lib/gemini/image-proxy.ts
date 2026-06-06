@@ -131,6 +131,23 @@ export function verifyGeminiImageProxyToken(
   };
 }
 
+export function getGeminiImageProxyUrlExpiresAt(url: string) {
+  try {
+    const requestUrl = new URL(url);
+    const token = requestUrl.searchParams.get('token');
+
+    if (!token) {
+      return null;
+    }
+
+    const payload = verifyGeminiImageProxyToken(token);
+
+    return new Date(payload.exp * 1000).toISOString();
+  } catch {
+    return null;
+  }
+}
+
 export function createGeminiImageProxyUrl(input: {
   bucket?: string;
   storagePath: string;

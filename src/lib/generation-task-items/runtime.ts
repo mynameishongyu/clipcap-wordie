@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
-import { createGeminiImageProxyFile } from '@/src/lib/gemini/image-proxy';
+import {
+  createGeminiImageProxyFile,
+  getGeminiImageProxyUrlExpiresAt,
+} from '@/src/lib/gemini/image-proxy';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import type {
   GenerationSlotSchemaItem,
@@ -28,6 +31,7 @@ export type PdfPageImageAsset = {
     size_bytes?: number | null;
     display_name?: string | null;
     uploaded_at?: string | null;
+    expires_at?: string | null;
     request_label?: string | null;
   } | null;
   rotation_applied?: -90 | 0 | 90 | 180;
@@ -110,6 +114,7 @@ export const GENERATION_TASK_ITEM_RUNNING_STATUSES = [
 
 export const VERCEL_FUNCTION_TIMEOUT_SECONDS = 300;
 export const GENERATION_TASK_ITEM_TIMEOUT_GRACE_SECONDS = 5;
+const GEMINI_IMAGE_PROXY_REUSE_MIN_TTL_MS = 60 * 1000;
 
 const GENERATION_TASK_ITEM_TIMEOUT_MESSAGE =
   '处理超时：Vercel 函数最长运行 300 秒，任务已停止，请减少页数或槽位后重试。';
@@ -277,6 +282,54 @@ function getImageAssetMimeType(asset: PdfPageImageAsset) {
   return getMimeTypeFromStoragePath(asset.storage_path);
 }
 
+function getStoredGeminiFileExpiresAtMs(
+  file: NonNullable<PdfPageImageAsset['gemini_file']>,
+) {
+  if (typeof file.expires_at === 'string') {
+    const parsed = Date.parse(file.expires_at);
+
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  const expiresAt = getGeminiImageProxyUrlExpiresAt(file.uri);
+
+  if (!expiresAt) {
+    return null;
+  }
+
+  const parsed = Date.parse(expiresAt);
+
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getUsableStoredGeminiFile(
+  asset: PdfPageImageAsset,
+  mimeType: string,
+): GeminiVisionFile | null {
+  const file = asset.gemini_file;
+
+  if (!file?.uri || file.mime_type !== mimeType) {
+    return null;
+  }
+
+  const expiresAtMs = getStoredGeminiFileExpiresAtMs(file);
+  const reuseCutoffMs = Date.now() + GEMINI_IMAGE_PROXY_REUSE_MIN_TTL_MS;
+
+  if (!expiresAtMs || expiresAtMs <= reuseCutoffMs) {
+    return null;
+  }
+
+  return {
+    uri: file.uri,
+    name: file.name ?? null,
+    mimeType: file.mime_type,
+    sizeBytes: file.size_bytes ?? asset.size ?? 0,
+    displayName: file.display_name ?? null,
+  };
+}
+
 export async function loadVisionPagesFromStoredAssets(params: {
   admin: AdminClient;
   pageImageAssets: PdfPageImageAsset[];
@@ -336,12 +389,17 @@ export async function buildStoredPageImageProxyVisionPages(params: {
 
   for (const [index, asset] of params.pageImageAssets.entries()) {
     const mimeType = getImageAssetMimeType(asset);
-    const geminiFile = createGeminiImageProxyFile({
-      storagePath: asset.storage_path,
-      mimeType,
-      sizeBytes: asset.size ?? 0,
-      displayName: `${params.requestLabel}-page-${asset.uploaded_page_number}`,
-    });
+    const storedGeminiFile = getUsableStoredGeminiFile(asset, mimeType);
+    const reusedStoredProxy = Boolean(storedGeminiFile);
+    const geminiFile =
+      storedGeminiFile ??
+      createGeminiImageProxyFile({
+        storagePath: asset.storage_path,
+        mimeType,
+        sizeBytes: asset.size ?? 0,
+        displayName: `${params.requestLabel}-page-${asset.uploaded_page_number}`,
+      });
+    const proxyExpiresAt = getGeminiImageProxyUrlExpiresAt(geminiFile.uri);
 
     await params.onTrace?.({
       message: `[Gemini Image Proxy][StoragePipelinePageComplete] ${JSON.stringify(
@@ -354,6 +412,8 @@ export async function buildStoredPageImageProxyVisionPages(params: {
           mime_type: mimeType,
           image_size_bytes: asset.size ?? null,
           file_uri: geminiFile.uri,
+          proxy_expires_at: proxyExpiresAt,
+          reused_stored_proxy: reusedStoredProxy,
           source: 'vercel_gemini_image_proxy',
         },
       )}`,

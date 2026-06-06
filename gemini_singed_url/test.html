@@ -166,9 +166,10 @@
     <main>
       <h1>Gemini Signed URL Test</h1>
       <p>
-        Test whether Gemini can read an image URL. Use Supabase mode to test a
-        Supabase signed URL directly. Use ngrok proxy mode to test whether
-        Gemini can read an app-owned signed proxy URL.
+        Test whether Gemini can read one or more image URLs. Use Supabase mode
+        to test provided image URLs directly, including Vercel image proxy URLs.
+        Use ngrok proxy mode to test whether Gemini can read an app-owned signed
+        proxy URL.
       </p>
 
       <div class="config-bar">
@@ -190,14 +191,16 @@
           </label>
         </div>
 
-        <label for="signed-url">Supabase signed URL</label>
+        <label for="signed-url">Image URL(s)</label>
         <textarea
           id="signed-url"
-          placeholder="https://...supabase.co/storage/v1/object/sign/..."
+          placeholder="https://test.clipclapai.com/api/gemini-image-proxy?token=...
+https://test.clipclapai.com/api/gemini-image-proxy?token=..."
         ></textarea>
         <p class="hint">
-          If this is filled, the test uses this URL directly. Leave it empty
-          when testing ngrok proxy mode.
+          Put one URL per line. If this is filled, the test sends all listed
+          URLs directly to Gemini in one request. Leave it empty when testing
+          ngrok proxy mode.
         </p>
 
         <label for="storage-path">Storage path</label>

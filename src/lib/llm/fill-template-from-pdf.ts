@@ -1613,6 +1613,94 @@ function normalizeDateValue(value: string) {
   return trimmed;
 }
 
+function hasPercentUnit(value: string) {
+  return /[%％]/.test(value);
+}
+
+function hasCurrencyUnit(value: string) {
+  return /(?:人民币|万元|元)/.test(value);
+}
+
+function isNumericTemplateValue(value: string) {
+  return /^[-+]?\d[\d,]*(?:\.\d+)?$/.test(value.trim());
+}
+
+function stripCurrencyUnitForNumericReplacement(value: string) {
+  const withoutCurrencyPrefix = value.trim().replace(/^人民币\s*/, '');
+  return withoutCurrencyPrefix.replace(/\s*(?:万元|元)$/, '').trim();
+}
+
+function normalizeEthnicityReplacement(
+  templateOriginalValue: string,
+  value: string,
+) {
+  const templateValue = templateOriginalValue.trim();
+  const trimmedValue = value.trim();
+
+  if (
+    templateValue.length === 1 &&
+    /^[\u4e00-\u9fa5]$/.test(templateValue) &&
+    trimmedValue === `${templateValue}族`
+  ) {
+    return templateValue;
+  }
+
+  return trimmedValue;
+}
+
+function normalizeGenderReplacement(
+  templateOriginalValue: string,
+  value: string,
+) {
+  const templateValue = templateOriginalValue.trim();
+  const trimmedValue = value.trim();
+
+  if (templateValue === '男' && /^(?:男|男性|性别男)$/.test(trimmedValue)) {
+    return '男';
+  }
+
+  if (templateValue === '女' && /^(?:女|女性|性别女)$/.test(trimmedValue)) {
+    return '女';
+  }
+
+  return trimmedValue;
+}
+
+function normalizeReplacementValueByTemplateOriginalValue(
+  slot: Pick<GenerationSlotSchemaItem, 'template_original_value'>,
+  value: string,
+) {
+  const templateOriginalValue = slot.template_original_value?.trim() ?? '';
+  let normalizedValue = value.trim();
+
+  if (!templateOriginalValue || !normalizedValue) {
+    return normalizedValue;
+  }
+
+  if (!hasPercentUnit(templateOriginalValue) && hasPercentUnit(normalizedValue)) {
+    normalizedValue = normalizedValue.replace(/\s*[%％]$/, '').trim();
+  }
+
+  if (
+    isNumericTemplateValue(templateOriginalValue) &&
+    !hasCurrencyUnit(templateOriginalValue) &&
+    hasCurrencyUnit(normalizedValue)
+  ) {
+    normalizedValue = stripCurrencyUnitForNumericReplacement(normalizedValue);
+  }
+
+  normalizedValue = normalizeEthnicityReplacement(
+    templateOriginalValue,
+    normalizedValue,
+  );
+  normalizedValue = normalizeGenderReplacement(
+    templateOriginalValue,
+    normalizedValue,
+  );
+
+  return normalizedValue;
+}
+
 function resolveExtractedValue(
   slot: Pick<
     GenerationSlotSchemaItem,
@@ -1634,7 +1722,10 @@ function resolveExtractedValue(
     ? normalizeDateValue(rawValue)
     : rawValue;
 
-  return normalizedValue;
+  return normalizeReplacementValueByTemplateOriginalValue(
+    slot,
+    normalizedValue,
+  );
 }
 
 function resolveEvidenceSnippet(

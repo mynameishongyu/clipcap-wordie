@@ -29,7 +29,6 @@ import {
   filterPdfPageImageAssetsForSlotFill,
   loadVisionPagesFromStoredAssets,
   normalizePdfPageImageAssets,
-  normalizeVisionPages,
   recalculateTaskSummary,
   updateSlotProgress,
 } from '@/src/lib/generation-task-items/runtime';
@@ -43,25 +42,38 @@ export const maxDuration = 300;
 
 const PROCESS_HARD_TIMEOUT_MS = maxDuration * 1000;
 
+/*
+// Reserved for the previous manual page-confirmation flow. The current
+// automated flow uses page-preparation's persisted used_for_slot_fill flags.
+function parseConfirmedPageNumber(value: unknown) {
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return Number.parseInt(value, 10);
+  }
+
+  return NaN;
+}
+
 function normalizeConfirmedPageNumbers(value: unknown) {
   if (!Array.isArray(value)) {
     return null;
   }
 
-  return Array.from(
-    new Set(
-      value
-        .map((pageNumber) =>
-          typeof pageNumber === 'number'
-            ? pageNumber
-            : typeof pageNumber === 'string'
-              ? Number.parseInt(pageNumber, 10)
-              : NaN,
-        )
-        .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0),
-    ),
-  ).sort((left, right) => left - right);
+  const parsedPageNumbers = value.map(parseConfirmedPageNumber);
+  const validPageNumbers = parsedPageNumbers.filter(
+    (pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0,
+  );
+  const uniquePageNumbers = Array.from(new Set(validPageNumbers));
+  const sortedPageNumbers = uniquePageNumbers.sort(
+    (left, right) => left - right,
+  );
+
+  return sortedPageNumbers;
 }
+*/
 
 function getMimeTypeFromStoragePath(storagePath: string) {
   const normalized = storagePath.toLowerCase();
@@ -395,7 +407,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
 async function appendVisionPageImageDebugTraces(params: {
   admin: ReturnType<typeof createSupabaseAdminClient>;
   taskItemId: string;
-  visionPages: ReturnType<typeof normalizeVisionPages>;
+  visionPages: PdfVisionPageInput[];
   pageImageAssets: ReturnType<typeof normalizePdfPageImageAssets>;
 }) {
   const assetsByUploadedPageNumber = new Map(
@@ -484,9 +496,13 @@ async function runGenerationTaskItemSlotFill(params: {
   const slotSchema = Array.isArray(params.item.llm_input?.slot_schema)
     ? params.item.llm_input.slot_schema
     : [];
+  /*
+  // Reserved for the previous precomputed vision-page flow. The current
+  // automated flow uses page-preparation's persisted ocr_image_assets.
   const precomputedVisionPages = normalizeVisionPages(
     params.item.llm_input?.vision_pages,
   );
+  */
   const allPageImageAssets = normalizePdfPageImageAssets(
     params.item.llm_input?.ocr_image_assets,
   );
@@ -501,7 +517,7 @@ async function runGenerationTaskItemSlotFill(params: {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
     }
 
-    if (precomputedVisionPages.length === 0 && pageImageAssets.length === 0) {
+    if (pageImageAssets.length === 0) {
       throw new Error(
         '当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。',
       );
@@ -513,7 +529,6 @@ async function runGenerationTaskItemSlotFill(params: {
       `[PDF Fill][SlotFillPreflight] ${JSON.stringify({
         document_name: params.item.source_pdf_name,
         slot_count: slotSchema.length,
-        precomputed_vision_page_count: precomputedVisionPages.length,
         confirmed_slot_fill_page_numbers:
           params.item.llm_input?.confirmed_slot_fill_page_numbers ?? null,
         used_page_image_assets: pageImageAssets.map((asset) => ({
@@ -534,7 +549,6 @@ async function runGenerationTaskItemSlotFill(params: {
     await appendMemoryTrace(admin, params.item.id, 'slot_fill_route_started', {
       source_pdf_name: params.item.source_pdf_name,
       page_image_asset_count: pageImageAssets.length,
-      precomputed_vision_page_count: precomputedVisionPages.length,
       slot_count: slotSchema.length,
     });
 
@@ -550,12 +564,10 @@ async function runGenerationTaskItemSlotFill(params: {
             await appendProcessingTrace(admin, params.item.id, message);
           },
         })
-      : precomputedVisionPages.length > 0
-        ? precomputedVisionPages
-        : await loadVisionPagesFromStoredAssets({
-            admin,
-            pageImageAssets,
-          });
+      : await loadVisionPagesFromStoredAssets({
+          admin,
+          pageImageAssets,
+        });
 
     await appendProcessingTrace(
       admin,
@@ -563,8 +575,7 @@ async function runGenerationTaskItemSlotFill(params: {
       `[Gemini Image Proxy][SlotFillSource] ${JSON.stringify({
         provider: llmConfig.provider,
         proxy_page_count: usesLlmImageProxy ? visionPages.length : 0,
-        fallback_to_supabase_download:
-          !usesLlmImageProxy && precomputedVisionPages.length === 0,
+        fallback_to_supabase_download: !usesLlmImageProxy,
         required_page_count: pageImageAssets.length,
       })}`,
     );
@@ -878,7 +889,7 @@ async function runGenerationTaskItemSlotFill(params: {
       error_message: getErrorMessage(error),
       source_pdf_name: params.item.source_pdf_name,
       slot_count: slotSchema.length,
-      vision_page_count: precomputedVisionPages.length,
+      vision_page_count: pageImageAssets.length,
       page_image_asset_count: pageImageAssets.length,
     });
     await appendProcessingTrace(
@@ -888,7 +899,7 @@ async function runGenerationTaskItemSlotFill(params: {
         buildErrorLogPayload(error, {
           sourcePdfName: params.item.source_pdf_name,
           slotCount: slotSchema.length,
-          visionPageCount: precomputedVisionPages.length,
+          visionPageCount: pageImageAssets.length,
           pageImageAssetCount: pageImageAssets.length,
           usedPageImageAssets: pageImageAssets.map((asset) => ({
             uploaded_page_number: asset.uploaded_page_number,
@@ -922,7 +933,7 @@ async function runGenerationTaskItemSlotFill(params: {
       payload: buildErrorLogPayload(error, {
         sourcePdfName: params.item.source_pdf_name,
         slotCount: slotSchema.length,
-        visionPageCount: precomputedVisionPages.length,
+        visionPageCount: pageImageAssets.length,
         pageImageAssetCount: pageImageAssets.length,
         usedPageImageAssets: pageImageAssets.map((asset) => ({
           uploaded_page_number: asset.uploaded_page_number,
@@ -1009,13 +1020,17 @@ export async function POST(
       );
     }
 
+    let nextItem = item;
+
+    /*
+    // Reserved for the previous manual page-confirmation flow. The current
+    // automated flow uses page-preparation's persisted used_for_slot_fill flags.
     const rawBody = await request.json().catch(() => null);
     const confirmedPageNumbers = normalizeConfirmedPageNumbers(
       rawBody && typeof rawBody === 'object'
         ? (rawBody as { confirmedPageNumbers?: unknown }).confirmedPageNumbers
         : null,
     );
-    let nextItem = item;
 
     if (confirmedPageNumbers) {
       if (confirmedPageNumbers.length === 0) {
@@ -1095,6 +1110,7 @@ export async function POST(
         })}`,
       );
     }
+    */
 
     after(async () => {
       await runGenerationTaskItemSlotFill({

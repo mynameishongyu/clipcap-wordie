@@ -4,7 +4,6 @@ import { extname, isAbsolute, resolve } from 'path';
 import { Agent, fetch as undiciFetch } from 'undici';
 import {
   appendProcessingTrace,
-  buildFallbackReviewPayload,
   createUnauthorizedResponse,
   generationTaskItemSelect,
   type PdfPageImageAsset,
@@ -43,6 +42,7 @@ import type {
   PdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
 import { buildErrorLogPayload, logEvent } from '@/src/lib/logging/log-event';
+import { getGeminiImageProxyUrlExpiresAt } from '@/src/lib/gemini/image-proxy';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/src/lib/supabase/server';
 
@@ -60,8 +60,19 @@ const PAGE_FILTER_DROP_EXAMPLE_MIME_TYPES = new Map([
   ['.jpeg', 'image/jpeg'],
   ['.webp', 'image/webp'],
 ]);
+/*
 const PAGE_FILTER_SYSTEM_PROMPT =
   '你是一个视觉 PDF 页面过滤助手。请根据内置过滤规则判断候选页面是否适合后续文档槽位回填。只返回紧凑 JSON，不要输出额外解释。';
+*/
+const PDF_FILTER_VISION_LLM_REASONING_EFFORT_ENV =
+  'PDF_FILTER_VISION_LLM_REASONING_EFFORT';
+const READABLE_PAGE_FILTER_SYSTEM_PROMPT_ZH =
+  '你是一个视觉 PDF 页面过滤助手。请根据页面图片判断候选页面是否适合后续文档槽位回填。只返回紧凑 JSON，不要输出额外解释。';
+const PAGE_FILTER_SYSTEM_PROMPT_EN =
+  'You are a visual PDF page filtering assistant. Decide whether each candidate page image should be used for downstream document slot filling. Return compact JSON only, with no extra explanation.';
+const PDF_FILL_LLM_OPTIONS = {
+  reasoningEffortEnvName: PDF_FILTER_VISION_LLM_REASONING_EFFORT_ENV,
+} as const;
 const llmFetchDispatcher = new Agent({
   connect: {
     timeout: 60000,
@@ -87,6 +98,7 @@ type PageFilterGeminiFileReference = {
   size_bytes?: number | null;
   display_name?: string | null;
   uploaded_at: string;
+  expires_at: string | null;
   request_label: string;
 };
 
@@ -157,6 +169,7 @@ function toPageFilterGeminiFileReference(
     size_bytes: file.sizeBytes,
     display_name: file.displayName,
     uploaded_at: new Date().toISOString(),
+    expires_at: getGeminiImageProxyUrlExpiresAt(file.uri),
     request_label: requestLabel,
   };
 }
@@ -419,6 +432,7 @@ async function loadPageFilterDropExamplesFromFolder(): Promise<
   );
 }
 
+/*
 function buildPageFilterPromptPayload(input: {
   documentName: string;
   pageNumbers: number[];
@@ -467,6 +481,102 @@ function buildPageFilterPromptPayload(input: {
   };
 }
 
+*/
+function buildReadablePageFilterPromptPayloadZh(input: {
+  documentName: string;
+  pageNumbers: number[];
+}) {
+  return {
+    task: '在文档槽位回填前，对扫描 PDF 页面图片进行页面过滤分类。',
+    document_name: input.documentName,
+    render_note: '候选页面图片由槽位回填流程中的 PDF 转图片流程生成。',
+    decision_options: {
+      keep: '保留该页面，用于后续视觉槽位回填。',
+      drop:
+        '丢弃该页面。适用情况包括：密集合同条款页、长篇说明页、空白表单、没有真实填写值的空白联系/尾页、手写抵押物/质押物/担保物清单页，或只有少量附带手写痕迹的合同正文页。不要把真实签署页、确认页、回执页、盖章页、签署日期页、身份证号页、责任人姓名页、借款人或银行确认文字页判为 drop。',
+    },
+    keep_guidance:
+      '保留可能包含身份证号、姓名、地址、电话、签名、印章、银行系统截图、还款账户/余额字段、金额、日期、购车协议数值、合同签署/确认/回执内容、机动车登记证书或机动车登记摘要信息的页面。',
+    vehicle_field_rule:
+      '车辆相关槽位优先保留官方机动车登记证书或登记摘要页面作为来源页。手写抵押物/质押物/担保物清单页即使包含车牌、金额或日期，也应判为 drop。',
+    dense_terms_sparse_handwriting_rule:
+      '如果页面主体是密集打印合同条款、说明或正文，手写内容只占很小区域，例如一个姓名、短下划线、勾选、简短备注或小日期，应判为 drop。除非该页面明显是签署页、确认页、回执页，或包含完整签名栏、正式印章、身份证号、金额、账户/余额、机动车登记证数据、银行系统数据等强可复用槽位值。',
+    signature_page_guardrail:
+      '如果候选页面具有合同签署页、确认页、回执页等标题或内容，并且包含真实手写签名、红色印章/盖章、签署日期、身份证号、借款人/担保人/银行代表字段或确认文字，必须判为 keep。即使视觉上像合同尾页，只要有这些已填写的签名或印章信息，也应判为 keep。不确定时使用 keep，不要使用 drop。',
+    page_numbers: input.pageNumbers,
+    output_schema: {
+      pages: [
+        {
+          page_number: 'page_numbers 中的一个页码',
+          decision: 'keep | drop | review，必须使用英文枚举值',
+          reason: '简短中文原因',
+          confidence: 0.9,
+        },
+      ],
+    },
+    strict_requirements: [
+      '只返回紧凑 JSON，不要输出 Markdown、解释文字或全文转录。',
+      '必须为每一个 page_number 返回一个结果。',
+      'decision 字段只能使用英文值：keep、drop 或 review。',
+      '不要丢弃身份证页、协议签署页、合同确认页、合同回执页、真实签名页、盖章页、签署日期页、身份证号页、系统截图页、还款账户/余额页、机动车登记证书或登记摘要页。',
+      '当页面是密集合同条款/正文页，并且手写内容只是很小的附带痕迹时，即使有手写姓名、下划线、勾选、简短备注或小日期，也应判为 drop。',
+      '手写抵押物/质押物/担保物清单页应判为 drop，即使其中包含手写车牌、金额或日期。',
+      '不要仅因为页面有表格线或手写痕迹就保留；只有当它是当前槽位回填流程可靠的来源页时才判为 keep。',
+      '如果页面同时具有 drop 特征和可用于回填的签名、印章、日期、身份证号、确认文字等强槽位值，应选择 decision="keep"。',
+      '不确定时使用 decision="keep"，不要使用 decision="drop"。',
+    ],
+  };
+}
+
+function buildPageFilterPromptPayloadEn(input: {
+  documentName: string;
+  pageNumbers: number[];
+}) {
+  return {
+    task: 'Classify scanned PDF page images before document slot filling.',
+    document_name: input.documentName,
+    render_note:
+      'Candidate page images are produced by the same PDF-to-image pipeline used for downstream slot filling.',
+    decision_options: {
+      keep: 'Keep this page for downstream visual slot filling.',
+      drop:
+        'Drop this page. Typical drop pages include dense contract terms, long explanatory pages, blank forms, empty contact or tail pages without real filled values, handwritten collateral/pledge/guarantee item lists, or dense contract text pages that only contain tiny incidental handwriting. Do not drop real signing pages, confirmation pages, receipt pages, stamped pages, signed-date pages, ID-number pages, responsible-person-name pages, borrower confirmation pages, or bank confirmation pages.',
+      review:
+        'Use review when the page is ambiguous. Review pages are kept for slot filling.',
+    },
+    keep_guidance:
+      'Keep pages that may contain ID numbers, names, addresses, phone numbers, signatures, stamps, bank system screenshots, repayment account or balance fields, amounts, dates, vehicle purchase agreement values, contract signing/confirmation/receipt content, motor vehicle registration certificates, or motor vehicle registration summary information.',
+    vehicle_field_rule:
+      'For vehicle-related slots, prefer official motor vehicle registration certificate or registration summary pages as source pages. Handwritten collateral/pledge/guarantee item list pages should be dropped even if they contain handwritten plate numbers, amounts, or dates.',
+    dense_terms_sparse_handwriting_rule:
+      'If the page is mainly dense printed contract terms, instructions, or body text, and handwriting occupies only a tiny area such as one name, a short underline, a check mark, a brief note, or a small date, classify it as drop. Exception: keep it if the page is clearly a signing page, confirmation page, receipt page, or contains a complete signature area, official stamp, ID number, amount, account/balance value, motor vehicle registration data, or bank system data.',
+    signature_page_guardrail:
+      'If the candidate page has signing-page, confirmation-page, or receipt-page content and contains a real handwritten signature, red stamp, signed date, ID number, borrower/guarantor/bank-representative field, or confirmation text, classify it as keep. Even if it visually looks like a contract tail page, keep it when these filled signing or stamp details are present. When uncertain, use keep instead of drop.',
+    page_numbers: input.pageNumbers,
+    output_schema: {
+      pages: [
+        {
+          page_number: 'one page number from page_numbers',
+          decision: 'keep | drop | review',
+          reason: 'short English reason',
+          confidence: 0.9,
+        },
+      ],
+    },
+    strict_requirements: [
+      'Return compact JSON only. Do not return Markdown, explanations, or full-page transcription.',
+      'Return exactly one result for every page_number.',
+      'The decision field must be one of these English values only: keep, drop, or review.',
+      'Do not drop ID pages, agreement signing pages, contract confirmation pages, contract receipt pages, real signature pages, stamped pages, signed-date pages, ID-number pages, system screenshot pages, repayment account/balance pages, motor vehicle registration certificate pages, or motor vehicle registration summary pages.',
+      'When a page is dense contract terms/body text and the handwriting is only a tiny incidental mark, classify it as drop even if it contains a handwritten name, underline, check mark, brief note, or small date.',
+      'Handwritten collateral/pledge/guarantee item list pages should be classified as drop even if they contain handwritten plate numbers, amounts, or dates.',
+      'Do not keep a page only because it has table lines or handwriting. Keep it only when it is a reliable source page for the current slot-filling workflow.',
+      'If a page has both drop-like features and strong reusable slot values such as signature, stamp, date, ID number, or confirmation text, choose decision="keep".',
+      'When uncertain, use decision="keep" instead of decision="drop".',
+    ],
+  };
+}
+
 async function classifyVisionPagesForSlotFill(params: {
   documentName: string;
   visionPages: PdfVisionPageInput[];
@@ -492,8 +602,14 @@ async function classifyVisionPagesForSlotFill(params: {
     number,
     PageFilterGeminiFileReference
   >();
-  const llmConfig = getLlmRuntimeConfig('vision');
-  const traceConfig = getLlmRuntimeTraceConfig('vision');
+  const llmConfig = getLlmRuntimeConfig(
+    'vision',
+    PDF_FILL_LLM_OPTIONS,
+  );
+  const traceConfig = getLlmRuntimeTraceConfig(
+    'vision',
+    PDF_FILL_LLM_OPTIONS,
+  );
 
   await params.onTrace?.({
     message: `[PDF Fill][PageFilterConfig] ${JSON.stringify({
@@ -518,7 +634,7 @@ async function classifyVisionPagesForSlotFill(params: {
     );
 
     try {
-      const pageFilterPromptPayload = buildPageFilterPromptPayload({
+      const pageFilterPromptPayload = buildPageFilterPromptPayloadEn({
         documentName: params.documentName,
         pageNumbers: batch.map((page) => page.page_number),
       });
@@ -601,7 +717,7 @@ async function classifyVisionPagesForSlotFill(params: {
             messages: [
               {
                 role: 'system',
-                content: PAGE_FILTER_SYSTEM_PROMPT,
+                content: PAGE_FILTER_SYSTEM_PROMPT_EN,
               },
               {
                 role: 'user',
@@ -618,7 +734,7 @@ async function classifyVisionPagesForSlotFill(params: {
           messages: [
             {
               role: 'system',
-              content: PAGE_FILTER_SYSTEM_PROMPT,
+              content: PAGE_FILTER_SYSTEM_PROMPT_EN,
             },
             {
               role: 'user',
@@ -639,6 +755,13 @@ async function classifyVisionPagesForSlotFill(params: {
       let usagePayload: unknown;
 
       if (llmConfig.provider === 'gemini') {
+        // await inspectGeminiImageProxyUrls({
+        //   pages: batch,
+        //   batchLabel: `${batchIndex + 1}/${batches.length}`,
+        //   signal: controller.signal,
+        //   onTrace: params.onTrace,
+        // });
+
         const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
@@ -899,7 +1022,10 @@ async function runGenerationTaskItemPagePreparation(params: {
       });
     } else if (pageImageAssets.length > 0) {
       try {
-        const llmConfig = getLlmRuntimeConfig('vision');
+        const llmConfig = getLlmRuntimeConfig(
+          'vision',
+          PDF_FILL_LLM_OPTIONS,
+        );
         const precomputedVisionPagesForFilter: PdfVisionPageInput[] =
           precomputedVisionPages.map((page) => ({
             page_number: page.page_number,
@@ -1057,7 +1183,10 @@ async function runGenerationTaskItemPagePreparation(params: {
           1000,
       ),
     );
-    const visionTraceConfig = getLlmRuntimeTraceConfig('vision');
+    const visionTraceConfig = getLlmRuntimeTraceConfig(
+      'vision',
+      PDF_FILL_LLM_OPTIONS,
+    );
     const pageFilterLlmUsage =
       pageFilterUsageAccumulator.calls.length > 0
         ? summarizeLlmUsage(pageFilterUsageAccumulator, {
@@ -1197,32 +1326,33 @@ async function runGenerationTaskItemPagePreparation(params: {
       },
     });
   } catch (error) {
-    const fallbackReviewPayload = buildFallbackReviewPayload(slotSchema);
+    const errorMessage = getErrorMessage(error);
+    const failedAt = new Date().toISOString();
 
     await admin
       .from('generation_task_items')
       .update({
-        status: 'review_pending',
-        error_message: null,
-        llm_output: fallbackReviewPayload,
+        status: 'failed',
+        error_message: errorMessage,
         slot_total_count: slotSchema.length,
         slot_completed_count: 0,
-        finished_at: new Date().toISOString(),
+        finished_at: failedAt,
+        updated_at: failedAt,
       })
       .eq('id', params.item.id);
 
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `新 PDF 页面图片准备失败，已转为人工核查：${getErrorMessage(error)}`,
+      `[PDF Fill][PagePreparation] Page preparation failed; slot fill cannot continue: ${errorMessage}`,
     );
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[PDF Fill][RawError][PagePreparation] ${getErrorMessage(error)}`,
+      `[PDF Fill][RawError][PagePreparation] ${errorMessage}`,
     );
     await appendMemoryTrace(admin, params.item.id, 'route_failed', {
-      error_message: getErrorMessage(error),
+      error_message: errorMessage,
       source_pdf_name: params.item.source_pdf_name,
       slot_count: slotSchema.length,
       vision_page_count: precomputedVisionPages.length,
@@ -1248,7 +1378,7 @@ async function runGenerationTaskItemPagePreparation(params: {
       actorEmail: params.actorEmail,
       level: 'error',
       eventType: 'generation_task_item_pdf_pages_ready_failed',
-      message: getErrorMessage(error),
+      message: errorMessage,
       route: '/api/generation-task-items/[taskItemId]/page-preparation',
       templateId: params.item.template_id,
       taskId: params.item.task_id,
