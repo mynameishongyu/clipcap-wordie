@@ -1,16 +1,25 @@
 import { NextResponse } from 'next/server';
+import { fetch as undiciFetch } from 'undici';
 import { getRawErrorMessage } from '@/src/lib/errors/raw-error';
 import {
   createGeminiImageProxyFile,
   getGeminiImageProxyUrlExpiresAt,
 } from '@/src/lib/gemini/image-proxy';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
+import {
+  cleanupGeminiUploadedFiles,
+  summarizeCleanupResults,
+  uploadGeminiFileStream,
+  type UploadedGeminiFile,
+} from '@/src/lib/llm/gemini-file-api';
+import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 import type {
   GenerationSlotSchemaItem,
   PdfPageInput,
   PdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
+import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
@@ -115,6 +124,8 @@ export const GENERATION_TASK_ITEM_RUNNING_STATUSES = [
 export const VERCEL_FUNCTION_TIMEOUT_SECONDS = 300;
 export const GENERATION_TASK_ITEM_TIMEOUT_GRACE_SECONDS = 5;
 const GEMINI_IMAGE_PROXY_REUSE_MIN_TTL_MS = 60 * 1000;
+const GEMINI_FILE_API_SOURCE = 'gemini_file_api';
+const SUPABASE_SIGNED_URL_SOURCE = 'supabase_signed_url';
 
 const GENERATION_TASK_ITEM_TIMEOUT_MESSAGE =
   '处理超时：Vercel 函数最长运行 300 秒，任务已停止，请减少页数或槽位后重试。';
@@ -282,6 +293,38 @@ function getImageAssetMimeType(asset: PdfPageImageAsset) {
   return getMimeTypeFromStoragePath(asset.storage_path);
 }
 
+function toGeminiVisionFileFromStoredReference(
+  file: NonNullable<PdfPageImageAsset['gemini_file']>,
+  fallbackSizeBytes: number | null | undefined,
+): GeminiVisionFile | null {
+  if (!file.uri || !file.name || !file.mime_type) {
+    return null;
+  }
+
+  return {
+    uri: file.uri,
+    name: file.name,
+    mimeType: file.mime_type,
+    sizeBytes: file.size_bytes ?? fallbackSizeBytes ?? 0,
+    displayName: file.display_name ?? null,
+  };
+}
+
+function toStoredGeminiFileReference(
+  file: GeminiVisionFile,
+): NonNullable<PdfPageImageAsset['gemini_file']> {
+  return {
+    uri: file.uri,
+    name: file.name ?? null,
+    mime_type: file.mimeType,
+    size_bytes: file.sizeBytes ?? null,
+    display_name: file.displayName ?? null,
+    uploaded_at: new Date().toISOString(),
+    expires_at: null,
+    request_label: GEMINI_FILE_API_SOURCE,
+  };
+}
+
 function getStoredGeminiFileExpiresAtMs(
   file: NonNullable<PdfPageImageAsset['gemini_file']>,
 ) {
@@ -443,6 +486,223 @@ export async function buildStoredPageImageProxyVisionPages(params: {
   return pages;
 }
 
+async function createStorageSignedUrl(params: {
+  admin: AdminClient;
+  storagePath: string;
+}) {
+  const { data, error } = await params.admin.storage
+    .from('generation-pdfs')
+    .createSignedUrl(
+      params.storagePath,
+      getSupabaseSignedUrlExpiresInSeconds(),
+    );
+
+  if (error || !data?.signedUrl) {
+    throw new Error(
+      `[StorageSignedUrlFailed] storage_path=${params.storagePath}, error=${
+        error?.message ?? 'missing signed URL'
+      }`,
+    );
+  }
+
+  return data.signedUrl;
+}
+
+export async function buildStoredPageImageSupabaseSignedUrlVisionPages(params: {
+  admin: AdminClient;
+  pageImageAssets: PdfPageImageAsset[];
+  requestLabel: string;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}): Promise<PdfVisionPageInput[]> {
+  if (params.pageImageAssets.length === 0) {
+    return [];
+  }
+
+  const startedAt = Date.now();
+
+  await params.onTrace?.({
+    message: `[Supabase Signed URL][StoragePipelineStart] ${JSON.stringify({
+      request_label: params.requestLabel,
+      image_count: params.pageImageAssets.length,
+      source: SUPABASE_SIGNED_URL_SOURCE,
+    })}`,
+  });
+
+  const pages: PdfVisionPageInput[] = [];
+
+  for (const [index, asset] of params.pageImageAssets.entries()) {
+    const mimeType = getImageAssetMimeType(asset);
+    const signedUrl = await createStorageSignedUrl({
+      admin: params.admin,
+      storagePath: asset.storage_path,
+    });
+
+    await params.onTrace?.({
+      message: `[Supabase Signed URL][StoragePipelinePageComplete] ${JSON.stringify(
+        {
+          request_label: params.requestLabel,
+          sequence_index: index + 1,
+          uploaded_page_number: asset.uploaded_page_number,
+          original_page_number: asset.original_page_number,
+          storage_path: asset.storage_path,
+          mime_type: mimeType,
+          image_size_bytes: asset.size ?? null,
+          source: SUPABASE_SIGNED_URL_SOURCE,
+        },
+      )}`,
+    });
+
+    pages.push({
+      page_number: asset.uploaded_page_number,
+      image_data_url: '',
+      image_url: signedUrl,
+      original_page_number: asset.original_page_number,
+    });
+  }
+
+  const durationMs = Date.now() - startedAt;
+
+  await params.onTrace?.({
+    message: `[Supabase Signed URL][StoragePipelineComplete] ${JSON.stringify({
+      request_label: params.requestLabel,
+      image_count: pages.length,
+      source: SUPABASE_SIGNED_URL_SOURCE,
+      duration_ms: durationMs,
+      duration_seconds: Number((durationMs / 1000).toFixed(2)),
+    })}`,
+  });
+
+  return pages;
+}
+
+async function uploadStoredPageImageAssetToGeminiFileApi(params: {
+  admin: AdminClient;
+  asset: PdfPageImageAsset;
+  config: LlmRuntimeConfig;
+  requestLabel: string;
+  signal?: AbortSignal;
+}) {
+  const mimeType = getImageAssetMimeType(params.asset);
+  const signedUrl = await createStorageSignedUrl({
+    admin: params.admin,
+    storagePath: params.asset.storage_path,
+  });
+  const upstream = await undiciFetch(signedUrl, {
+    method: 'GET',
+    signal: params.signal,
+  });
+
+  if (!upstream.ok || !upstream.body) {
+    throw new Error(
+      `[Gemini File API][StorageFetchFailed] storage_path=${params.asset.storage_path}, status=${upstream.status} ${upstream.statusText}`,
+    );
+  }
+
+  const contentLength = Number(upstream.headers.get('content-length'));
+  const sizeBytes =
+    typeof params.asset.size === 'number' && params.asset.size > 0
+      ? params.asset.size
+      : Number.isFinite(contentLength) && contentLength > 0
+        ? contentLength
+        : 0;
+
+  if (!sizeBytes) {
+    throw new Error(
+      `[Gemini File API][StorageFetchMissingSize] storage_path=${params.asset.storage_path}`,
+    );
+  }
+
+  return uploadGeminiFileStream({
+    config: params.config,
+    stream: upstream.body,
+    sizeBytes,
+    mimeType,
+    displayName: `${params.requestLabel}-page-${params.asset.uploaded_page_number}`,
+    signal: params.signal,
+  });
+}
+
+export async function buildStoredPageImageFileApiVisionPages(params: {
+  admin: AdminClient;
+  pageImageAssets: PdfPageImageAsset[];
+  config: LlmRuntimeConfig;
+  requestLabel: string;
+  signal?: AbortSignal;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}): Promise<PdfVisionPageInput[]> {
+  if (params.pageImageAssets.length === 0) {
+    return [];
+  }
+
+  const startedAt = Date.now();
+
+  await params.onTrace?.({
+    message: `[Gemini File API][StoragePipelineStart] ${JSON.stringify({
+      request_label: params.requestLabel,
+      image_count: params.pageImageAssets.length,
+      source: GEMINI_FILE_API_SOURCE,
+    })}`,
+  });
+
+  const pages: PdfVisionPageInput[] = [];
+
+  for (const [index, asset] of params.pageImageAssets.entries()) {
+    const storedGeminiFile = asset.gemini_file
+      ? toGeminiVisionFileFromStoredReference(asset.gemini_file, asset.size)
+      : null;
+    const reusedStoredFile = Boolean(storedGeminiFile);
+    const geminiFile =
+      storedGeminiFile ??
+      (await uploadStoredPageImageAssetToGeminiFileApi({
+        admin: params.admin,
+        asset,
+        config: params.config,
+        requestLabel: params.requestLabel,
+        signal: params.signal,
+      }));
+
+    await params.onTrace?.({
+      message: `[Gemini File API][StoragePipelinePageComplete] ${JSON.stringify(
+        {
+          request_label: params.requestLabel,
+          sequence_index: index + 1,
+          uploaded_page_number: asset.uploaded_page_number,
+          original_page_number: asset.original_page_number,
+          storage_path: asset.storage_path,
+          mime_type: geminiFile.mimeType,
+          image_size_bytes: geminiFile.sizeBytes ?? asset.size ?? null,
+          file_name: geminiFile.name ?? null,
+          file_uri: geminiFile.uri,
+          reused_stored_file: reusedStoredFile,
+          source: GEMINI_FILE_API_SOURCE,
+        },
+      )}`,
+    });
+
+    pages.push({
+      page_number: asset.uploaded_page_number,
+      image_data_url: '',
+      image_url: '',
+      original_page_number: asset.original_page_number,
+      gemini_file: geminiFile,
+    });
+  }
+
+  const durationMs = Date.now() - startedAt;
+
+  await params.onTrace?.({
+    message: `[Gemini File API][StoragePipelineComplete] ${JSON.stringify({
+      request_label: params.requestLabel,
+      image_count: pages.length,
+      source: GEMINI_FILE_API_SOURCE,
+      duration_ms: durationMs,
+      duration_seconds: Number((durationMs / 1000).toFixed(2)),
+    })}`,
+  });
+
+  return pages;
+}
+
 export function collectGeminiFilesFromVisionPages(pages: PdfVisionPageInput[]) {
   const filesByNameOrUri = new Map<string, GeminiVisionFile>();
 
@@ -457,6 +717,107 @@ export function collectGeminiFilesFromVisionPages(pages: PdfVisionPageInput[]) {
   });
 
   return Array.from(filesByNameOrUri.values());
+}
+
+export function collectGeminiFileApiFilesFromAssets(
+  assets: PdfPageImageAsset[],
+) {
+  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+
+  assets.forEach((asset) => {
+    const file = asset.gemini_file
+      ? toGeminiVisionFileFromStoredReference(asset.gemini_file, asset.size)
+      : null;
+
+    if (!file?.name) {
+      return;
+    }
+
+    filesByNameOrUri.set(file.name ?? file.uri, {
+      uri: file.uri,
+      name: file.name,
+      mimeType: file.mimeType,
+      sizeBytes: file.sizeBytes ?? asset.size ?? 0,
+      displayName: file.displayName ?? file.name ?? file.uri,
+    });
+  });
+
+  return Array.from(filesByNameOrUri.values());
+}
+
+export function collectGeminiFileApiFilesFromVisionPages(
+  pages: PdfVisionPageInput[],
+) {
+  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+
+  pages.forEach((page) => {
+    const file = page.gemini_file;
+
+    if (!file?.name) {
+      return;
+    }
+
+    filesByNameOrUri.set(file.name ?? file.uri, {
+      uri: file.uri,
+      name: file.name,
+      mimeType: file.mimeType,
+      sizeBytes: file.sizeBytes ?? 0,
+      displayName: file.displayName ?? file.name ?? file.uri,
+    });
+  });
+
+  return Array.from(filesByNameOrUri.values());
+}
+
+export async function cleanupGeminiFileApiFilesForTrace(params: {
+  config: LlmRuntimeConfig;
+  files: UploadedGeminiFile[];
+  requestLabel: string;
+  onTrace?: (entry: { message: string }) => Promise<void> | void;
+}) {
+  const filesByNameOrUri = new Map<string, UploadedGeminiFile>();
+
+  params.files.forEach((file) => {
+    if (!file.name) {
+      return;
+    }
+
+    filesByNameOrUri.set(file.name ?? file.uri, file);
+  });
+
+  const files = Array.from(filesByNameOrUri.values());
+
+  if (files.length === 0) {
+    return [];
+  }
+
+  await params.onTrace?.({
+    message: `[Gemini File API][CleanupStart] ${JSON.stringify({
+      request_label: params.requestLabel,
+      file_count: files.length,
+      files: files.map((file) => ({
+        name: file.name ?? null,
+        uri: file.uri,
+        mime_type: file.mimeType,
+        size_bytes: file.sizeBytes,
+      })),
+    })}`,
+  });
+
+  const cleanupResults = await cleanupGeminiUploadedFiles({
+    config: params.config,
+    files,
+  });
+  const summarizedResults = summarizeCleanupResults(cleanupResults);
+
+  await params.onTrace?.({
+    message: `[Gemini File API][CleanupComplete] ${JSON.stringify({
+      request_label: params.requestLabel,
+      cleanup_results: summarizedResults,
+    })}`,
+  });
+
+  return summarizedResults;
 }
 
 export async function recalculateTaskSummary(

@@ -15,7 +15,9 @@ import {
 export {
   cleanupGeminiUploadedFiles,
   getGeminiFilePipelineConcurrency,
+  summarizeCleanupResults,
   uploadGeminiFileBytes,
+  uploadGeminiFileStream,
   uploadGeminiFilesToFileApi,
 } from '@/src/lib/llm/gemini-file-api-upload';
 export type {
@@ -181,15 +183,13 @@ export async function callGeminiFileApiChatCompletion(params: {
   const callStartedAt = Date.now();
   let uploadedFiles: UploadedGeminiFile[] = [];
   let requestBody: GeminiNativeRequestBody | null = null;
-  let responsePayload:
-    | {
-        candidates?: Array<{
-          content?: {
-            parts?: Array<{ text?: string }>;
-          };
-        }>;
-      }
-    | null = null;
+  let responsePayload: {
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{ text?: string }>;
+      };
+    }>;
+  } | null = null;
   let cleanupResults: Awaited<ReturnType<typeof cleanupGeminiFiles>> = [];
   let uploadDurationMs = 0;
   let generateContentDurationMs: number | null = null;

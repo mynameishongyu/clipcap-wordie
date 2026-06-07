@@ -4,6 +4,10 @@ import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 export type GeminiFileApiDispatcher = UndiciFetchInit['dispatcher'];
+export type GeminiFileApiUploadStream =
+  | ReadableStream<Uint8Array>
+  | NodeJS.ReadableStream
+  | AsyncIterable<Uint8Array>;
 
 export interface UploadedGeminiFile {
   uri: string;
@@ -43,7 +47,10 @@ export async function runWithConcurrency<T, R>(
       while (nextIndex < items.length) {
         const currentIndex = nextIndex;
         nextIndex += 1;
-        results[currentIndex] = await worker(items[currentIndex]!, currentIndex);
+        results[currentIndex] = await worker(
+          items[currentIndex]!,
+          currentIndex,
+        );
       }
     }),
   );
@@ -52,7 +59,9 @@ export async function runWithConcurrency<T, R>(
 }
 
 export function resolveGeminiApiOrigins(config: LlmRuntimeConfig) {
-  const url = new URL(config.baseUrl || 'https://generativelanguage.googleapis.com');
+  const url = new URL(
+    config.baseUrl || 'https://generativelanguage.googleapis.com',
+  );
   const origin = url.origin;
 
   return {
@@ -69,7 +78,9 @@ function parseDataUrl(dataUrl: string) {
   const match = dataUrl.match(/^data:([^;,]+);base64,(.+)$/s);
 
   if (!match?.[1] || !match?.[2]) {
-    throw new Error('Gemini File API image input must be a data:image/... base64 URL.');
+    throw new Error(
+      'Gemini File API image input must be a data:image/... base64 URL.',
+    );
   }
 
   return {
@@ -168,6 +179,104 @@ async function uploadGeminiFileBuffer(params: {
   } satisfies UploadedGeminiFile;
 }
 
+export async function uploadGeminiFileStream(params: {
+  config: LlmRuntimeConfig;
+  stream: GeminiFileApiUploadStream;
+  sizeBytes: number;
+  mimeType: string;
+  displayName: string;
+  dispatcher?: GeminiFileApiDispatcher;
+  signal?: AbortSignal;
+}) {
+  const sizeBytes = Math.max(0, Math.round(params.sizeBytes));
+
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    throw new Error(
+      'Gemini File API stream upload requires a positive file size.',
+    );
+  }
+
+  const { uploadBaseUrl } = resolveGeminiApiOrigins(params.config);
+  const startUpload = await undiciFetch(`${uploadBaseUrl}/files`, {
+    method: 'POST',
+    headers: {
+      'x-goog-api-key': params.config.apiKey,
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': String(sizeBytes),
+      'X-Goog-Upload-Header-Content-Type': params.mimeType,
+      'Content-Type': 'application/json',
+    },
+    dispatcher: params.dispatcher,
+    signal: params.signal,
+    body: JSON.stringify({
+      file: {
+        display_name: params.displayName,
+      },
+    }),
+  } as UndiciFetchInit);
+
+  if (!startUpload.ok) {
+    const details = await startUpload.text();
+    throw new Error(
+      `Gemini File API upload start failed (${startUpload.status}): ${details}`,
+    );
+  }
+
+  const uploadUrl =
+    startUpload.headers.get('x-goog-upload-url') ??
+    startUpload.headers.get('X-Goog-Upload-URL');
+
+  if (!uploadUrl) {
+    throw new Error('Gemini File API upload URL is missing.');
+  }
+
+  const finishUpload = await undiciFetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Length': String(sizeBytes),
+      'X-Goog-Upload-Offset': '0',
+      'X-Goog-Upload-Command': 'upload, finalize',
+    },
+    dispatcher: params.dispatcher,
+    signal: params.signal,
+    body: params.stream as UndiciFetchInit['body'],
+    duplex: 'half',
+  } as UndiciFetchInit & { duplex: 'half' });
+
+  if (!finishUpload.ok) {
+    const details = await finishUpload.text();
+    throw new Error(
+      `Gemini File API upload finalize failed (${finishUpload.status}): ${details}`,
+    );
+  }
+
+  const payload = (await finishUpload.json()) as {
+    file?: {
+      uri?: string;
+      name?: string;
+      mimeType?: string;
+      mime_type?: string;
+      sizeBytes?: string | number;
+      size_bytes?: string | number;
+    };
+  };
+  const file = payload.file;
+  const uri = file?.uri;
+
+  if (!uri) {
+    throw new Error('Gemini File API response did not include file.uri.');
+  }
+
+  return {
+    uri,
+    name: file.name,
+    mimeType: file.mimeType ?? file.mime_type ?? params.mimeType,
+    sizeBytes: Number(file.sizeBytes ?? file.size_bytes ?? sizeBytes),
+    displayName: params.displayName,
+  } satisfies UploadedGeminiFile;
+}
+
 export async function uploadGeminiFileBytes(params: {
   config: LlmRuntimeConfig;
   buffer: Buffer;
@@ -213,16 +322,13 @@ async function deleteGeminiFile(params: {
   }
 
   const { generateBaseUrl } = resolveGeminiApiOrigins(params.config);
-  const upstream = await undiciFetch(
-    `${generateBaseUrl}/${params.file.name}`,
-    {
-      method: 'DELETE',
-      headers: {
-        'x-goog-api-key': params.config.apiKey,
-      },
-      dispatcher: params.dispatcher,
-    } as UndiciFetchInit,
-  );
+  const upstream = await undiciFetch(`${generateBaseUrl}/${params.file.name}`, {
+    method: 'DELETE',
+    headers: {
+      'x-goog-api-key': params.config.apiKey,
+    },
+    dispatcher: params.dispatcher,
+  } as UndiciFetchInit);
 
   if (!upstream.ok) {
     const details = await upstream.text();

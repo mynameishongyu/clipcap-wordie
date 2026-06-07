@@ -5,7 +5,10 @@ import {
   logEvent,
 } from '@/src/lib/logging/log-event';
 import {
-  buildStoredPageImageProxyVisionPages,
+  buildStoredPageImageFileApiVisionPages,
+  buildStoredPageImageSupabaseSignedUrlVisionPages,
+  cleanupGeminiFileApiFilesForTrace,
+  collectGeminiFileApiFilesFromVisionPages,
   loadVisionPagesFromStoredAssets,
   type PdfPageImageAsset,
 } from '@/src/lib/generation-task-items/runtime';
@@ -126,9 +129,7 @@ function normalizePdfVisionPageAssets(value: unknown) {
 
   for (const item of value) {
     const record =
-      item && typeof item === 'object'
-        ? (item as Record<string, unknown>)
-        : {};
+      item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
     const uploadedPageNumber = Number(record.uploaded_page_number);
     const originalPageNumber = Number(record.original_page_number);
     const storagePath = String(record.storage_path ?? '').trim();
@@ -146,12 +147,51 @@ function normalizePdfVisionPageAssets(value: unknown) {
     const contentType = String(record.content_type ?? '').trim();
     const size = Number(record.size);
     const rotationApplied = Number(record.rotation_applied);
+    const rawGeminiFile =
+      record.gemini_file && typeof record.gemini_file === 'object'
+        ? (record.gemini_file as Record<string, unknown>)
+        : null;
+    const geminiFileUri = String(rawGeminiFile?.uri ?? '').trim();
+    const geminiFileMimeType = String(
+      rawGeminiFile?.mime_type ?? rawGeminiFile?.mimeType ?? '',
+    ).trim();
+    const geminiFileSizeBytes = Number(
+      rawGeminiFile?.size_bytes ?? rawGeminiFile?.sizeBytes ?? size,
+    );
     const asset: PdfPageImageAsset = {
       uploaded_page_number: uploadedPageNumber,
       original_page_number: originalPageNumber,
       storage_path: storagePath,
       ...(contentType ? { content_type: contentType } : {}),
       ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+      ...(geminiFileUri && geminiFileMimeType
+        ? {
+            gemini_file: {
+              uri: geminiFileUri,
+              name:
+                typeof rawGeminiFile?.name === 'string'
+                  ? rawGeminiFile.name
+                  : null,
+              mime_type: geminiFileMimeType,
+              size_bytes:
+                Number.isFinite(geminiFileSizeBytes) && geminiFileSizeBytes >= 0
+                  ? geminiFileSizeBytes
+                  : null,
+              display_name:
+                typeof rawGeminiFile?.display_name === 'string'
+                  ? rawGeminiFile.display_name
+                  : typeof rawGeminiFile?.displayName === 'string'
+                    ? rawGeminiFile.displayName
+                    : null,
+              uploaded_at:
+                typeof rawGeminiFile?.uploaded_at === 'string'
+                  ? rawGeminiFile.uploaded_at
+                  : null,
+              expires_at: null,
+              request_label: 'gemini_file_api',
+            },
+          }
+        : {}),
       ...(Number.isFinite(rotationApplied)
         ? {
             rotation_applied:
@@ -179,8 +219,33 @@ async function resolvePdfVisionPages(input: {
   if (storedAssets.length > 0) {
     const llmConfig = getLlmRuntimeConfig('vision');
 
-    if (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao') {
+    if (llmConfig.provider === 'gemini') {
+      return buildStoredPageImageFileApiVisionPages({
+        admin: input.admin,
+        pageImageAssets: storedAssets,
+        config: llmConfig,
+        requestLabel: `template pdf evidence ${input.taskId} ${
+          input.pdfFileName ?? 'unknown-pdf'
+        }`,
+        onTrace: input.onTrace,
+      });
+    }
+
+    if (llmConfig.provider === 'doubao') {
+      /*
+      // Previous Doubao path used the Vercel image proxy here. Keep the proxy
+      // helper available for rollback/comparison; Doubao now uses Supabase
+      // signed URLs directly.
       return buildStoredPageImageProxyVisionPages({
+        pageImageAssets: storedAssets,
+        requestLabel: `template pdf evidence ${input.taskId} ${
+          input.pdfFileName ?? 'unknown-pdf'
+        }`,
+        onTrace: input.onTrace,
+      });
+      */
+      return buildStoredPageImageSupabaseSignedUrlVisionPages({
+        admin: input.admin,
         pageImageAssets: storedAssets,
         requestLabel: `template pdf evidence ${input.taskId} ${
           input.pdfFileName ?? 'unknown-pdf'
@@ -427,59 +492,78 @@ export async function POST(
           pdf_page_image_count: pdfVisionPages.length,
         },
       );
-      const pdfMappingStartedAt = Date.now();
-      await appendMemoryTrace(
-        routeAdmin,
-        task.id,
-        'slot_pdf_page_mapping_start',
-        {
-          pdf_page_image_count: pdfVisionPages.length,
-        },
-      );
+      try {
+        const pdfMappingStartedAt = Date.now();
+        await appendMemoryTrace(
+          routeAdmin,
+          task.id,
+          'slot_pdf_page_mapping_start',
+          {
+            pdf_page_image_count: pdfVisionPages.length,
+          },
+        );
 
-      pdfEvidence =
-        task.source_pdf_name && pdfVisionPages.length > 0
-          ? await buildTemplatePdfEvidence({
-              pdfFileName: task.source_pdf_name,
-              extractionResult: extractionResultWithSlotKeys,
-              visionPages: pdfVisionPages,
-              onTrace: async (entry) => {
-                await appendProcessingTrace(routeAdmin, task.id, entry.message);
-              },
-              usageAccumulator: pdfEvidenceUsageAccumulator,
-            })
-          : null;
-      const pdfMappingFinishedAt = Date.now();
-      await appendMemoryTrace(
-        routeAdmin,
-        task.id,
-        'slot_pdf_page_mapping_done',
-        {
-          pdf_page_image_count: pdfVisionPages.length,
-          matched_slot_count: pdfEvidence?.matches.length ?? 0,
-        },
-      );
-      await appendProcessingTrace(
-        routeAdmin,
-        task.id,
-        `[Template Extract][Timing] ${JSON.stringify({
-          stage: 'slot_pdf_page_mapping',
-          document_name: task.source_docx_name,
-          pdf_file_name: task.source_pdf_name ?? null,
-          started_at: new Date(pdfMappingStartedAt).toISOString(),
-          finished_at: new Date(pdfMappingFinishedAt).toISOString(),
-          duration_ms: pdfMappingFinishedAt - pdfMappingStartedAt,
-          duration_text: formatDurationMs(
-            pdfMappingFinishedAt - pdfMappingStartedAt,
-          ),
-          pdf_page_image_count: pdfVisionPages.length,
-          slot_count: result.extraction_result.reduce(
-            (sum, paragraph) => sum + paragraph.items.length,
-            0,
-          ),
-          matched_slot_count: pdfEvidence?.matches.length ?? 0,
-        })}`,
-      );
+        pdfEvidence =
+          task.source_pdf_name && pdfVisionPages.length > 0
+            ? await buildTemplatePdfEvidence({
+                pdfFileName: task.source_pdf_name,
+                extractionResult: extractionResultWithSlotKeys,
+                visionPages: pdfVisionPages,
+                onTrace: async (entry) => {
+                  await appendProcessingTrace(
+                    routeAdmin,
+                    task.id,
+                    entry.message,
+                  );
+                },
+                usageAccumulator: pdfEvidenceUsageAccumulator,
+              })
+            : null;
+        const pdfMappingFinishedAt = Date.now();
+        await appendMemoryTrace(
+          routeAdmin,
+          task.id,
+          'slot_pdf_page_mapping_done',
+          {
+            pdf_page_image_count: pdfVisionPages.length,
+            matched_slot_count: pdfEvidence?.matches.length ?? 0,
+          },
+        );
+        await appendProcessingTrace(
+          routeAdmin,
+          task.id,
+          `[Template Extract][Timing] ${JSON.stringify({
+            stage: 'slot_pdf_page_mapping',
+            document_name: task.source_docx_name,
+            pdf_file_name: task.source_pdf_name ?? null,
+            started_at: new Date(pdfMappingStartedAt).toISOString(),
+            finished_at: new Date(pdfMappingFinishedAt).toISOString(),
+            duration_ms: pdfMappingFinishedAt - pdfMappingStartedAt,
+            duration_text: formatDurationMs(
+              pdfMappingFinishedAt - pdfMappingStartedAt,
+            ),
+            pdf_page_image_count: pdfVisionPages.length,
+            slot_count: result.extraction_result.reduce(
+              (sum, paragraph) => sum + paragraph.items.length,
+              0,
+            ),
+            matched_slot_count: pdfEvidence?.matches.length ?? 0,
+          })}`,
+        );
+      } finally {
+        const cleanupConfig = getLlmRuntimeConfig('vision');
+
+        if (cleanupConfig.provider === 'gemini') {
+          await cleanupGeminiFileApiFilesForTrace({
+            config: cleanupConfig,
+            files: collectGeminiFileApiFilesFromVisionPages(pdfVisionPages),
+            requestLabel: `template pdf evidence ${task.id}`,
+            onTrace: async (entry) => {
+              await appendProcessingTrace(routeAdmin, task.id, entry.message);
+            },
+          });
+        }
+      }
     }
 
     const partialCompletionMessage =

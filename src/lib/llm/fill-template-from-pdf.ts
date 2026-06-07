@@ -1451,86 +1451,123 @@ async function extractTextFromVisionPages(input: {
   throw new Error('Vision model processing failed after multiple attempts.');
 }
 
+type PdfFillResult = z.infer<typeof generationPdfFillResultSchema>;
+type PdfFillExtractedItem = z.infer<typeof generationExtractedItemSchema>;
+
+const LATEST_EVIDENCE_SLOT_KEYWORDS = [
+  '\u65e5\u671f',
+  '\u91d1\u989d',
+  '\u622a\u6b62',
+  '\u622a\u81f3',
+  '\u672c\u606f',
+  '\u672c\u91d1',
+  '\u5229\u606f',
+  '\u8fdd\u7ea6\u91d1',
+  '\u624b\u7eed\u8d39',
+  '\u8d39\u7528',
+  '\u6b20\u6b3e',
+  '\u903e\u671f',
+  '\u8fd8\u6b3e',
+];
+
+function getSlotSearchText(slot: GenerationSlotSchemaItem) {
+  return `${slot.field_category} ${slot.meaning_to_applicant}`;
+}
+
+function shouldPreferLatestEvidence(slot: GenerationSlotSchemaItem) {
+  const searchText = getSlotSearchText(slot);
+
+  return LATEST_EVIDENCE_SLOT_KEYWORDS.some((keyword) =>
+    searchText.includes(keyword),
+  );
+}
+
+function getEvidenceMaxPageNumber(item: PdfFillExtractedItem) {
+  return item.evidence_page_numbers.length > 0
+    ? Math.max(...item.evidence_page_numbers)
+    : 0;
+}
+
+function getEvidenceQualityScore(item: PdfFillExtractedItem) {
+  return (
+    (item.evidence?.includes(item.original_value) ? 1 : 0) +
+    (item.evidence?.trim() ? 1 : 0)
+  );
+}
+
+function compareSlotMatches(params: {
+  left: PdfFillExtractedItem;
+  right: PdfFillExtractedItem;
+  preferLatestEvidence: boolean;
+}) {
+  const leftMaxPage = getEvidenceMaxPageNumber(params.left);
+  const rightMaxPage = getEvidenceMaxPageNumber(params.right);
+
+  if (params.preferLatestEvidence && rightMaxPage !== leftMaxPage) {
+    return rightMaxPage - leftMaxPage;
+  }
+
+  if (!params.preferLatestEvidence && leftMaxPage !== rightMaxPage) {
+    return leftMaxPage - rightMaxPage;
+  }
+
+  return (
+    getEvidenceQualityScore(params.right) - getEvidenceQualityScore(params.left)
+  );
+}
+
+function findSlotMatches(params: {
+  slot: GenerationSlotSchemaItem;
+  results: PdfFillResult[];
+}) {
+  return params.results.flatMap((result) =>
+    result.extracted_items.filter(
+      (item) => item.slot_key === params.slot.slot_key,
+    ),
+  );
+}
+
+function selectPreferredSlotMatch(params: {
+  slot: GenerationSlotSchemaItem;
+  matches: PdfFillExtractedItem[];
+}) {
+  const preferLatestEvidence = shouldPreferLatestEvidence(params.slot);
+  const filledMatches = params.matches.filter((item) =>
+    item.original_value.trim(),
+  );
+
+  return (
+    filledMatches.sort((left, right) =>
+      compareSlotMatches({
+        left,
+        right,
+        preferLatestEvidence,
+      }),
+    )[0] ?? null
+  );
+}
+
+function mergeEvidencePageNumbers(matches: PdfFillExtractedItem[]) {
+  const pageNumbers = matches.flatMap(
+    (item) => item.evidence_page_numbers ?? [],
+  );
+  const uniquePageNumbers = Array.from(new Set(pageNumbers));
+
+  return uniquePageNumbers.sort((left, right) => left - right);
+}
+
 function mergeSlotResults(
   slots: GenerationSlotSchemaItem[],
-  results: z.infer<typeof generationPdfFillResultSchema>[],
+  results: PdfFillResult[],
 ) {
   return {
     document_summary: '',
     extracted_items: slots.map((slot) => {
-      const slotMatches = results.flatMap((result) =>
-        result.extracted_items.filter(
-          (item) => item.slot_key === slot.slot_key,
-        ),
-      );
-      const preferLatestEvidence =
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '日期',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '金额',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '截止',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '截至',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '本息',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '本金',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '利息',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '违约金',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '手续费',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '费用',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '欠款',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes(
-          '逾期',
-        ) ||
-        `${slot.field_category} ${slot.meaning_to_applicant}`.includes('还款');
-      const preferredMatch =
-        slotMatches
-          .filter((item) => item.original_value.trim())
-          .sort((left, right) => {
-            const leftMaxPage =
-              left.evidence_page_numbers.length > 0
-                ? Math.max(...left.evidence_page_numbers)
-                : 0;
-            const rightMaxPage =
-              right.evidence_page_numbers.length > 0
-                ? Math.max(...right.evidence_page_numbers)
-                : 0;
-
-            if (preferLatestEvidence && rightMaxPage !== leftMaxPage) {
-              return rightMaxPage - leftMaxPage;
-            }
-
-            if (!preferLatestEvidence && leftMaxPage !== rightMaxPage) {
-              return leftMaxPage - rightMaxPage;
-            }
-
-            const leftEvidenceScore =
-              (left.evidence?.includes(left.original_value) ? 1 : 0) +
-              (left.evidence?.trim() ? 1 : 0);
-            const rightEvidenceScore =
-              (right.evidence?.includes(right.original_value) ? 1 : 0) +
-              (right.evidence?.trim() ? 1 : 0);
-
-            return rightEvidenceScore - leftEvidenceScore;
-          })[0] ?? null;
+      const slotMatches = findSlotMatches({ slot, results });
+      const preferredMatch = selectPreferredSlotMatch({
+        slot,
+        matches: slotMatches,
+      });
 
       return {
         slot_key: slot.slot_key,
@@ -1538,17 +1575,7 @@ function mergeSlotResults(
         meaning_to_applicant: slot.meaning_to_applicant,
         original_value: preferredMatch?.original_value ?? '',
         evidence: preferredMatch?.evidence ?? '',
-        evidence_page_numbers: Array.from(
-          new Set(
-            results
-              .flatMap((result) =>
-                result.extracted_items.filter(
-                  (item) => item.slot_key === slot.slot_key,
-                ),
-              )
-              .flatMap((item) => item.evidence_page_numbers ?? []),
-          ),
-        ).sort((left, right) => left - right),
+        evidence_page_numbers: mergeEvidencePageNumbers(slotMatches),
         notes: preferredMatch?.notes ?? '',
         confidence: preferredMatch?.confidence ?? null,
         matched_reference_label:
@@ -1677,7 +1704,10 @@ function normalizeReplacementValueByTemplateOriginalValue(
     return normalizedValue;
   }
 
-  if (!hasPercentUnit(templateOriginalValue) && hasPercentUnit(normalizedValue)) {
+  if (
+    !hasPercentUnit(templateOriginalValue) &&
+    hasPercentUnit(normalizedValue)
+  ) {
     normalizedValue = normalizedValue.replace(/\s*[%％]$/, '').trim();
   }
 
@@ -1704,9 +1734,7 @@ function normalizeReplacementValueByTemplateOriginalValue(
 function resolveExtractedValue(
   slot: Pick<
     GenerationSlotSchemaItem,
-    | 'field_category'
-    | 'meaning_to_applicant'
-    | 'template_original_value'
+    'field_category' | 'meaning_to_applicant' | 'template_original_value'
   >,
   result: ModelResultCandidate | null,
   firstMatch?: ModelMatch,
@@ -2756,7 +2784,7 @@ async function alignReferencePagesToVisionPages(input: {
       let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
-        requestMode = 'gemini_native_generate_content_proxy_url';
+        requestMode = 'gemini_native_generate_content_file_api';
         const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
@@ -2795,8 +2823,8 @@ async function alignReferencePagesToVisionPages(input: {
               model: llmConfig.model,
               provider: visionTraceConfig.provider,
               request_label: 'reference page alignment',
-            request_body: summarizeChatCompletionBodyForTrace(requestBody),
-            image_url_note:
+              request_body: summarizeChatCompletionBodyForTrace(requestBody),
+              image_url_note:
                 'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request keeps the original image URL.',
             },
           )}`,
@@ -3308,7 +3336,7 @@ async function extractSlotsFromVisionPageBatch(input: {
       let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
-        requestMode = 'gemini_native_generate_content_proxy_url';
+        requestMode = 'gemini_native_generate_content_file_api';
         const geminiResult = await callGeminiNativeChatCompletion({
           config: llmConfig,
           body: requestBody,
@@ -3354,8 +3382,8 @@ async function extractSlotsFromVisionPageBatch(input: {
               model: llmConfig.model,
               provider: visionTraceConfig.provider,
               request_label: requestLabel,
-            request_body: summarizeChatCompletionBodyForTrace(requestBody),
-            image_url_note:
+              request_body: summarizeChatCompletionBodyForTrace(requestBody),
+              image_url_note:
                 'image_url.url is summarized for browser console and storage logs; the actual VISION_LLM request keeps the original image URL.',
             },
           )}`,

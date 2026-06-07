@@ -3,6 +3,12 @@
 import { useMutation } from '@tanstack/react-query';
 import type { CreateGenerationTaskResponse } from '@/src/app/api/types/generation-task';
 import type { PdfVisionPageInput } from '@/src/lib/pdf/client-pdf';
+import {
+  cleanupBrowserGeminiFiles,
+  getBrowserGeminiFileUploadConfig,
+  uploadBrowserImageToGeminiFileApi,
+  type ClientGeminiFileReference,
+} from '@/src/lib/gemini/client-file-upload';
 import { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
@@ -23,16 +29,15 @@ export interface CreateGenerationTaskInput {
   templateId: string;
   templateName: string;
   files: CreateGenerationTaskFileInput[];
-  onStageChange?: (stage: {
-    title: string;
-    description: string;
-  }) => void;
+  onStageChange?: (stage: { title: string; description: string }) => void;
 }
 
 function sanitizeStorageFileName(fileName: string) {
   const lastDotIndex = fileName.lastIndexOf('.');
-  const extension = lastDotIndex >= 0 ? fileName.slice(lastDotIndex).toLowerCase() : '';
-  const baseName = lastDotIndex >= 0 ? fileName.slice(0, lastDotIndex) : fileName;
+  const extension =
+    lastDotIndex >= 0 ? fileName.slice(lastDotIndex).toLowerCase() : '';
+  const baseName =
+    lastDotIndex >= 0 ? fileName.slice(0, lastDotIndex) : fileName;
 
   const normalizedBaseName = baseName
     .normalize('NFKD')
@@ -188,9 +193,7 @@ async function reportClientError(input: {
   }
 }
 
-async function parseApiPayload<T>(
-  response: Response,
-): Promise<{
+async function parseApiPayload<T>(response: Response): Promise<{
   payload: T | null;
   message: string | null;
 }> {
@@ -253,74 +256,126 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             storage_path: string;
             content_type?: string;
             size?: number;
+            gemini_file?: ClientGeminiFileReference | null;
             crop?: PdfVisionPageInput['crop'];
             rotation_applied?: PdfVisionPageInput['rotationApplied'];
           }
         | undefined
       > = Array.from({ length: totalPageImageCount });
+      const geminiUploadConfig = await getBrowserGeminiFileUploadConfig().catch(
+        (error) => {
+          console.warn('[Gemini File API][BatchGenerateConfigFailed]', {
+            fileName: item.file.name,
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+          });
+
+          return null;
+        },
+      );
+      const geminiUploadEnabled = geminiUploadConfig?.enabled === true;
+      const pageUploadConcurrency = geminiUploadEnabled
+        ? geminiUploadConfig.concurrency
+        : uploadConcurrency;
+      const uploadedGeminiFilesForCleanup: ClientGeminiFileReference[] = [];
 
       input.onStageChange?.({
         title: '正在上传 PDF 页面图片',
-        description:
-          `${item.file.name}：准备并行上传 ${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
+        description: `${item.file.name}：准备并行上传 ${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
+      });
+
+      console.info('[Gemini File API][BatchGenerateUploadConfig]', {
+        fileName: item.file.name,
+        enabled: geminiUploadEnabled,
+        provider: geminiUploadConfig?.provider ?? null,
+        model: geminiUploadConfig?.model ?? null,
+        pageUploadConcurrency,
       });
 
       const uploadStartedAt = Date.now();
-      await runWithConcurrency(
-        item.pageVisionPages,
-        uploadConcurrency,
-        async (visionPage, index) => {
-          const imageBlob = await getPdfVisionPageBlob(visionPage);
-          const uploadedPageNumber =
-            item.uploadedPageNumberMapping[index]?.uploaded_page_number ?? index + 1;
-          const originalPageNumber =
-            item.uploadedPageNumberMapping[index]?.original_page_number ?? visionPage.pageNumber;
-          const extension = getPdfVisionPageImageExtension(visionPage, imageBlob);
-          const pageImageStoragePath =
-            `${pdfPageFolderPath}/page-${uploadedPageNumber}.${extension}`;
-          const { error: pageImageUploadError } = await supabase.storage
-            .from('generation-pdfs')
-            .upload(pageImageStoragePath, imageBlob, {
-              contentType: imageBlob.type || 'application/octet-stream',
-              upsert: false,
+      try {
+        await runWithConcurrency(
+          item.pageVisionPages,
+          pageUploadConcurrency,
+          async (visionPage, index) => {
+            const imageBlob = await getPdfVisionPageBlob(visionPage);
+            const uploadedPageNumber =
+              item.uploadedPageNumberMapping[index]?.uploaded_page_number ??
+              index + 1;
+            const originalPageNumber =
+              item.uploadedPageNumberMapping[index]?.original_page_number ??
+              visionPage.pageNumber;
+            const extension = getPdfVisionPageImageExtension(
+              visionPage,
+              imageBlob,
+            );
+            const pageImageStoragePath = `${pdfPageFolderPath}/page-${uploadedPageNumber}.${extension}`;
+            const displayName = `generation-${pdfAssetId}-page-${uploadedPageNumber}`;
+            const supabaseUploadPromise = supabase.storage
+              .from('generation-pdfs')
+              .upload(pageImageStoragePath, imageBlob, {
+                contentType: imageBlob.type || 'application/octet-stream',
+                upsert: false,
+              });
+            const geminiUploadPromise = geminiUploadEnabled
+              ? uploadBrowserImageToGeminiFileApi({
+                  blob: imageBlob,
+                  displayName,
+                  fileName: item.file.name,
+                  pageNumber: uploadedPageNumber,
+                  originalPageNumber,
+                  storagePath: pageImageStoragePath,
+                })
+              : Promise.resolve(null);
+            const [{ error: pageImageUploadError }, geminiFile] =
+              await Promise.all([supabaseUploadPromise, geminiUploadPromise]);
+
+            if (geminiFile) {
+              uploadedGeminiFilesForCleanup.push(geminiFile);
+            }
+
+            if (pageImageUploadError) {
+              console.error('[Generation Task][PDF Page Image Upload] Failed', {
+                fileName: item.file.name,
+                uploadedPageNumber,
+                originalPageNumber,
+                storagePath: pageImageStoragePath,
+                contentType: imageBlob.type || 'application/octet-stream',
+                size: imageBlob.size,
+                error: {
+                  name: pageImageUploadError.name,
+                  message: pageImageUploadError.message,
+                },
+              });
+              throw new Error(
+                `上传 PDF 页面图片到存储失败：${pageImageUploadError.message}`,
+              );
+            }
+
+            uploadedPageImageCount += 1;
+            input.onStageChange?.({
+              title: '正在上传 PDF 页面图片',
+              description: `${item.file.name}：已上传 ${uploadedPageImageCount}/${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
             });
 
-          if (pageImageUploadError) {
-            console.error('[Generation Task][PDF Page Image Upload] Failed', {
-              fileName: item.file.name,
-              uploadedPageNumber,
-              originalPageNumber,
-              storagePath: pageImageStoragePath,
-              contentType: imageBlob.type || 'application/octet-stream',
+            pageImageAssets[index] = {
+              uploaded_page_number: uploadedPageNumber,
+              original_page_number: originalPageNumber,
+              storage_path: pageImageStoragePath,
+              content_type: imageBlob.type || 'application/octet-stream',
               size: imageBlob.size,
-              error: {
-                name: pageImageUploadError.name,
-                message: pageImageUploadError.message,
-              },
-            });
-            throw new Error(`上传 PDF 页面图片到存储失败：${pageImageUploadError.message}`);
-          }
-
-          uploadedPageImageCount += 1;
-          input.onStageChange?.({
-            title: '正在上传 PDF 页面图片',
-            description:
-              `${item.file.name}：已上传 ${uploadedPageImageCount}/${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
-          });
-
-          pageImageAssets[index] = {
-            uploaded_page_number: uploadedPageNumber,
-            original_page_number: originalPageNumber,
-            storage_path: pageImageStoragePath,
-            content_type: imageBlob.type || 'application/octet-stream',
-            size: imageBlob.size,
-            ...(visionPage.crop ? { crop: visionPage.crop } : {}),
-            ...(visionPage.rotationApplied
-              ? { rotation_applied: visionPage.rotationApplied }
-              : {}),
-          };
-        },
-      );
+              ...(geminiFile ? { gemini_file: geminiFile } : {}),
+              ...(visionPage.crop ? { crop: visionPage.crop } : {}),
+              ...(visionPage.rotationApplied
+                ? { rotation_applied: visionPage.rotationApplied }
+                : {}),
+            };
+          },
+        );
+      } catch (error) {
+        await cleanupBrowserGeminiFiles(uploadedGeminiFilesForCleanup);
+        throw error;
+      }
       const uploadDurationMs = Date.now() - uploadStartedAt;
       const uploadedTotalBytes = pageImageAssets.reduce(
         (sum, asset) => sum + (asset?.size ?? 0),
@@ -417,7 +472,9 @@ export function useCreateGenerationTask() {
         uploadedFileMetadatas = await uploadFilesToSupabase(input);
       } catch (error) {
         const errorMessage =
-          error instanceof Error ? error.message : '上传 PDF 或页面图片到存储失败。';
+          error instanceof Error
+            ? error.message
+            : '上传 PDF 或页面图片到存储失败。';
 
         console.error('[Generation Task] Staging upload failed', {
           message: errorMessage,
@@ -526,7 +583,11 @@ export function useDeleteGenerationTaskItem() {
 
       const { payload, message } = await parseApiPayload<{
         message?: string;
-        data?: { id: string; task_id: string | null; already_deleted?: boolean };
+        data?: {
+          id: string;
+          task_id: string | null;
+          already_deleted?: boolean;
+        };
       }>(response);
 
       if (!response.ok || !payload?.data) {

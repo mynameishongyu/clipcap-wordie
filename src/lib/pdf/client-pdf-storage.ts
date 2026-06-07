@@ -5,6 +5,12 @@ import type {
   PdfVisionPageCrop,
   PdfVisionPageInput,
 } from '@/src/lib/pdf/client-pdf';
+import {
+  cleanupBrowserGeminiFiles,
+  getBrowserGeminiFileUploadConfig,
+  uploadBrowserImageToGeminiFileApi,
+  type ClientGeminiFileReference,
+} from '@/src/lib/gemini/client-file-upload';
 import { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
@@ -16,6 +22,7 @@ export interface StoredPdfVisionPageAsset {
   localPreviewUrl?: string;
   contentType: string;
   size: number;
+  geminiFile?: ClientGeminiFileReference | null;
   crop?: PdfVisionPageCrop;
   rotationApplied?: PdfVisionPageRotation;
 }
@@ -179,96 +186,139 @@ export async function uploadPdfVisionPagesToSupabase(input: {
   }
 
   const safeBaseName = sanitizeStorageFileName(input.pdfFileName);
-  const extractionTaskId = input.extractionTaskId?.trim() || crypto.randomUUID();
+  const extractionTaskId =
+    input.extractionTaskId?.trim() || crypto.randomUUID();
   const directoryPrefix = `${user.id}/template-extraction-pages-temp/task/${extractionTaskId}/`;
   const totalPageCount = input.visionPages.length;
   const uploadedAssets: Array<StoredPdfVisionPageAsset | undefined> =
     Array.from({ length: totalPageCount });
-  const uploadConcurrency = getPdfStorageUploadConcurrency();
+  const geminiUploadConfig = await getBrowserGeminiFileUploadConfig().catch(
+    (error) => {
+      input.onLog?.('[Gemini File API][TemplateExtractBrowserConfigFailed]', {
+        pdfFileName: input.pdfFileName,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+
+      return null;
+    },
+  );
+  const geminiUploadEnabled = geminiUploadConfig?.enabled === true;
+  const uploadConcurrency = geminiUploadEnabled
+    ? geminiUploadConfig.concurrency
+    : getPdfStorageUploadConcurrency();
+  const uploadedGeminiFilesForCleanup: ClientGeminiFileReference[] = [];
 
   input.onLog?.('[Template Extract][PDF Evidence][Storage] Upload started.', {
     pdfFileName: input.pdfFileName,
     pageCount: totalPageCount,
     uploadConcurrency,
+    geminiFileApiEnabled: geminiUploadEnabled,
+    geminiFileApiProvider: geminiUploadConfig?.provider ?? null,
+    geminiFileApiModel: geminiUploadConfig?.model ?? null,
   });
 
-  await runWithConcurrency(
-    input.visionPages,
-    uploadConcurrency,
-    async (visionPage, index) => {
-      const blob = await getPdfVisionPageBlob(visionPage);
-      const extension = getPdfVisionPageImageExtension(visionPage, blob);
-      const storagePath =
-        `${directoryPrefix}${crypto.randomUUID()}-` +
-        `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
-      const contentType = getPdfVisionPageContentType(visionPage, blob);
-      const localPreviewUrl =
-        typeof URL !== 'undefined' ? URL.createObjectURL(blob) : undefined;
+  try {
+    await runWithConcurrency(
+      input.visionPages,
+      uploadConcurrency,
+      async (visionPage, index) => {
+        const blob = await getPdfVisionPageBlob(visionPage);
+        const extension = getPdfVisionPageImageExtension(visionPage, blob);
+        const storagePath =
+          `${directoryPrefix}${crypto.randomUUID()}-` +
+          `${safeBaseName}-page-${visionPage.pageNumber}.${extension}`;
+        const contentType = getPdfVisionPageContentType(visionPage, blob);
+        const localPreviewUrl =
+          typeof URL !== 'undefined' ? URL.createObjectURL(blob) : undefined;
+        const displayName = `template-extract-${extractionTaskId}-page-${visionPage.pageNumber}`;
 
-      input.onLog?.(
-        '[Template Extract][PDF Evidence][Storage] Uploading page image.',
-        {
-          pdfFileName: input.pdfFileName,
+        input.onLog?.(
+          '[Template Extract][PDF Evidence][Storage] Uploading page image.',
+          {
+            pdfFileName: input.pdfFileName,
+            pageNumber: visionPage.pageNumber,
+            index: index + 1,
+            totalPageCount,
+            blob,
+            localPreviewUrl,
+            storagePath,
+            contentType,
+            size: blob.size,
+            rotationApplied: visionPage.rotationApplied ?? 0,
+          },
+        );
+
+        const supabaseUploadPromise = supabase.storage
+          .from('generation-pdfs')
+          .upload(storagePath, blob, {
+            contentType,
+            upsert: false,
+          });
+        const geminiUploadPromise = geminiUploadEnabled
+          ? uploadBrowserImageToGeminiFileApi({
+              blob,
+              displayName,
+              fileName: input.pdfFileName,
+              pageNumber: visionPage.pageNumber,
+              originalPageNumber: visionPage.pageNumber,
+              storagePath,
+            })
+          : Promise.resolve(null);
+        const [{ error: uploadError }, geminiFile] = await Promise.all([
+          supabaseUploadPromise,
+          geminiUploadPromise,
+        ]);
+
+        if (geminiFile) {
+          uploadedGeminiFilesForCleanup.push(geminiFile);
+        }
+
+        if (uploadError) {
+          throw new Error(
+            `上传 PDF 页图到 Supabase Storage 失败：${uploadError.message}`,
+          );
+        }
+
+        const signedUrl = localPreviewUrl ?? '';
+        const signedUrlData = { signedUrl };
+        const signedUrlError = null as Error | null;
+
+        if (signedUrlError || !signedUrlData?.signedUrl) {
+          throw new Error(
+            `创建 PDF 页图预览链接失败：${signedUrlError?.message ?? storagePath}`,
+          );
+        }
+
+        const asset = {
           pageNumber: visionPage.pageNumber,
-          index: index + 1,
-          totalPageCount,
-          blob,
-          localPreviewUrl,
+          originalPageNumber: visionPage.pageNumber,
           storagePath,
+          previewUrl: signedUrl,
+          ...(localPreviewUrl ? { localPreviewUrl } : {}),
           contentType,
           size: blob.size,
-          rotationApplied: visionPage.rotationApplied ?? 0,
-        },
-      );
+          ...(geminiFile ? { geminiFile } : {}),
+          ...(visionPage.crop ? { crop: visionPage.crop } : {}),
+          ...(visionPage.rotationApplied
+            ? { rotationApplied: visionPage.rotationApplied }
+            : {}),
+        } satisfies StoredPdfVisionPageAsset;
 
-      const { error: uploadError } = await supabase.storage
-        .from('generation-pdfs')
-        .upload(storagePath, blob, {
-          contentType,
-          upsert: false,
-        });
-
-      if (uploadError) {
-        throw new Error(
-          `上传 PDF 页图到 Supabase Storage 失败：${uploadError.message}`,
+        uploadedAssets[index] = asset;
+        input.onLog?.(
+          '[Template Extract][PDF Evidence][Storage] Page image uploaded.',
+          {
+            ...asset,
+            index: index + 1,
+            totalPageCount,
+          },
         );
-      }
-
-      const signedUrl = localPreviewUrl ?? '';
-      const signedUrlData = { signedUrl };
-      const signedUrlError = null as Error | null;
-
-      if (signedUrlError || !signedUrlData?.signedUrl) {
-        throw new Error(
-          `创建 PDF 页图预览链接失败：${signedUrlError?.message ?? storagePath}`,
-        );
-      }
-
-      const asset = {
-        pageNumber: visionPage.pageNumber,
-        originalPageNumber: visionPage.pageNumber,
-        storagePath,
-        previewUrl: signedUrl,
-        ...(localPreviewUrl ? { localPreviewUrl } : {}),
-        contentType,
-        size: blob.size,
-        ...(visionPage.crop ? { crop: visionPage.crop } : {}),
-        ...(visionPage.rotationApplied
-          ? { rotationApplied: visionPage.rotationApplied }
-          : {}),
-      } satisfies StoredPdfVisionPageAsset;
-
-      uploadedAssets[index] = asset;
-      input.onLog?.(
-        '[Template Extract][PDF Evidence][Storage] Page image uploaded.',
-        {
-          ...asset,
-          index: index + 1,
-          totalPageCount,
-        },
-      );
-    },
-  );
+      },
+    );
+  } catch (error) {
+    await cleanupBrowserGeminiFiles(uploadedGeminiFilesForCleanup);
+    throw error;
+  }
 
   const orderedUploadedAssets = uploadedAssets.filter(
     (asset): asset is StoredPdfVisionPageAsset => Boolean(asset),

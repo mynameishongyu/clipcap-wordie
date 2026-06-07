@@ -604,6 +604,18 @@ async function createTemplateExtractionTask(
           storage_path: page.storagePath,
           content_type: page.contentType,
           size: page.size,
+          ...(page.geminiFile
+            ? {
+                gemini_file: {
+                  uri: page.geminiFile.uri,
+                  name: page.geminiFile.name ?? null,
+                  mime_type: page.geminiFile.mime_type,
+                  size_bytes: page.geminiFile.size_bytes ?? page.size,
+                  display_name: page.geminiFile.display_name ?? null,
+                  uploaded_at: page.geminiFile.uploaded_at ?? null,
+                },
+              }
+            : {}),
           rotation_applied: page.rotationApplied ?? 0,
         })),
       ),

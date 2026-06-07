@@ -79,6 +79,14 @@ function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
       storage_path: string;
       content_type?: string;
       size?: number;
+      gemini_file?: {
+        uri: string;
+        name?: string | null;
+        mime_type: string;
+        size_bytes?: number | null;
+        display_name?: string | null;
+        uploaded_at?: string | null;
+      } | null;
       rotation_applied?: number;
     }>;
   }
@@ -101,6 +109,17 @@ function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
       const contentType = String(record.content_type ?? '').trim();
       const size = Number(record.size);
       const rotationApplied = Number(record.rotation_applied);
+      const rawGeminiFile =
+        record.gemini_file && typeof record.gemini_file === 'object'
+          ? (record.gemini_file as Record<string, unknown>)
+          : null;
+      const geminiFileUri = String(rawGeminiFile?.uri ?? '').trim();
+      const geminiFileMimeType = String(
+        rawGeminiFile?.mime_type ?? rawGeminiFile?.mimeType ?? '',
+      ).trim();
+      const geminiFileSizeBytes = Number(
+        rawGeminiFile?.size_bytes ?? rawGeminiFile?.sizeBytes ?? size,
+      );
 
       if (
         !Number.isInteger(uploadedPageNumber) ||
@@ -118,6 +137,33 @@ function parsePdfVisionPageAssets(rawValue: FormDataEntryValue | null) {
         storage_path: storagePath,
         ...(contentType ? { content_type: contentType } : {}),
         ...(Number.isFinite(size) && size >= 0 ? { size } : {}),
+        ...(geminiFileUri && geminiFileMimeType
+          ? {
+              gemini_file: {
+                uri: geminiFileUri,
+                name:
+                  typeof rawGeminiFile?.name === 'string'
+                    ? rawGeminiFile.name
+                    : null,
+                mime_type: geminiFileMimeType,
+                size_bytes:
+                  Number.isFinite(geminiFileSizeBytes) &&
+                  geminiFileSizeBytes >= 0
+                    ? geminiFileSizeBytes
+                    : null,
+                display_name:
+                  typeof rawGeminiFile?.display_name === 'string'
+                    ? rawGeminiFile.display_name
+                    : typeof rawGeminiFile?.displayName === 'string'
+                      ? rawGeminiFile.displayName
+                      : null,
+                uploaded_at:
+                  typeof rawGeminiFile?.uploaded_at === 'string'
+                    ? rawGeminiFile.uploaded_at
+                    : null,
+              },
+            }
+          : {}),
         ...(Number.isFinite(rotationApplied)
           ? { rotation_applied: rotationApplied }
           : {}),

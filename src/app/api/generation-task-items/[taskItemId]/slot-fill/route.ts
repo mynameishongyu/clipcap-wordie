@@ -20,11 +20,16 @@ import {
 } from '@/src/lib/llm/usage';
 import {
   appendProcessingTrace,
-  buildStoredPageImageProxyVisionPages,
+  buildStoredPageImageFileApiVisionPages,
+  buildStoredPageImageSupabaseSignedUrlVisionPages,
   buildFallbackReviewPayload,
+  cleanupGeminiFileApiFilesForTrace,
+  collectGeminiFileApiFilesFromAssets,
+  collectGeminiFileApiFilesFromVisionPages,
   createUnauthorizedResponse,
   generationTaskItemSelect,
   type GenerationTaskItemRecord,
+  type PdfPageImageAsset,
   getErrorMessage,
   filterPdfPageImageAssetsForSlotFill,
   loadVisionPagesFromStoredAssets,
@@ -244,6 +249,7 @@ async function loadReferenceExamplePagesWithBbox(params: {
       slotBoxes: ReferenceSlotBox[];
     }
   >();
+  const llmConfig = getLlmRuntimeConfig('vision');
   let skippedSlotsWithoutBbox = 0;
   let skippedSlotsWithoutPageImage = 0;
 
@@ -313,13 +319,41 @@ async function loadReferenceExamplePagesWithBbox(params: {
           admin: params.admin,
           storagePath: annotatedStoragePath,
         });
-        const annotatedMimeType = getMimeTypeFromStoragePath(
-          annotatedStoragePath,
-        );
-        const annotatedImageUrl = createGeminiImageProxyUrl({
-          storagePath: annotatedStoragePath,
-          mimeType: annotatedMimeType,
-        });
+        const annotatedMimeType =
+          getMimeTypeFromStoragePath(annotatedStoragePath);
+        let annotatedImageUrl = annotatedPreviewUrl;
+        let annotatedGeminiFile:
+          | ReturnType<typeof createGeminiImageProxyFile>
+          | undefined;
+
+        if (llmConfig.provider === 'doubao') {
+          /*
+          // Previous Doubao path used the Vercel image proxy for annotated
+          // reference pages. Keep the proxy helpers available for rollback;
+          // Doubao now uses Supabase signed URLs directly.
+          annotatedImageUrl = createGeminiImageProxyUrl({
+            storagePath: annotatedStoragePath,
+            mimeType: annotatedMimeType,
+          });
+          annotatedGeminiFile = createGeminiImageProxyFile({
+            storagePath: annotatedStoragePath,
+            mimeType: annotatedMimeType,
+            sizeBytes: 0,
+            displayName: `annotated-reference-page-${asset.pageNumber}`,
+          });
+          */
+        } else {
+          annotatedImageUrl = createGeminiImageProxyUrl({
+            storagePath: annotatedStoragePath,
+            mimeType: annotatedMimeType,
+          });
+          annotatedGeminiFile = createGeminiImageProxyFile({
+            storagePath: annotatedStoragePath,
+            mimeType: annotatedMimeType,
+            sizeBytes: 0,
+            displayName: `annotated-reference-page-${asset.pageNumber}`,
+          });
+        }
 
         console.info(
           '[PDF Fill][ReferenceExample] Using browser-saved annotated reference page image',
@@ -338,12 +372,9 @@ async function loadReferenceExamplePagesWithBbox(params: {
             image_url: annotatedImageUrl,
             annotated_preview_url: annotatedPreviewUrl,
             annotated_storage_path: annotatedStoragePath,
-            gemini_file: createGeminiImageProxyFile({
-              storagePath: annotatedStoragePath,
-              mimeType: annotatedMimeType,
-              sizeBytes: 0,
-              displayName: `annotated-reference-page-${asset.pageNumber}`,
-            }),
+            ...(annotatedGeminiFile
+              ? { gemini_file: annotatedGeminiFile }
+              : {}),
             annotated_slots: asset.slotBoxes.map((slotBox) => ({
               slot_key: slotBox.slotKey,
               slot_name: slotBox.slotName,
@@ -429,8 +460,13 @@ async function appendVisionPageImageDebugTraces(params: {
             asset?.original_page_number ??
             page.page_number,
           storage_path: asset?.storage_path ?? null,
-          source: page.gemini_file ? 'gemini_file' : 'supabase_download',
+          source: page.gemini_file
+            ? 'gemini_file'
+            : page.image_url
+              ? 'image_url'
+              : 'supabase_download',
           has_data_url: Boolean(page.image_data_url),
+          has_image_url: Boolean(page.image_url),
           has_gemini_file: Boolean(page.gemini_file),
         };
       }),
@@ -447,9 +483,13 @@ async function appendVisionPageImageDebugTraces(params: {
         page.original_page_number ??
         asset?.original_page_number ??
         page.page_number
-      }, source=${page.gemini_file ? 'gemini_file' : 'supabase_download'}, storage_path=${
-        asset?.storage_path ?? 'none'
-      }`,
+      }, source=${
+        page.gemini_file
+          ? 'gemini_file'
+          : page.image_url
+            ? 'image_url'
+            : 'supabase_download'
+      }, storage_path=${asset?.storage_path ?? 'none'}`,
     );
   }
 }
@@ -467,6 +507,65 @@ async function getSharedReferencePagesForSlotFill(params: {
     return params.pages;
   }
 
+  const referenceAssets = params.pages.flatMap((page) => {
+    const storagePath = page.annotated_storage_path?.trim();
+
+    if (!storagePath) {
+      return [];
+    }
+
+    return [
+      {
+        uploaded_page_number: page.page_number,
+        original_page_number: page.original_page_number ?? page.page_number,
+        storage_path: storagePath,
+        content_type: getMimeTypeFromStoragePath(storagePath),
+        size: page.gemini_file?.sizeBytes ?? 0,
+      } satisfies PdfPageImageAsset,
+    ];
+  });
+  const uploadedReferencePages = await buildStoredPageImageFileApiVisionPages({
+    admin: params.admin,
+    pageImageAssets: referenceAssets,
+    config: llmConfig,
+    requestLabel: `slot fill reference ${params.taskItemId}`,
+    onTrace: async ({ message }) => {
+      await appendProcessingTrace(params.admin, params.taskItemId, message);
+    },
+  });
+  const geminiFileByPageNumber = new Map(
+    uploadedReferencePages.flatMap((page) =>
+      page.gemini_file ? [[page.page_number, page.gemini_file] as const] : [],
+    ),
+  );
+  const pages = params.pages.map((page) => ({
+    ...page,
+    image_url: '',
+    gemini_file:
+      geminiFileByPageNumber.get(page.page_number) ?? page.gemini_file,
+  }));
+
+  await appendProcessingTrace(
+    params.admin,
+    params.taskItemId,
+    `[Gemini File API][SharedReferencePages] ${JSON.stringify({
+      task_id: params.taskId,
+      template_id: params.templateId,
+      reference_page_count: pages.length,
+      source: 'gemini_file_api',
+      pages: pages.map((page) => ({
+        page_number: page.page_number,
+        annotated_storage_path: page.annotated_storage_path ?? null,
+        file_uri: page.gemini_file?.uri ?? null,
+        mime_type: page.gemini_file?.mimeType ?? null,
+      })),
+    })}`,
+  );
+
+  /*
+  // Previous Gemini path reused the Vercel image proxy references created in
+  // loadReferenceExamplePagesWithBbox. Keep that path available for rollback;
+  // Gemini now uses File API file_uri values.
   await appendProcessingTrace(
     params.admin,
     params.taskItemId,
@@ -483,8 +582,9 @@ async function getSharedReferencePagesForSlotFill(params: {
       })),
     })}`,
   );
+  */
 
-  return params.pages;
+  return pages;
 }
 async function runGenerationTaskItemSlotFill(params: {
   item: GenerationTaskItemRecord;
@@ -512,6 +612,8 @@ async function runGenerationTaskItemSlotFill(params: {
     ? new Date(params.item.started_at)
     : startedAt;
   const slotFillUsageAccumulator = createLlmUsageAccumulator();
+  let slotFillVisionPagesForCleanup: PdfVisionPageInput[] = [];
+  let referencePagesForCleanup: ReferencePdfVisionPageInput[] = [];
   try {
     if (slotSchema.length === 0) {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
@@ -553,29 +655,62 @@ async function runGenerationTaskItemSlotFill(params: {
     });
 
     const llmConfig = getLlmRuntimeConfig('vision');
-    const usesLlmImageProxy =
-      (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao') &&
-      pageImageAssets.length > 0;
-    const visionPages = usesLlmImageProxy
-      ? await buildStoredPageImageProxyVisionPages({
-          pageImageAssets,
-          requestLabel: `slot fill ${params.item.id}`,
-          onTrace: async ({ message }) => {
-            await appendProcessingTrace(admin, params.item.id, message);
-          },
-        })
-      : await loadVisionPagesFromStoredAssets({
-          admin,
-          pageImageAssets,
-        });
+    const usesGeminiFileApi =
+      llmConfig.provider === 'gemini' && pageImageAssets.length > 0;
+    const usesSupabaseSignedUrls =
+      llmConfig.provider === 'doubao' && pageImageAssets.length > 0;
+    let visionPages: PdfVisionPageInput[];
+
+    if (usesGeminiFileApi) {
+      visionPages = await buildStoredPageImageFileApiVisionPages({
+        admin,
+        pageImageAssets,
+        config: llmConfig,
+        requestLabel: `slot fill ${params.item.id}`,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+      });
+    } else if (usesSupabaseSignedUrls) {
+      /*
+      // Previous Doubao path used Vercel image proxy URLs here. Keep the proxy
+      // helper available for rollback/comparison; Doubao now uses Supabase
+      // signed URLs directly.
+      visionPages = await buildStoredPageImageProxyVisionPages({
+        pageImageAssets,
+        requestLabel: `slot fill ${params.item.id}`,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+      });
+      */
+      visionPages = await buildStoredPageImageSupabaseSignedUrlVisionPages({
+        admin,
+        pageImageAssets,
+        requestLabel: `slot fill ${params.item.id}`,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+      });
+    } else {
+      visionPages = await loadVisionPagesFromStoredAssets({
+        admin,
+        pageImageAssets,
+      });
+    }
+    slotFillVisionPagesForCleanup = visionPages;
 
     await appendProcessingTrace(
       admin,
       params.item.id,
-      `[Gemini Image Proxy][SlotFillSource] ${JSON.stringify({
+      `[PDF Fill][SlotFillImageSource] ${JSON.stringify({
         provider: llmConfig.provider,
-        proxy_page_count: usesLlmImageProxy ? visionPages.length : 0,
-        fallback_to_supabase_download: !usesLlmImageProxy,
+        gemini_file_api_page_count: usesGeminiFileApi ? visionPages.length : 0,
+        supabase_signed_url_page_count: usesSupabaseSignedUrls
+          ? visionPages.length
+          : 0,
+        fallback_to_supabase_download:
+          !usesGeminiFileApi && !usesSupabaseSignedUrls,
         required_page_count: pageImageAssets.length,
       })}`,
     );
@@ -586,9 +721,10 @@ async function runGenerationTaskItemSlotFill(params: {
 
     await appendMemoryTrace(admin, params.item.id, 'vision_page_urls_ready', {
       vision_page_count: visionPages.length,
-      source:
-        usesLlmImageProxy
-          ? 'vercel_gemini_image_proxy'
+      source: usesGeminiFileApi
+        ? 'gemini_file_api'
+        : usesSupabaseSignedUrls
+          ? 'supabase_signed_url'
           : 'data_url',
     });
 
@@ -606,6 +742,7 @@ async function runGenerationTaskItemSlotFill(params: {
       templateId: params.item.template_id,
       pages: referenceExamplePages.pages,
     });
+    referencePagesForCleanup = referencePagesForSlotFill;
     await appendMemoryTrace(
       admin,
       params.item.id,
@@ -951,8 +1088,24 @@ async function runGenerationTaskItemSlotFill(params: {
       }),
     });
   } finally {
-    // Gemini image proxy URLs are short-lived signed URLs. Slot fill does not
-    // create provider-side image uploads that need cleanup.
+    const cleanupConfig = getLlmRuntimeConfig('vision');
+
+    if (cleanupConfig.provider === 'gemini') {
+      await cleanupGeminiFileApiFilesForTrace({
+        config: cleanupConfig,
+        files: [
+          ...collectGeminiFileApiFilesFromAssets(allPageImageAssets),
+          ...collectGeminiFileApiFilesFromVisionPages(
+            slotFillVisionPagesForCleanup,
+          ),
+          ...collectGeminiFileApiFilesFromVisionPages(referencePagesForCleanup),
+        ],
+        requestLabel: `slot fill ${params.item.id}`,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+      });
+    }
   }
 }
 

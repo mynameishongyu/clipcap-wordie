@@ -4,21 +4,22 @@ import { extname, isAbsolute, resolve } from 'path';
 import { Agent, fetch as undiciFetch } from 'undici';
 import {
   appendProcessingTrace,
+  buildStoredPageImageFileApiVisionPages,
   createUnauthorizedResponse,
   generationTaskItemSelect,
+  cleanupGeminiFileApiFilesForTrace,
+  collectGeminiFileApiFilesFromAssets,
+  buildStoredPageImageSupabaseSignedUrlVisionPages,
   type PdfPageImageAsset,
   type GenerationTaskItemRecord,
   getErrorMessage,
-  buildStoredPageImageProxyVisionPages,
   loadVisionPagesFromStoredAssets,
   normalizePdfPageImageAssets,
   normalizeVisionPages,
   recalculateTaskSummary,
 } from '@/src/lib/generation-task-items/runtime';
 import { getOptionalEnv } from '@/src/lib/llm/env';
-import {
-  callGeminiNativeChatCompletion,
-} from '@/src/lib/llm/gemini-native';
+import { callGeminiNativeChatCompletion } from '@/src/lib/llm/gemini-native';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
   geminiPageFilterResponseSchema,
@@ -124,8 +125,7 @@ function buildPageFilterPages(pageImageAssets: PdfPageImageAsset[]) {
   return pageImageAssets
     .slice()
     .sort(
-      (left, right) =>
-        left.uploaded_page_number - right.uploaded_page_number,
+      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
     )
     .map((asset) => ({
       uploadedPageNumber: asset.uploaded_page_number,
@@ -291,12 +291,14 @@ async function inspectGeminiImageProxyUrls(params: {
   );
 
   await params.onTrace?.({
-    message: `[PDF Fill][PageFilterGeminiProxyPreflight][${params.batchLabel}] ${JSON.stringify({
-      checked_url_count: results.length,
-      failed_url_count: failedResults.length,
-      duration_ms: Date.now() - startedAt,
-      results,
-    })}`,
+    message: `[PDF Fill][PageFilterGeminiProxyPreflight][${params.batchLabel}] ${JSON.stringify(
+      {
+        checked_url_count: results.length,
+        failed_url_count: failedResults.length,
+        duration_ms: Date.now() - startedAt,
+        results,
+      },
+    )}`,
   });
 
   if (failedResults.length > 0) {
@@ -492,8 +494,7 @@ function buildReadablePageFilterPromptPayloadZh(input: {
     render_note: '候选页面图片由槽位回填流程中的 PDF 转图片流程生成。',
     decision_options: {
       keep: '保留该页面，用于后续视觉槽位回填。',
-      drop:
-        '丢弃该页面。适用情况包括：密集合同条款页、长篇说明页、空白表单、没有真实填写值的空白联系/尾页、手写抵押物/质押物/担保物清单页，或只有少量附带手写痕迹的合同正文页。不要把真实签署页、确认页、回执页、盖章页、签署日期页、身份证号页、责任人姓名页、借款人或银行确认文字页判为 drop。',
+      drop: '丢弃该页面。适用情况包括：密集合同条款页、长篇说明页、空白表单、没有真实填写值的空白联系/尾页、手写抵押物/质押物/担保物清单页，或只有少量附带手写痕迹的合同正文页。不要把真实签署页、确认页、回执页、盖章页、签署日期页、身份证号页、责任人姓名页、借款人或银行确认文字页判为 drop。',
     },
     keep_guidance:
       '保留可能包含身份证号、姓名、地址、电话、签名、印章、银行系统截图、还款账户/余额字段、金额、日期、购车协议数值、合同签署/确认/回执内容、机动车登记证书或机动车登记摘要信息的页面。',
@@ -539,8 +540,7 @@ function buildPageFilterPromptPayloadEn(input: {
       'Candidate page images are produced by the same PDF-to-image pipeline used for downstream slot filling.',
     decision_options: {
       keep: 'Keep this page for downstream visual slot filling.',
-      drop:
-        'Drop this page. Typical drop pages include dense contract terms, long explanatory pages, blank forms, empty contact or tail pages without real filled values, handwritten collateral/pledge/guarantee item lists, or dense contract text pages that only contain tiny incidental handwriting. Do not drop real signing pages, confirmation pages, receipt pages, stamped pages, signed-date pages, ID-number pages, responsible-person-name pages, borrower confirmation pages, or bank confirmation pages.',
+      drop: 'Drop this page. Typical drop pages include dense contract terms, long explanatory pages, blank forms, empty contact or tail pages without real filled values, handwritten collateral/pledge/guarantee item lists, or dense contract text pages that only contain tiny incidental handwriting. Do not drop real signing pages, confirmation pages, receipt pages, stamped pages, signed-date pages, ID-number pages, responsible-person-name pages, borrower confirmation pages, or bank confirmation pages.',
       review:
         'Use review when the page is ambiguous. Review pages are kept for slot filling.',
     },
@@ -602,14 +602,8 @@ async function classifyVisionPagesForSlotFill(params: {
     number,
     PageFilterGeminiFileReference
   >();
-  const llmConfig = getLlmRuntimeConfig(
-    'vision',
-    PDF_FILL_LLM_OPTIONS,
-  );
-  const traceConfig = getLlmRuntimeTraceConfig(
-    'vision',
-    PDF_FILL_LLM_OPTIONS,
-  );
+  const llmConfig = getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS);
+  const traceConfig = getLlmRuntimeTraceConfig('vision', PDF_FILL_LLM_OPTIONS);
 
   await params.onTrace?.({
     message: `[PDF Fill][PageFilterConfig] ${JSON.stringify({
@@ -772,19 +766,23 @@ async function classifyVisionPagesForSlotFill(params: {
             responseMimeType: 'application/json',
             responseSchema: geminiPageFilterResponseSchema,
           },
-          onGenerateContentRequestBody: async ({ requestBody: nativeRequestBody }) => {
+          onGenerateContentRequestBody: async ({
+            requestBody: nativeRequestBody,
+          }) => {
             await params.onTrace?.({
               message: `[PDF Fill][PageFilterGeminiNativeRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
                 {
-                  route: '/api/generation-task-items/[taskItemId]/page-preparation',
+                  route:
+                    '/api/generation-task-items/[taskItemId]/page-preparation',
                   config_scope: 'VISION_LLM',
                   model: traceConfig.model,
                   provider: traceConfig.provider,
                   request_label: requestLabel,
-                  request_mode: 'gemini_native_generate_content_proxy_url',
-                  candidate_proxy_file_count: batch.filter((page) => page.gemini_file)
-                    .length,
-                  proxy_file_uris: batch.flatMap((page) =>
+                  request_mode: 'gemini_native_generate_content_file_api',
+                  candidate_file_api_file_count: batch.filter(
+                    (page) => page.gemini_file,
+                  ).length,
+                  file_api_uris: batch.flatMap((page) =>
                     page.gemini_file?.uri ? [page.gemini_file.uri] : [],
                   ),
                   request_body: nativeRequestBody,
@@ -914,10 +912,7 @@ async function runGenerationTaskItemPagePreparation(params: {
       throw new Error('当前模板缺少槽位定义，请重新保存模板后再试。');
     }
 
-    if (
-      precomputedVisionPages.length === 0 &&
-      pageImageAssets.length === 0
-    ) {
+    if (precomputedVisionPages.length === 0 && pageImageAssets.length === 0) {
       throw new Error(
         '当前任务缺少可用于视觉回填的新 PDF 页面图片，请重新创建批量任务。',
       );
@@ -1022,10 +1017,7 @@ async function runGenerationTaskItemPagePreparation(params: {
       });
     } else if (pageImageAssets.length > 0) {
       try {
-        const llmConfig = getLlmRuntimeConfig(
-          'vision',
-          PDF_FILL_LLM_OPTIONS,
-        );
+        const llmConfig = getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS);
         const precomputedVisionPagesForFilter: PdfVisionPageInput[] =
           precomputedVisionPages.map((page) => ({
             page_number: page.page_number,
@@ -1033,19 +1025,46 @@ async function runGenerationTaskItemPagePreparation(params: {
             image_url: page.image_url,
             original_page_number: page.original_page_number ?? page.page_number,
           }));
-        const shouldBuildProxyVisionPages =
+        const shouldBuildGeminiFileApiVisionPages =
           precomputedVisionPages.length === 0 &&
-          (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao');
+          llmConfig.provider === 'gemini';
+        const shouldBuildSupabaseSignedUrlVisionPages =
+          precomputedVisionPages.length === 0 &&
+          llmConfig.provider === 'doubao';
         let pipelineVisionPages: PdfVisionPageInput[] = [];
 
-        if (shouldBuildProxyVisionPages) {
-          pipelineVisionPages = await buildStoredPageImageProxyVisionPages({
+        if (shouldBuildGeminiFileApiVisionPages) {
+          pipelineVisionPages = await buildStoredPageImageFileApiVisionPages({
+            admin,
             pageImageAssets,
+            config: llmConfig,
             requestLabel: `page filter ${params.item.id}`,
             onTrace: async ({ message }) => {
               await appendProcessingTrace(admin, params.item.id, message);
             },
           });
+        } else if (shouldBuildSupabaseSignedUrlVisionPages) {
+          /*
+          // Previous Doubao path used the Vercel image proxy here. Keep the
+          // proxy helper available for rollback/comparison; Doubao now uses
+          // Supabase signed URLs directly.
+          // pipelineVisionPages = await buildStoredPageImageProxyVisionPages({
+          //   pageImageAssets,
+          //   requestLabel: `page filter ${params.item.id}`,
+          //   onTrace: async ({ message }) => {
+          //     await appendProcessingTrace(admin, params.item.id, message);
+          //   },
+          // });
+          */
+          pipelineVisionPages =
+            await buildStoredPageImageSupabaseSignedUrlVisionPages({
+              admin,
+              pageImageAssets,
+              requestLabel: `page filter ${params.item.id}`,
+              onTrace: async ({ message }) => {
+                await appendProcessingTrace(admin, params.item.id, message);
+              },
+            });
         }
         geminiFileByPageNumberFromPipeline = new Map(
           pipelineVisionPages.flatMap((page) =>
@@ -1328,6 +1347,18 @@ async function runGenerationTaskItemPagePreparation(params: {
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     const failedAt = new Date().toISOString();
+    const cleanupConfig = getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS);
+
+    if (cleanupConfig.provider === 'gemini') {
+      await cleanupGeminiFileApiFilesForTrace({
+        config: cleanupConfig,
+        files: collectGeminiFileApiFilesFromAssets(pageImageAssets),
+        requestLabel: `page preparation failed ${params.item.id}`,
+        onTrace: async ({ message }) => {
+          await appendProcessingTrace(admin, params.item.id, message);
+        },
+      });
+    }
 
     await admin
       .from('generation_task_items')

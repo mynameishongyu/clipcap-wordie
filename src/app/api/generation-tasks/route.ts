@@ -28,6 +28,17 @@ interface UploadedFileMetadata {
     storage_path?: string;
     content_type?: string;
     size?: number;
+    gemini_file?: {
+      uri?: string;
+      name?: string | null;
+      mime_type?: string;
+      mimeType?: string;
+      size_bytes?: number | null;
+      sizeBytes?: number | null;
+      display_name?: string | null;
+      displayName?: string | null;
+      uploaded_at?: string | null;
+    } | null;
     rotation_applied?: -90 | 0 | 90 | 180;
     crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
   }>;
@@ -47,7 +58,9 @@ interface UploadedFileMetadata {
   selected_page_range_label?: string;
 }
 
-function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined) {
+function normalizePdfPageImageAssets(
+  metadata: UploadedFileMetadata | undefined,
+) {
   const assets = metadata?.ocr_image_assets;
 
   if (!Array.isArray(assets)) {
@@ -65,6 +78,17 @@ function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined)
         content_type?: string;
         size?: number;
         rotation_applied?: -90 | 0 | 90 | 180;
+        gemini_file?: {
+          uri?: string;
+          name?: string | null;
+          mime_type?: string;
+          mimeType?: string;
+          size_bytes?: number | null;
+          sizeBytes?: number | null;
+          display_name?: string | null;
+          displayName?: string | null;
+          uploaded_at?: string | null;
+        } | null;
         crop?: GenerationSlotReferencePdfEvidence['example_page_crop'];
       } =>
         typeof entry?.uploaded_page_number === 'number' &&
@@ -76,22 +100,76 @@ function normalizePdfPageImageAssets(metadata: UploadedFileMetadata | undefined)
         typeof entry?.storage_path === 'string' &&
         entry.storage_path.trim().length > 0,
     )
-    .map((entry) => ({
-      uploaded_page_number: entry.uploaded_page_number,
-      original_page_number: entry.original_page_number,
-      storage_path: entry.storage_path,
-      ...(typeof entry.content_type === 'string' && entry.content_type.trim()
-        ? { content_type: entry.content_type.trim() }
-        : {}),
-      ...(typeof entry.size === 'number' && Number.isFinite(entry.size)
-        ? { size: entry.size }
-        : {}),
-      ...(typeof entry.rotation_applied === 'number'
-        ? { rotation_applied: entry.rotation_applied }
-        : {}),
-      ...(entry.crop ? { crop: entry.crop } : {}),
-    }))
-    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+    .map((entry) => {
+      const rawGeminiFile =
+        entry.gemini_file && typeof entry.gemini_file === 'object'
+          ? entry.gemini_file
+          : null;
+      const geminiFileUri =
+        typeof rawGeminiFile?.uri === 'string' ? rawGeminiFile.uri.trim() : '';
+      const geminiFileMimeType =
+        typeof rawGeminiFile?.mime_type === 'string'
+          ? rawGeminiFile.mime_type.trim()
+          : typeof rawGeminiFile?.mimeType === 'string'
+            ? rawGeminiFile.mimeType.trim()
+            : '';
+      const geminiFileSizeBytes =
+        typeof rawGeminiFile?.size_bytes === 'number'
+          ? rawGeminiFile.size_bytes
+          : typeof rawGeminiFile?.sizeBytes === 'number'
+            ? rawGeminiFile.sizeBytes
+            : typeof entry.size === 'number'
+              ? entry.size
+              : null;
+
+      return {
+        uploaded_page_number: entry.uploaded_page_number,
+        original_page_number: entry.original_page_number,
+        storage_path: entry.storage_path,
+        ...(typeof entry.content_type === 'string' && entry.content_type.trim()
+          ? { content_type: entry.content_type.trim() }
+          : {}),
+        ...(typeof entry.size === 'number' && Number.isFinite(entry.size)
+          ? { size: entry.size }
+          : {}),
+        ...(geminiFileUri && geminiFileMimeType
+          ? {
+              gemini_file: {
+                uri: geminiFileUri,
+                name:
+                  typeof rawGeminiFile?.name === 'string'
+                    ? rawGeminiFile.name
+                    : null,
+                mime_type: geminiFileMimeType,
+                size_bytes:
+                  typeof geminiFileSizeBytes === 'number' &&
+                  Number.isFinite(geminiFileSizeBytes)
+                    ? geminiFileSizeBytes
+                    : null,
+                display_name:
+                  typeof rawGeminiFile?.display_name === 'string'
+                    ? rawGeminiFile.display_name
+                    : typeof rawGeminiFile?.displayName === 'string'
+                      ? rawGeminiFile.displayName
+                      : null,
+                uploaded_at:
+                  typeof rawGeminiFile?.uploaded_at === 'string'
+                    ? rawGeminiFile.uploaded_at
+                    : null,
+                expires_at: null,
+                request_label: 'gemini_file_api',
+              },
+            }
+          : {}),
+        ...(typeof entry.rotation_applied === 'number'
+          ? { rotation_applied: entry.rotation_applied }
+          : {}),
+        ...(entry.crop ? { crop: entry.crop } : {}),
+      };
+    })
+    .sort(
+      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
+    );
 }
 
 function createUnauthorizedResponse() {
@@ -111,7 +189,9 @@ function getErrorMessage(error: unknown) {
 function buildSlotSchemaFromPayload(
   payload: SlotReviewSessionPayload | null | undefined,
 ): GenerationSlotSchemaItem[] {
-  const paragraphs = Array.isArray(payload?.extractionResult) ? payload.extractionResult : [];
+  const paragraphs = Array.isArray(payload?.extractionResult)
+    ? payload.extractionResult
+    : [];
   const evidenceMatches = Array.isArray(payload?.pdfEvidence?.matches)
     ? payload.pdfEvidence.matches
     : [];
@@ -158,12 +238,18 @@ function buildSlotSchemaFromPayload(
       template_original_value: item.original_value,
       // template_original_doc_position is intentionally not passed into the
       // slot-fill flow for now.
-      reference_pdf_evidence: buildReferenceEvidence(paragraphIndex, itemIndex, item),
+      reference_pdf_evidence: buildReferenceEvidence(
+        paragraphIndex,
+        itemIndex,
+        item,
+      ),
     })),
   );
 }
 
-function normalizeParsedPages(metadata: UploadedFileMetadata | undefined): PdfPageInput[] {
+function normalizeParsedPages(
+  metadata: UploadedFileMetadata | undefined,
+): PdfPageInput[] {
   const pages = metadata?.parsed_pdf?.pages;
 
   if (!Array.isArray(pages)) {
@@ -181,7 +267,9 @@ function normalizeParsedPages(metadata: UploadedFileMetadata | undefined): PdfPa
     }));
 }
 
-function normalizeVisionPages(metadata: UploadedFileMetadata | undefined): PdfVisionPageInput[] {
+function normalizeVisionPages(
+  metadata: UploadedFileMetadata | undefined,
+): PdfVisionPageInput[] {
   const pages = metadata?.vision_pages;
 
   if (!Array.isArray(pages)) {
@@ -201,7 +289,9 @@ function normalizeVisionPages(metadata: UploadedFileMetadata | undefined): PdfVi
     }));
 }
 
-function normalizeSelectedOriginalPageNumbers(metadata: UploadedFileMetadata | undefined) {
+function normalizeSelectedOriginalPageNumbers(
+  metadata: UploadedFileMetadata | undefined,
+) {
   const pageNumbers = metadata?.selected_original_page_numbers;
 
   if (!Array.isArray(pageNumbers)) {
@@ -209,11 +299,16 @@ function normalizeSelectedOriginalPageNumbers(metadata: UploadedFileMetadata | u
   }
 
   return pageNumbers
-    .filter((value): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0)
+    .filter(
+      (value): value is number =>
+        typeof value === 'number' && Number.isInteger(value) && value > 0,
+    )
     .sort((left, right) => left - right);
 }
 
-function normalizeUploadedPageNumberMapping(metadata: UploadedFileMetadata | undefined) {
+function normalizeUploadedPageNumberMapping(
+  metadata: UploadedFileMetadata | undefined,
+) {
   const mappings = metadata?.uploaded_page_number_mapping;
 
   if (!Array.isArray(mappings)) {
@@ -235,7 +330,9 @@ function normalizeUploadedPageNumberMapping(metadata: UploadedFileMetadata | und
         Number.isInteger(entry.original_page_number) &&
         entry.original_page_number > 0,
     )
-    .sort((left, right) => left.uploaded_page_number - right.uploaded_page_number);
+    .sort(
+      (left, right) => left.uploaded_page_number - right.uploaded_page_number,
+    );
 }
 
 async function getAuthenticatedUser() {
@@ -274,7 +371,9 @@ export async function GET() {
 
     const { data: items, error: itemsError } = await supabase
       .from('generation_task_items')
-      .select('id, task_id, source_pdf_name, status, reviewed_at, created_at, error_message')
+      .select(
+        'id, task_id, source_pdf_name, status, reviewed_at, created_at, error_message',
+      )
       .in('task_id', taskIds)
       .order('created_at', { ascending: false });
 
@@ -332,10 +431,14 @@ export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const templateId = String(formData.get('templateId') ?? '').trim();
-    const fallbackTemplateName = String(formData.get('templateName') ?? '').trim();
+    const fallbackTemplateName = String(
+      formData.get('templateName') ?? '',
+    ).trim();
     const rawMetadata = String(formData.get('fileMetadatas') ?? '[]');
     const fileMetadatas = JSON.parse(rawMetadata) as UploadedFileMetadata[];
-    const files = formData.getAll('files').filter((entry): entry is File => entry instanceof File);
+    const files = formData
+      .getAll('files')
+      .filter((entry): entry is File => entry instanceof File);
 
     if (!templateId) {
       return NextResponse.json(
@@ -389,10 +492,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (
-      files.length > 0 &&
-      fileMetadatas.length !== files.length
-    ) {
+    if (files.length > 0 && fileMetadatas.length !== files.length) {
       return NextResponse.json(
         {
           code: 'FILE_METADATA_REQUIRED',
@@ -404,13 +504,17 @@ export async function POST(request: Request) {
 
     const admin = createSupabaseAdminClient();
     const slotReviewPayload =
-      (template.slot_review_payload as SlotReviewSessionPayload | null | undefined) ?? null;
+      (template.slot_review_payload as
+        | SlotReviewSessionPayload
+        | null
+        | undefined) ?? null;
     const slotSchema = buildSlotSchemaFromPayload(slotReviewPayload);
 
     const taskInsertPayload = {
       owner_id: user.id,
       template_id: templateId,
-      template_name_snapshot: template.template_name ?? fallbackTemplateName ?? '未命名模板',
+      template_name_snapshot:
+        template.template_name ?? fallbackTemplateName ?? '未命名模板',
       status: 'pending',
       total_items: fileMetadatas.length,
       succeeded_items: 0,
@@ -434,7 +538,9 @@ export async function POST(request: Request) {
     for (const [index, metadata] of fileMetadatas.entries()) {
       const itemId = crypto.randomUUID();
       const preUploadedStoragePath =
-        typeof metadata?.storage_path === 'string' ? metadata.storage_path.trim() : '';
+        typeof metadata?.storage_path === 'string'
+          ? metadata.storage_path.trim()
+          : '';
       const storagePath = preUploadedStoragePath;
 
       if (!storagePath) {
@@ -455,7 +561,8 @@ export async function POST(request: Request) {
         task_id: task.id,
         owner_id: user.id,
         template_id: templateId,
-        source_pdf_name: metadata?.file_name ?? files[index]?.name ?? `PDF-${index + 1}.pdf`,
+        source_pdf_name:
+          metadata?.file_name ?? files[index]?.name ?? `PDF-${index + 1}.pdf`,
         source_pdf_path: storagePath,
         status: 'uploaded',
         elapsed_seconds: 0,
@@ -477,14 +584,18 @@ export async function POST(request: Request) {
             metadata?.force_vision_page_fill === true ||
             metadata?.force_ocr === true,
           ocr_image_assets: normalizePdfPageImageAssets(metadata),
-          selected_original_page_numbers: normalizeSelectedOriginalPageNumbers(metadata),
-          uploaded_page_number_mapping: normalizeUploadedPageNumberMapping(metadata),
+          selected_original_page_numbers:
+            normalizeSelectedOriginalPageNumbers(metadata),
+          uploaded_page_number_mapping:
+            normalizeUploadedPageNumberMapping(metadata),
           original_total_pages:
-            typeof metadata?.original_total_pages === 'number' && Number.isInteger(metadata.original_total_pages)
+            typeof metadata?.original_total_pages === 'number' &&
+            Number.isInteger(metadata.original_total_pages)
               ? metadata.original_total_pages
               : normalizeParsedPages(metadata).length,
           selected_page_count:
-            typeof metadata?.selected_page_count === 'number' && Number.isInteger(metadata.selected_page_count)
+            typeof metadata?.selected_page_count === 'number' &&
+            Number.isInteger(metadata.selected_page_count)
               ? metadata.selected_page_count
               : normalizeParsedPages(metadata).length,
           selected_page_range_label:
@@ -523,11 +634,14 @@ export async function POST(request: Request) {
       message: `Created generation task with ${items.length} items.`,
       route: '/api/generation-tasks',
       templateId,
-        taskId: task.id,
+      taskId: task.id,
       payload: {
         templateName: task.template_name_snapshot,
         fileCount: fileMetadatas.length,
-        sourcePdfNames: fileMetadatas.map((metadata, index) => metadata.file_name ?? files[index]?.name ?? `PDF-${index + 1}.pdf`),
+        sourcePdfNames: fileMetadatas.map(
+          (metadata, index) =>
+            metadata.file_name ?? files[index]?.name ?? `PDF-${index + 1}.pdf`,
+        ),
       },
     });
 
@@ -558,4 +672,3 @@ export async function POST(request: Request) {
     );
   }
 }
-

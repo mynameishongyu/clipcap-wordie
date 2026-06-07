@@ -1428,7 +1428,7 @@ async function locateSlotsInPageBatch(input: {
                 model: llmConfig.model,
                 provider: traceConfig.provider,
                 request_label: requestLabel,
-                request_mode: 'gemini_native_generate_content_proxy_url',
+                request_mode: 'gemini_native_generate_content_file_api',
                 ...summarizeGeminiNativeRequestForTrace({
                   requestBody: geminiRequestBody,
                 }),

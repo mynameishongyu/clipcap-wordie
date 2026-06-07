@@ -51,3 +51,38 @@ export function requestReviewedDocxDownload(input: {
     'noopener,noreferrer',
   );
 }
+
+export function requestGenerationTaskBatchDocxDownload(input: {
+  taskId: string;
+  defaultFileName: string;
+}) {
+  const sanitizedDefaultName = ensureZipExtension(
+    sanitizeDownloadFileName(input.defaultFileName) ||
+      'batch-generation-results.zip',
+  );
+
+  const nextFileName = window.prompt('请输入下载文件名', sanitizedDefaultName);
+
+  if (nextFileName === null) {
+    return;
+  }
+
+  const sanitizedFileName = sanitizeDownloadFileName(nextFileName);
+
+  if (!sanitizedFileName) {
+    return;
+  }
+
+  const finalFileName = ensureZipExtension(sanitizedFileName);
+  const searchParams = new URLSearchParams({ filename: finalFileName });
+
+  window.open(
+    `/api/generation-tasks/${input.taskId}/download?${searchParams.toString()}`,
+    '_blank',
+    'noopener,noreferrer',
+  );
+}
+
+function ensureZipExtension(value: string) {
+  return value.toLowerCase().endsWith('.zip') ? value : `${value}.zip`;
+}

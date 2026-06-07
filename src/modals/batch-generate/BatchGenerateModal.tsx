@@ -18,7 +18,10 @@ import { notifications } from '@mantine/notifications';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GenerationTaskItemSummary } from '@/src/app/api/types/generation-task';
-import { requestReviewedDocxDownload } from '@/src/lib/generation/download-reviewed-docx';
+import {
+  requestGenerationTaskBatchDocxDownload,
+  requestReviewedDocxDownload,
+} from '@/src/lib/generation/download-reviewed-docx';
 import {
   getPdfRenderConfig,
   getPdfVisionRenderConcurrency,
@@ -3147,20 +3150,7 @@ export function BatchGenerateModal({
                                 >
                                   下载结果
                                 </Button>
-                              ) : (
-                                <Button
-                                  radius="xl"
-                                  variant="default"
-                                  onClick={() => {
-                                    requestReviewedDocxDownload({
-                                      taskItemId: item.id,
-                                      defaultFileName: `${innerProps.templateName}-${item.source_pdf_name.replace(/\.pdf$/i, '')}-未核查结果.docx`,
-                                    });
-                                  }}
-                                >
-                                  下载未核查结果
-                                </Button>
-                              )}
+                              ) : null}
                             </Group>
                           </Group>
                         </>
@@ -3181,13 +3171,32 @@ export function BatchGenerateModal({
               >
                 刷新状态
               </Button>
-              <Button
-                disabled={!canCloseTaskModal}
-                radius="xl"
-                onClick={closeModalWithRefresh}
-              >
-                关闭
-              </Button>
+              <Group>
+                <Button
+                  disabled={!taskId || succeededCount === 0}
+                  radius="xl"
+                  variant="default"
+                  onClick={() => {
+                    if (!taskId) {
+                      return;
+                    }
+
+                    requestGenerationTaskBatchDocxDownload({
+                      taskId,
+                      defaultFileName: `${innerProps.templateName}-本批成功结果.zip`,
+                    });
+                  }}
+                >
+                  下载本批成功结果
+                </Button>
+                <Button
+                  disabled={!canCloseTaskModal}
+                  radius="xl"
+                  onClick={closeModalWithRefresh}
+                >
+                  关闭
+                </Button>
+              </Group>
             </Group>
           </>
         )}
