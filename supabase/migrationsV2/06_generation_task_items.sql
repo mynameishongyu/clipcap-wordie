@@ -1,6 +1,6 @@
 create table if not exists public.generation_task_items (
   id uuid primary key default gen_random_uuid(),
-  task_id uuid not null references public.generation_tasks(id) on delete cascade,
+  task_id uuid references public.generation_tasks(id) on delete set null,
   owner_id uuid not null references public.profiles(id) on delete cascade,
   template_id text references public.templates(id) on delete set null,
   source_pdf_name text not null,
@@ -21,7 +21,9 @@ create table if not exists public.generation_task_items (
   updated_at timestamptz not null default now(),
   started_at timestamptz,
   finished_at timestamptz,
-  reviewed_at timestamptz
+  reviewed_at timestamptz,
+  deleted_at timestamptz,
+  deleted_by uuid references public.profiles(id) on delete set null
 );
 
 create index if not exists generation_task_items_task_created_idx
@@ -29,6 +31,10 @@ create index if not exists generation_task_items_task_created_idx
 
 create index if not exists generation_task_items_owner_created_idx
   on public.generation_task_items(owner_id, created_at desc);
+
+create index if not exists generation_task_items_owner_visible_created_idx
+  on public.generation_task_items(owner_id, created_at desc)
+  where deleted_at is null;
 
 create index if not exists generation_task_items_template_created_idx
   on public.generation_task_items(template_id, created_at desc);

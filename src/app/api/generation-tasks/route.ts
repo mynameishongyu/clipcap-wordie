@@ -356,6 +356,7 @@ export async function GET() {
       .from('generation_tasks')
       .select('id, template_id, template_name_snapshot, status, created_at')
       .eq('owner_id', user.id)
+      .is('deleted_at', null)
       .order('created_at', { ascending: false })
       .limit(30);
 
@@ -375,6 +376,7 @@ export async function GET() {
         'id, task_id, source_pdf_name, status, reviewed_at, created_at, error_message',
       )
       .in('task_id', taskIds)
+      .is('deleted_at', null)
       .order('created_at', { ascending: false });
 
     if (itemsError) {

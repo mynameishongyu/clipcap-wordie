@@ -827,7 +827,8 @@ export async function recalculateTaskSummary(
   const { data: items, error } = await admin
     .from('generation_task_items')
     .select('status')
-    .eq('task_id', taskId);
+    .eq('task_id', taskId)
+    .is('deleted_at', null);
 
   if (error) {
     throw error;

@@ -57,6 +57,7 @@ export async function GET(
         'id, owner_id, template_id, template_name_snapshot, status, total_items, succeeded_items, failed_items, created_at',
       )
       .eq('id', taskId)
+      .is('deleted_at', null)
       .single();
 
     if (taskError || !task) {
@@ -76,6 +77,7 @@ export async function GET(
       .from('generation_task_items')
       .select(itemSelect)
       .eq('task_id', taskId)
+      .is('deleted_at', null)
       .order('created_at', { ascending: true })
       .returns<GenerationTaskItemListRecord[]>();
 
@@ -99,6 +101,7 @@ export async function GET(
           'id, owner_id, template_id, template_name_snapshot, status, total_items, succeeded_items, failed_items, created_at',
         )
         .eq('id', taskId)
+        .is('deleted_at', null)
         .single();
 
       if (refreshedTaskError || !refreshedTask) {
@@ -109,6 +112,7 @@ export async function GET(
         .from('generation_task_items')
         .select(itemSelect)
         .eq('task_id', taskId)
+        .is('deleted_at', null)
         .order('created_at', { ascending: true })
         .returns<GenerationTaskItemListRecord[]>();
 
@@ -159,6 +163,7 @@ export async function DELETE(
       .from('generation_tasks')
       .select('id, owner_id, template_id')
       .eq('id', taskId)
+      .is('deleted_at', null)
       .single();
 
     if (taskError || !task) {
@@ -178,7 +183,8 @@ export async function DELETE(
     const { data: items, error: itemsError } = await admin
       .from('generation_task_items')
       .select('id, source_pdf_path, output_docx_path, llm_input')
-      .eq('task_id', taskId);
+      .eq('task_id', taskId)
+      .is('deleted_at', null);
 
     if (itemsError) {
       throw itemsError;
@@ -212,9 +218,28 @@ export async function DELETE(
       }
     }
 
+    const deletedAt = new Date().toISOString();
+    const { error: deleteItemsError } = await admin
+      .from('generation_task_items')
+      .update({
+        deleted_at: deletedAt,
+        deleted_by: user.id,
+        updated_at: deletedAt,
+      })
+      .eq('task_id', taskId)
+      .is('deleted_at', null);
+
+    if (deleteItemsError) {
+      throw deleteItemsError;
+    }
+
     const { error: deleteTaskError } = await admin
       .from('generation_tasks')
-      .delete()
+      .update({
+        deleted_at: deletedAt,
+        deleted_by: user.id,
+        updated_at: deletedAt,
+      })
       .eq('id', taskId);
 
     if (deleteTaskError) {

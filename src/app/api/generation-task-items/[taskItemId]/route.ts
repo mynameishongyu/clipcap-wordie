@@ -144,6 +144,7 @@ export async function GET(
         'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, page_filter_llm_usage, slot_fill_llm_usage, started_at, finished_at',
       )
       .eq('id', taskItemId)
+      .is('deleted_at', null)
       .single();
 
     if (itemError || !item) {
@@ -162,6 +163,7 @@ export async function GET(
         'id, owner_id, template_id, template_name_snapshot, status, total_items, succeeded_items, failed_items, created_at',
       )
       .eq('id', item.task_id)
+      .is('deleted_at', null)
       .single();
 
     if (taskError || !task) {
@@ -268,7 +270,7 @@ export async function DELETE(
     const { data: item, error: itemError } = await admin
       .from('generation_task_items')
       .select(
-        'id, owner_id, task_id, template_id, source_pdf_path, output_docx_path, llm_input',
+        'id, owner_id, task_id, template_id, source_pdf_path, output_docx_path, llm_input, deleted_at',
       )
       .eq('id', taskItemId)
       .single();
@@ -285,6 +287,16 @@ export async function DELETE(
 
     if (item.owner_id !== user.id) {
       return createUnauthorizedResponse();
+    }
+
+    if (item.deleted_at) {
+      return NextResponse.json({
+        data: {
+          id: taskItemId,
+          task_id: item.task_id,
+          already_deleted: true,
+        },
+      });
     }
 
     const storagePaths = Array.from(
@@ -316,28 +328,44 @@ export async function DELETE(
       }
     }
 
+    const deletedAt = new Date().toISOString();
     const { error: deleteItemError } = await admin
       .from('generation_task_items')
-      .delete()
+      .update({
+        deleted_at: deletedAt,
+        deleted_by: user.id,
+        updated_at: deletedAt,
+      })
       .eq('id', taskItemId);
 
     if (deleteItemError) {
       throw deleteItemError;
     }
 
-    const { count, error: countError } = await admin
-      .from('generation_task_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('task_id', item.task_id);
+    let visibleItemCount: number | null = null;
 
-    if (countError) {
-      throw countError;
+    if (item.task_id) {
+      const { count, error: countError } = await admin
+        .from('generation_task_items')
+        .select('id', { count: 'exact', head: true })
+        .eq('task_id', item.task_id)
+        .is('deleted_at', null);
+
+      if (countError) {
+        throw countError;
+      }
+
+      visibleItemCount = count ?? 0;
     }
 
-    if ((count ?? 0) === 0) {
+    if (item.task_id && visibleItemCount === 0) {
       const { error: deleteTaskError } = await admin
         .from('generation_tasks')
-        .delete()
+        .update({
+          deleted_at: deletedAt,
+          deleted_by: user.id,
+          updated_at: deletedAt,
+        })
         .eq('id', item.task_id);
 
       if (deleteTaskError) {
@@ -353,10 +381,10 @@ export async function DELETE(
       message: 'Generation task item deleted.',
       route: '/api/generation-task-items/[taskItemId]',
       templateId: item.template_id ?? null,
-      taskId: (count ?? 0) === 0 ? null : item.task_id,
+      taskId: item.task_id ?? null,
       taskItemId: null,
       payload: {
-        deletedWholeTask: (count ?? 0) === 0,
+        softDeletedWholeTask: visibleItemCount === 0,
         deletedTaskId: item.task_id,
         deletedTaskItemId: taskItemId,
         storagePathCount: storagePaths.length,

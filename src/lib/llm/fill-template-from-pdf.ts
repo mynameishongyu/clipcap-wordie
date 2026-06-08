@@ -159,6 +159,14 @@ interface DirectVisionSlotFillJob {
   requestLabel: string;
 }
 
+interface DirectVisionReferencePageGroup {
+  referencePageNumber: number;
+  matchedUploadedPageNumber: number;
+  slots: GenerationSlotSchemaItem[];
+  alignedVisionPage: PdfVisionPageInput;
+  referencePage: ReferencePdfVisionPageInput;
+}
+
 type VisionMessageContentPart =
   | { type: 'image_url'; image_url: { url: string } }
   | {
@@ -223,6 +231,8 @@ const PDF_SLOT_FILL_VISION_TIMEOUT_MAX_MS = 300000;
 const MAX_VISION_REQUEST_RETRIES = 2;
 const DEFAULT_DIRECT_VISION_PAGES_LLM_CONCURRENCY = 1;
 const MAX_DIRECT_VISION_PAGES_LLM_CONCURRENCY = 8;
+const DEFAULT_REFERENCE_PAGES_PER_SLOT_FILL_REQUEST = 3;
+const MAX_REFERENCE_PAGES_PER_SLOT_FILL_REQUEST = 10;
 const LEGACY_VISION_OCR_PAGES_PER_REQUEST = 2;
 const LEGACY_VISION_OCR_BATCH_CONCURRENCY = 1;
 const MAX_TEXT_PAGES_PER_CHUNK = 8;
@@ -235,8 +245,13 @@ const LLM_CONNECT_TIMEOUT_MS = 60000;
 const PROCESS_ROUTE_FINALIZATION_RESERVE_MS = 15000;
 const PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV =
   'PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT';
-const PDF_SLOT_EXTRACTION_LLM_OPTIONS = {
-  reasoningEffortEnvName: PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV,
+// const PDF_SLOT_EXTRACTION_LLM_OPTIONS = {
+//   reasoningEffortEnvName: PDF_SLOT_EXTRACTION_VISION_LLM_REASONING_EFFORT_ENV,
+// } as const;
+const PDF_FILL_VISION_LLM_REASONING_EFFORT_ENV =
+  'PDF_FILL_VISION_LLM_REASONING_EFFORT';
+const PDF_FILL_LLM_OPTIONS = {
+  reasoningEffortEnvName: PDF_FILL_VISION_LLM_REASONING_EFFORT_ENV,
 } as const;
 type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
 const llmFetchDispatcher = new Agent({
@@ -264,6 +279,19 @@ function getDirectVisionPagesLlmConcurrency() {
   }
 
   return Math.min(MAX_DIRECT_VISION_PAGES_LLM_CONCURRENCY, parsedValue);
+}
+
+function getReferencePagesPerSlotFillRequest() {
+  const rawValue = getOptionalEnv('PDF_FILL_REFERENCE_PAGES_PER_REQUEST');
+  const parsedValue = rawValue
+    ? Number(rawValue)
+    : DEFAULT_REFERENCE_PAGES_PER_SLOT_FILL_REQUEST;
+
+  if (!Number.isInteger(parsedValue) || parsedValue < 1) {
+    return DEFAULT_REFERENCE_PAGES_PER_SLOT_FILL_REQUEST;
+  }
+
+  return Math.min(MAX_REFERENCE_PAGES_PER_SLOT_FILL_REQUEST, parsedValue);
 }
 
 function repairCommonJsonBarewords(rawJson: string) {
@@ -952,6 +980,7 @@ function buildSlotContexts(slotName: string, pages: PdfPageInput[]) {
   return contexts;
 }
 
+/*
 async function extractSlotWithTextModel(input: {
   documentName: string;
   slot: GenerationSlotSchemaItem;
@@ -1107,10 +1136,8 @@ async function extractSlotWithTextModel(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
-          .model,
-        baseUrl: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
-          .baseUrl,
+        model: getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS).model,
+        baseUrl: getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS).baseUrl,
         attempt,
       });
       const shouldRetry =
@@ -1135,6 +1162,7 @@ async function extractSlotWithTextModel(input: {
 
   throw new Error('PDF slot fill failed after multiple attempts.');
 }
+*/
 
 async function extractTextFromVisionPages(input: {
   documentName: string;
@@ -2091,7 +2119,7 @@ async function extractAllSlotsWithTextModel(input: {
       });
       const visionTraceConfig = getLlmRuntimeTraceConfig(
         'vision',
-        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+        PDF_FILL_LLM_OPTIONS,
       );
       const requestStartedMessage =
         `[PDF Fill][Vision] Starting ${requestLabel} for ${input.documentName} ` +
@@ -2146,7 +2174,7 @@ async function extractAllSlotsWithTextModel(input: {
 
       const llmConfig = getLlmRuntimeConfig(
         'vision',
-        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+        PDF_FILL_LLM_OPTIONS,
       );
       const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
@@ -2308,10 +2336,8 @@ async function extractAllSlotsWithTextModel(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
-          .model,
-        baseUrl: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
-          .baseUrl,
+        model: getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS).model,
+        baseUrl: getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS).baseUrl,
         attempt,
       });
       const requestLabel = input.requestLabel ?? 'full-text slot request';
@@ -2963,6 +2989,7 @@ function buildDirectVisionSlotFillJobs(input: {
     number,
     GenerationSlotSchemaItem[]
   >();
+  const referencePageGroups: DirectVisionReferencePageGroup[] = [];
 
   input.slots.forEach((slot) => {
     const referencePageNumber = getSlotReferencePageNumber(slot);
@@ -3003,13 +3030,52 @@ function buildDirectVisionSlotFillJobs(input: {
       return;
     }
 
-    jobs.push({
+    referencePageGroups.push({
+      referencePageNumber,
+      matchedUploadedPageNumber: alignment.matched_uploaded_page_number,
       slots,
-      visionPages: [alignedVisionPage],
-      referenceExamplePages: [referencePage],
-      requestLabel: `reference page ${referencePageNumber} aligned to uploaded page ${alignment.matched_uploaded_page_number}`,
+      alignedVisionPage,
+      referencePage,
     });
   });
+
+  referencePageGroups.sort(
+    (left, right) => left.referencePageNumber - right.referencePageNumber,
+  );
+
+  const referencePageBatchSize = getReferencePagesPerSlotFillRequest();
+
+  for (
+    let index = 0;
+    index < referencePageGroups.length;
+    index += referencePageBatchSize
+  ) {
+    const batch = referencePageGroups.slice(
+      index,
+      index + referencePageBatchSize,
+    );
+    const visionPageByBatchPageNumber = new Map(
+      batch.map((group) => [
+        group.alignedVisionPage.page_number,
+        group.alignedVisionPage,
+      ]),
+    );
+    const referencePageNumbers = batch.map(
+      (group) => group.referencePageNumber,
+    );
+    const matchedUploadedPageNumbers = Array.from(
+      visionPageByBatchPageNumber.keys(),
+    ).sort((left, right) => left - right);
+
+    jobs.push({
+      slots: batch.flatMap((group) => group.slots),
+      visionPages: Array.from(visionPageByBatchPageNumber.values()),
+      referenceExamplePages: batch.map((group) => group.referencePage),
+      requestLabel:
+        `reference pages ${referencePageNumbers.join(', ')} aligned to ` +
+        `uploaded page(s) ${matchedUploadedPageNumbers.join(', ')}`,
+    });
+  }
 
   if (fallbackSlots.length > 0) {
     buildDirectVisionPageBatches(fallbackVisionPages).forEach(
@@ -3126,7 +3192,7 @@ async function extractSlotsFromVisionPageBatch(input: {
       });
       const visionTraceConfig = getLlmRuntimeTraceConfig(
         'vision',
-        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+        PDF_FILL_LLM_OPTIONS,
       );
 
       await input.onTrace?.({
@@ -3298,7 +3364,7 @@ async function extractSlotsFromVisionPageBatch(input: {
 
       const llmConfig = getLlmRuntimeConfig(
         'vision',
-        PDF_SLOT_EXTRACTION_LLM_OPTIONS,
+        PDF_FILL_LLM_OPTIONS,
       );
       const requestBody = withProviderJsonResponseFormat(
         buildChatCompletionBody(llmConfig, {
@@ -3332,6 +3398,7 @@ async function extractSlotsFromVisionPageBatch(input: {
         usageMetadata?: unknown;
         usage_metadata?: unknown;
       };
+      let usagePayload: unknown;
       let modelRequestDurationMs: number | null = null;
       let requestMode = 'chat_completions';
 
@@ -3365,14 +3432,8 @@ async function extractSlotsFromVisionPageBatch(input: {
         });
 
         modelRequestDurationMs = geminiResult.timings.totalDurationMs;
-        recordLlmUsageFromPayload(input.usageAccumulator, {
-          phase: 'slot_fill_direct_vision',
-          provider: llmConfig.provider,
-          model: llmConfig.model,
-          requestLabel,
-          payload: geminiResult.responsePayload,
-        });
         payload = geminiResult.payload;
+        usagePayload = geminiResult.responsePayload;
       } else {
         await input.onTrace?.({
           message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
@@ -3407,14 +3468,17 @@ async function extractSlotsFromVisionPageBatch(input: {
 
         payload = (await upstream.json()) as typeof payload;
         modelRequestDurationMs = Date.now() - upstreamStartedAt;
-        recordLlmUsageFromPayload(input.usageAccumulator, {
-          phase: 'slot_fill_direct_vision',
-          provider: llmConfig.provider,
-          model: llmConfig.model,
-          requestLabel,
-          payload,
-        });
+        usagePayload = payload;
       }
+
+      recordLlmUsageFromPayload(input.usageAccumulator, {
+        phase: 'slot_fill_direct_vision',
+        provider: llmConfig.provider,
+        model: llmConfig.model,
+        requestLabel,
+        payload: usagePayload,
+      });
+
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -3574,10 +3638,8 @@ async function extractSlotsFromVisionPageBatch(input: {
       const normalizedError = wrapFetchFailure(error, {
         stage: 'vision-slot-fill',
         documentName: input.documentName,
-        model: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
-          .model,
-        baseUrl: getLlmRuntimeConfig('vision', PDF_SLOT_EXTRACTION_LLM_OPTIONS)
-          .baseUrl,
+        model: getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS).model,
+        baseUrl: getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS).baseUrl,
         attempt,
       });
       const shouldRetry =

@@ -192,58 +192,15 @@ export async function DELETE(
         templateId,
       });
 
-    const { data: relatedTasks, error: relatedTasksError } = await admin
+    const { count: relatedTaskCount, error: relatedTasksError } = await admin
       .from('generation_tasks')
-      .select('id')
+      .select('id', { count: 'exact', head: true })
       .eq('owner_id', user.id)
-      .eq('template_id', templateId);
+      .eq('template_id', templateId)
+      .is('deleted_at', null);
 
     if (relatedTasksError) {
       throw relatedTasksError;
-    }
-
-    const taskIds = (relatedTasks ?? []).map((task) => task.id);
-
-    if (taskIds.length > 0) {
-      const { data: relatedItems, error: relatedItemsError } = await admin
-        .from('generation_task_items')
-        .select('source_pdf_path, output_docx_path')
-        .in('task_id', taskIds);
-
-      if (relatedItemsError) {
-        throw relatedItemsError;
-      }
-
-      const storagePaths = Array.from(
-        new Set(
-          (relatedItems ?? [])
-            .flatMap((item) => [item.source_pdf_path, item.output_docx_path])
-            .filter(
-              (value): value is string =>
-                typeof value === 'string' && value.trim().length > 0,
-            ),
-        ),
-      );
-
-      if (storagePaths.length > 0) {
-        const { error: removeStorageError } = await admin.storage
-          .from('generation-pdfs')
-          .remove(storagePaths);
-
-        if (removeStorageError) {
-          throw removeStorageError;
-        }
-      }
-
-      const { error: deleteTasksError } = await admin
-        .from('generation_tasks')
-        .delete()
-        .eq('owner_id', user.id)
-        .eq('template_id', templateId);
-
-      if (deleteTasksError) {
-        throw deleteTasksError;
-      }
     }
 
     const { error: deleteTemplateError } = await admin
@@ -266,7 +223,7 @@ export async function DELETE(
       templateId,
       payload: {
         templateName: template.template_name ?? null,
-        relatedTaskCount: taskIds.length,
+        relatedTaskCount: relatedTaskCount ?? 0,
         templateReferenceStoragePathCount,
       },
     });

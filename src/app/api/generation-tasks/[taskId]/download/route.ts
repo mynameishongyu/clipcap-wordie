@@ -79,6 +79,7 @@ export async function GET(
     .from('generation_tasks')
     .select('id, owner_id, template_id, template_name_snapshot')
     .eq('id', taskId)
+    .is('deleted_at', null)
     .single();
 
   if (taskError || !task) {
@@ -131,6 +132,7 @@ export async function GET(
       'id, source_pdf_name, status, review_payload, llm_output, created_at',
     )
     .eq('task_id', taskId)
+    .is('deleted_at', null)
     .in('status', ['review_pending', 'reviewed'])
     .order('created_at', { ascending: true })
     .returns<BatchDownloadTaskItem[]>();

@@ -1445,6 +1445,7 @@ export async function POST(
       .from('generation_task_items')
       .select(generationTaskItemSelect)
       .eq('id', taskItemId)
+      .is('deleted_at', null)
       .single<GenerationTaskItemRecord>();
 
     if (itemError || !item) {

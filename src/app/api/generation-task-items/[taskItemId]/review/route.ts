@@ -38,6 +38,7 @@ export async function POST(
       .from('generation_task_items')
       .select('id, owner_id, task_id')
       .eq('id', taskItemId)
+      .is('deleted_at', null)
       .single();
 
     if (existingItemError || !existingItem) {
@@ -64,6 +65,7 @@ export async function POST(
         reviewed_at: reviewedAt,
       })
       .eq('id', taskItemId)
+      .is('deleted_at', null)
       .select(
         'id, task_id, source_pdf_name, source_pdf_path, status, elapsed_seconds, slot_total_count, slot_completed_count, processing_trace, created_at, reviewed_at, output_docx_path, error_message, llm_input, llm_output, review_payload, started_at, finished_at',
       )
@@ -79,6 +81,7 @@ export async function POST(
         'id, owner_id, template_id, template_name_snapshot, status, total_items, succeeded_items, failed_items, created_at',
       )
       .eq('id', item.task_id)
+      .is('deleted_at', null)
       .single();
 
     if (taskError || !task) {

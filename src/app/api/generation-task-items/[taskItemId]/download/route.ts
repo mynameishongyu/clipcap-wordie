@@ -32,6 +32,7 @@ export async function GET(
     .from('generation_task_items')
     .select('id, task_id, source_pdf_name, status, review_payload, llm_output')
     .eq('id', taskItemId)
+    .is('deleted_at', null)
     .single();
 
   if (error || !item) {
@@ -58,6 +59,7 @@ export async function GET(
     .from('generation_tasks')
     .select('id, template_id')
     .eq('id', item.task_id)
+    .is('deleted_at', null)
     .single();
 
   if (taskError || !task?.template_id) {

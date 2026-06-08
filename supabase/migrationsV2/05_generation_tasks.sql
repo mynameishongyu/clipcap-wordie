@@ -10,11 +10,17 @@ create table if not exists public.generation_tasks (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   started_at timestamptz,
-  finished_at timestamptz
+  finished_at timestamptz,
+  deleted_at timestamptz,
+  deleted_by uuid references public.profiles(id) on delete set null
 );
 
 create index if not exists generation_tasks_owner_created_idx
   on public.generation_tasks(owner_id, created_at desc);
+
+create index if not exists generation_tasks_owner_visible_created_idx
+  on public.generation_tasks(owner_id, created_at desc)
+  where deleted_at is null;
 
 create index if not exists generation_tasks_template_created_idx
   on public.generation_tasks(template_id, created_at desc);
