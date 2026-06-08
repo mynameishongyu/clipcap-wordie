@@ -25,7 +25,7 @@ import {
 } from '@/src/lib/llm/usage';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
-const EXTRACTION_TIMEOUT_MS = 120000;
+const EXTRACTION_TIMEOUT_MS = 300000;
 const EXTRACTION_MAX_RETRIES = 2;
 const DEFAULT_MIN_PARAGRAPH_CHARACTER_COUNT = 6;
 const DEFAULT_TEMPLATE_EXTRACTION_LLM_CONCURRENCY = 2;
