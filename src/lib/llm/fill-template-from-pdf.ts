@@ -599,6 +599,9 @@ function stringifyTraceJson(value: unknown) {
 const TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT =
   'final_value is the replacement for template_original_value in the DOCX template, not necessarily the full field phrase seen in the PDF. Match the granularity of template_original_value and do not add extra suffixes, units, or duplicated fixed text unless they are part of template_original_value. Examples: template_original_value "0.4" -> return "0.4167", not "0.4167%"; template_original_value "40800" -> return "17,500", not "17,500元"; template_original_value "汉" -> return "汉", not "汉族".';
 
+const TEMPLATE_REPLACEMENT_VALUE_GRANULARITY_EXAMPLES =
+  'Do not add vehicle category words, explanatory words, or broader field phrases when template_original_value is shorter. Example: template_original_value "解放牌" -> return "东风日产牌", not "东风日产牌汽车".';
+
 export function buildTextSlotFillPromptPayload(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
@@ -1726,6 +1729,28 @@ function normalizeGenderReplacement(
   return trimmedValue;
 }
 
+function normalizeVehicleBrandReplacement(
+  templateOriginalValue: string,
+  value: string,
+) {
+  const templateValue = templateOriginalValue.trim();
+  const trimmedValue = value.trim();
+
+  if (!templateValue.endsWith('牌')) {
+    return trimmedValue;
+  }
+
+  if (/(?:汽车|车辆|机动车|轿车|小型汽车|客车|货车)/u.test(templateValue)) {
+    return trimmedValue;
+  }
+
+  const matchedBrand = trimmedValue.match(
+    /^(.+?牌)\s*(?:汽车|车辆|机动车|轿车|小型汽车|客车|货车)+$/u,
+  );
+
+  return matchedBrand?.[1]?.trim() || trimmedValue;
+}
+
 function normalizeReplacementValueByTemplateOriginalValue(
   slot: Pick<GenerationSlotSchemaItem, 'template_original_value'>,
   value: string,
@@ -1757,6 +1782,10 @@ function normalizeReplacementValueByTemplateOriginalValue(
     normalizedValue,
   );
   normalizedValue = normalizeGenderReplacement(
+    templateOriginalValue,
+    normalizedValue,
+  );
+  normalizedValue = normalizeVehicleBrandReplacement(
     templateOriginalValue,
     normalizedValue,
   );
@@ -2459,7 +2488,12 @@ function buildDirectVisionSlotFillPromptPayload(input: {
         ? 'For reference-based slots, final_value must come from the layout-equivalent source region in the new PDF image. Do not choose a semantically similar field from a different row, column, table section, screen region, or nearby label if it does not match the reference bbox source identity.'
         : 'For non-reference slots, choose the most specific visible field that matches the slot meaning and nearby labels.',
       'Label qualifiers such as M1, CD2, CCOS, CD1, M6+, CD3, numbers, letters, and parenthesized suffixes are part of the field identity. For example, "overdue date (M1)" and "overdue date (CD2)" are different fields. If the reference source contains one qualifier, do not use a field with a different qualifier.',
+      'For table cells, the exact nearby field label, row label, column label, section title, and qualifier are stronger evidence than a semantically similar value. Do not substitute CD2 for M1, M1 for CD2, CCOS for another date field, or one fee/balance cell for a neighboring fee/balance cell.',
+      'If slot_source, meaning_to_applicant, or the reference source identity indicates system time, Windows taskbar time, bottom-right computer date, "系统时间", or "系统时间加1天", read the Windows taskbar date from the new PDF image as the base value. Do not use business table dates such as M1, CD2, CCOS, billing cycle dates, overdue dates, or repayment dates for these slots.',
+      'If the source identity says add one day, plus one day, "+1 day", "加1天", or "系统时间加1天", add exactly one calendar day to the base system date before returning final_value. matches[0].evidence_text must show both the base visible taskbar date and the +1 day transformation.',
+      'For amount and fee fields, preserve the visible decimal precision from the matched source cell. Do not round, truncate, or drop decimals such as .32 unless template_original_value itself has no decimal precision and the visible source clearly has none.',
       TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT,
+      TEMPLATE_REPLACEMENT_VALUE_GRANULARITY_EXAMPLES,
       'Search only New PDF uploaded page images for final values. The new PDF may have different page numbers and layout than the reference PDF.',
       'For matches[0].page_number, use only the uploaded-page number shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". Do not use printed page numbers or reference page numbers.',
       'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, prefer the candidate whose page, section, nearby label, and visual region best match slot_source and the reference box when available. Leave final_value empty if the source cannot be distinguished.',
@@ -2469,6 +2503,7 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       hasReferenceExampleImages
         ? 'For reference-based slots, matches[0].evidence_text must include the matched source label or enough nearby context from the new PDF image to prove it is the same source identity as the reference bbox. If the evidence points to a different qualifier or neighboring field, leave final_value empty.'
         : 'For non-reference slots, matches[0].evidence_text must include the visible source value and nearby label/context.',
+      'For derived values, matches[0].evidence_text must prove the derivation source, for example: "Windows taskbar date 2026/4/22, plus one day -> 2026年4月23日". For copied table values, evidence_text must include the exact field label and visible value, for example: "逾期日期(M1): 20250724" or "已逾期分期手续费: 1983.32".',
       'matches[0].matched_reference_label should equal reference_example_pdf_evidence.example_annotation_label only when a reference box was used; otherwise return null or an empty string.',
     ],
     output_schema: {
