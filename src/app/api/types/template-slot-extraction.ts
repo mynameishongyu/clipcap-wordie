@@ -12,13 +12,21 @@ export const extractionItemSchema = z.object({
 
 export const extractionParagraphSchema = z.object({
   paragraph_index: z.number().int().nonnegative().optional(),
-  paragraph_title: z.string().optional().default(''),
+  paragraph_title: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? ''),
   items: z.array(extractionItemSchema),
 });
 
 export const templateSlotExtractionResultSchema = z.object({
   document_info: z.object({
-    document_name: z.string(),
+    document_name: z
+      .string()
+      .nullable()
+      .optional()
+      .transform((value) => value ?? ''),
   }),
   extraction_result: z.array(extractionParagraphSchema),
 });
