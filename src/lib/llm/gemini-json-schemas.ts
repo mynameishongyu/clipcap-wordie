@@ -141,7 +141,7 @@ export const geminiTemplatePdfLocateResponseSchema = {
           page_number: { type: 'integer' },
           bbox_target: nullableString,
           bbox: {
-            type: ['object', 'null'],
+            type: 'object',
             properties: {
               x: { type: 'number' },
               y: { type: 'number' },
