@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.80",
     "@ai-sdk/openai-compatible": "^2.0.41",
     "@mantine/core": "^9.0.0",
     "@mantine/hooks": "^9.0.0",

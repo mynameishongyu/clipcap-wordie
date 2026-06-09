@@ -6,6 +6,10 @@ import {
   summarizeGeminiNativeRequestForTrace,
 } from '@/src/lib/llm/gemini-native';
 import {
+  callGeminiAiSdkJson,
+  convertMessagesToGeminiAiSdkMessages,
+} from '@/src/lib/llm/gemini-ai-sdk';
+import {
   geminiOcrPagesResponseSchema,
   geminiPdfSlotExtractionResponseSchema,
   geminiPdfSlotFillResponseSchema,
@@ -21,6 +25,7 @@ import {
   getLlmRuntimeTraceConfig,
 } from '@/src/lib/llm/provider';
 import {
+  recordLlmUsageFromAiSdkUsage,
   recordLlmUsageFromPayload,
   type LlmUsageAccumulator,
 } from '@/src/lib/llm/usage';
@@ -2447,13 +2452,23 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       hasReferenceExampleImages
         ? 'For each slot with reference_example_pdf_evidence, first inspect the matching reference box and then search the provided new PDF images for the layout-equivalent source.'
         : 'For each slot, identify the most reliable visible value in the new PDF using the slot name, slot_source, nearby labels, form title, and surrounding layout.',
+      hasReferenceExampleImages
+        ? 'When reference_example_pdf_evidence is available, determine the source identity in this priority order: (1) the annotated orange bbox region on the reference image, (2) visible nearby labels, table titles, section titles, row/column headers, and neighboring fields around that bbox, (3) the annotation label or slot-key on the bbox, (4) slot_source, and only then (5) slot_name. slot_source and slot_name may be generic or model-generated, so never use them alone to override the reference bbox source identity.'
+        : 'When no reference image is available, use slot_source and slot_name together with visible labels, table titles, section titles, and neighboring fields in the new PDF image.',
+      hasReferenceExampleImages
+        ? 'For reference-based slots, final_value must come from the layout-equivalent source region in the new PDF image. Do not choose a semantically similar field from a different row, column, table section, screen region, or nearby label if it does not match the reference bbox source identity.'
+        : 'For non-reference slots, choose the most specific visible field that matches the slot meaning and nearby labels.',
+      'Label qualifiers such as M1, CD2, CCOS, CD1, M6+, CD3, numbers, letters, and parenthesized suffixes are part of the field identity. For example, "overdue date (M1)" and "overdue date (CD2)" are different fields. If the reference source contains one qualifier, do not use a field with a different qualifier.',
       TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT,
       'Search only New PDF uploaded page images for final values. The new PDF may have different page numbers and layout than the reference PDF.',
       'For matches[0].page_number, use only the uploaded-page number shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". Do not use printed page numbers or reference page numbers.',
       'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, prefer the candidate whose page, section, nearby label, and visual region best match slot_source and the reference box when available. Leave final_value empty if the source cannot be distinguished.',
       'Return a final_value only if it is visible or strongly inferable from the provided new PDF images.',
-      'For dates, normalize visible dates to Chinese date format when possible, such as 2026年3月30日. For money amounts and rates, preserve visible digits, decimals, and commas; include units only when template_original_value also includes that unit.',
+      'For dates, normalize visible dates to Chinese date format when possible, using the pattern YYYY\\u5e74M\\u6708D\\u65e5. For money amounts and rates, preserve visible digits, decimals, and commas; include units only when template_original_value also includes that unit.',
       'matches[0].value must equal final_value. matches[0].evidence_text must include the visible source value and nearby label/context.',
+      hasReferenceExampleImages
+        ? 'For reference-based slots, matches[0].evidence_text must include the matched source label or enough nearby context from the new PDF image to prove it is the same source identity as the reference bbox. If the evidence points to a different qualifier or neighboring field, leave final_value empty.'
+        : 'For non-reference slots, matches[0].evidence_text must include the visible source value and nearby label/context.',
       'matches[0].matched_reference_label should equal reference_example_pdf_evidence.example_annotation_label only when a reference box was used; otherwise return null or an empty string.',
     ],
     output_schema: {
@@ -2810,19 +2825,23 @@ async function alignReferencePagesToVisionPages(input: {
       let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
-        requestMode = 'gemini_native_generate_content_file_api';
-        const geminiResult = await callGeminiNativeChatCompletion({
-          config: llmConfig,
-          body: requestBody,
-          requestLabel: 'reference page alignment',
-          dispatcher: llmFetchDispatcher,
-          signal: controller.signal,
-          structuredOutput: {
-            responseMimeType: 'application/json',
-            responseSchema: geminiReferencePageAlignmentResponseSchema,
-          },
-          onTrace: input.onTrace,
-        });
+        requestMode = 'ai_sdk_generate_object_supabase_signed_url';
+        // Previous Gemini path used callGeminiNativeChatCompletion with
+        // Gemini File API / proxy image references. Keep the native helper
+        // available for rollback; the active path uses @ai-sdk/google and
+        // Supabase signed image URLs.
+        // const geminiResult = await callGeminiNativeChatCompletion({
+        //   config: llmConfig,
+        //   body: requestBody,
+        //   requestLabel: 'reference page alignment',
+        //   dispatcher: llmFetchDispatcher,
+        //   signal: controller.signal,
+        //   structuredOutput: {
+        //     responseMimeType: 'application/json',
+        //     responseSchema: geminiReferencePageAlignmentResponseSchema,
+        //   },
+        //   onTrace: input.onTrace,
+        // });
 
         await input.onTrace?.({
           message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
@@ -2833,13 +2852,57 @@ async function alignReferencePagesToVisionPages(input: {
               provider: visionTraceConfig.provider,
               request_label: 'reference page alignment',
               request_mode: requestMode,
-              ...summarizeGeminiNativeRequestForTrace(geminiResult),
+              request_body: summarizeChatCompletionBodyForTrace(requestBody),
+              image_url_note:
+                'Gemini uses @ai-sdk/google with Supabase signed image URLs. image_url.url is summarized in trace logs.',
             },
           )}`,
         });
 
-        payload = geminiResult.payload;
-        usagePayload = geminiResult.responsePayload;
+        const aiSdkResult = await callGeminiAiSdkJson<unknown>({
+          config: llmConfig,
+          messages: convertMessagesToGeminiAiSdkMessages([
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF page alignment assistant. Match annotated reference pages to uploaded new PDF pages by page-level layout, labels, titles, and form structure. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ]),
+          schema: geminiReferencePageAlignmentResponseSchema,
+          schemaName: 'reference_page_alignment',
+          requestLabel: 'reference page alignment',
+          abortSignal: controller.signal,
+          imageTraceSources: [
+            ...input.referenceExamplePages.map((page) => ({
+              storage_path: page.annotated_storage_path ?? null,
+              page_number: page.page_number,
+              original_page_number:
+                page.original_page_number ?? page.page_number,
+            })),
+            ...input.visionPages.map((page) => ({
+              page_number: page.page_number,
+              original_page_number:
+                page.original_page_number ?? page.page_number,
+            })),
+          ],
+          onTrace: input.onTrace,
+        });
+
+        modelRequestDurationMs = aiSdkResult.durationMs;
+        payload = {
+          choices: [
+            {
+              message: {
+                content: aiSdkResult.rawText,
+              },
+            },
+          ],
+        };
+        usagePayload = aiSdkResult.usage;
       } else {
         await input.onTrace?.({
           message: `[PDF Fill][ReferenceAlignmentRequestBody] ${stringifyTraceJson(
@@ -2874,13 +2937,23 @@ async function alignReferencePagesToVisionPages(input: {
         payload = (await upstream.json()) as typeof payload;
         usagePayload = payload;
       }
-      recordLlmUsageFromPayload(input.usageAccumulator, {
-        payload: usagePayload,
-        phase: 'slot_fill_reference_page_alignment',
-        provider: llmConfig.provider,
-        model: llmConfig.model,
-        requestLabel: 'reference page alignment',
-      });
+      if (llmConfig.provider === 'gemini') {
+        recordLlmUsageFromAiSdkUsage(input.usageAccumulator, {
+          usage: usagePayload,
+          phase: 'slot_fill_reference_page_alignment',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel: 'reference page alignment',
+        });
+      } else {
+        recordLlmUsageFromPayload(input.usageAccumulator, {
+          payload: usagePayload,
+          phase: 'slot_fill_reference_page_alignment',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel: 'reference page alignment',
+        });
+      }
       const rawContent = payload?.choices?.[0]?.message?.content;
 
       if (typeof rawContent !== 'string' || !rawContent.trim()) {
@@ -3322,7 +3395,7 @@ async function extractSlotsFromVisionPageBatch(input: {
               page.example_pdf_file_name
                 ? ` from ${page.example_pdf_file_name}`
                 : ''
-            }. Orange boxes show the reviewed template slot source positions and labels. Use these as layout/source clues; do not extract final values from this example image.${annotatedSlotsText}`,
+            }. Orange boxes define the source identity for the labeled slots, not just examples. When filling the new PDF, match the same source identity and layout-equivalent region. Do not extract final values from this reference image.${annotatedSlotsText}`,
         });
         if (page.gemini_file) {
           content.push({
@@ -3403,19 +3476,23 @@ async function extractSlotsFromVisionPageBatch(input: {
       let requestMode = 'chat_completions';
 
       if (llmConfig.provider === 'gemini') {
-        requestMode = 'gemini_native_generate_content_file_api';
-        const geminiResult = await callGeminiNativeChatCompletion({
-          config: llmConfig,
-          body: requestBody,
-          requestLabel,
-          dispatcher: llmFetchDispatcher,
-          signal: controller.signal,
-          structuredOutput: {
-            responseMimeType: 'application/json',
-            responseSchema: geminiPdfSlotExtractionResponseSchema,
-          },
-          onTrace: input.onTrace,
-        });
+        requestMode = 'ai_sdk_generate_object_supabase_signed_url';
+        // Previous Gemini path used callGeminiNativeChatCompletion with
+        // Gemini File API / proxy image references. Keep the native helper
+        // available for rollback; the active path uses @ai-sdk/google and
+        // Supabase signed image URLs.
+        // const geminiResult = await callGeminiNativeChatCompletion({
+        //   config: llmConfig,
+        //   body: requestBody,
+        //   requestLabel,
+        //   dispatcher: llmFetchDispatcher,
+        //   signal: controller.signal,
+        //   structuredOutput: {
+        //     responseMimeType: 'application/json',
+        //     responseSchema: geminiPdfSlotExtractionResponseSchema,
+        //   },
+        //   onTrace: input.onTrace,
+        // });
 
         await input.onTrace?.({
           message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
@@ -3426,14 +3503,57 @@ async function extractSlotsFromVisionPageBatch(input: {
               provider: visionTraceConfig.provider,
               request_label: requestLabel,
               request_mode: requestMode,
-              ...summarizeGeminiNativeRequestForTrace(geminiResult),
+              request_body: summarizeChatCompletionBodyForTrace(requestBody),
+              image_url_note:
+                'Gemini uses @ai-sdk/google with Supabase signed image URLs. image_url.url is summarized in trace logs.',
             },
           )}`,
         });
 
-        modelRequestDurationMs = geminiResult.timings.totalDurationMs;
-        payload = geminiResult.payload;
-        usagePayload = geminiResult.responsePayload;
+        const aiSdkResult = await callGeminiAiSdkJson<unknown>({
+          config: llmConfig,
+          messages: convertMessagesToGeminiAiSdkMessages([
+            {
+              role: 'system',
+              content:
+                'You are a visual PDF slot filling assistant. Inspect page images directly and extract only the requested slot values. Return compact JSON only.',
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ]),
+          schema: geminiPdfSlotExtractionResponseSchema,
+          schemaName: 'pdf_slot_fill_direct_vision',
+          requestLabel,
+          abortSignal: controller.signal,
+          imageTraceSources: [
+            ...input.referenceExamplePages.map((page) => ({
+              storage_path: page.annotated_storage_path ?? null,
+              page_number: page.page_number,
+              original_page_number:
+                page.original_page_number ?? page.page_number,
+            })),
+            ...input.visionPages.map((page) => ({
+              page_number: page.page_number,
+              original_page_number:
+                page.original_page_number ?? page.page_number,
+            })),
+          ],
+          onTrace: input.onTrace,
+        });
+
+        modelRequestDurationMs = aiSdkResult.durationMs;
+        payload = {
+          choices: [
+            {
+              message: {
+                content: aiSdkResult.rawText,
+              },
+            },
+          ],
+        };
+        usagePayload = aiSdkResult.usage;
       } else {
         await input.onTrace?.({
           message: `[PDF Fill][DirectVisionRequestBody][${requestLabel}] ${stringifyTraceJson(
@@ -3471,13 +3591,23 @@ async function extractSlotsFromVisionPageBatch(input: {
         usagePayload = payload;
       }
 
-      recordLlmUsageFromPayload(input.usageAccumulator, {
-        phase: 'slot_fill_direct_vision',
-        provider: llmConfig.provider,
-        model: llmConfig.model,
-        requestLabel,
-        payload: usagePayload,
-      });
+      if (llmConfig.provider === 'gemini') {
+        recordLlmUsageFromAiSdkUsage(input.usageAccumulator, {
+          phase: 'slot_fill_direct_vision',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel,
+          usage: usagePayload,
+        });
+      } else {
+        recordLlmUsageFromPayload(input.usageAccumulator, {
+          phase: 'slot_fill_direct_vision',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel,
+          payload: usagePayload,
+        });
+      }
 
       const rawContent = payload?.choices?.[0]?.message?.content;
 

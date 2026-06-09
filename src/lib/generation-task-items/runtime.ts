@@ -12,6 +12,7 @@ import {
   uploadGeminiFileStream,
   type UploadedGeminiFile,
 } from '@/src/lib/llm/gemini-file-api';
+import { createSupabaseSignedImageUrl } from '@/src/lib/llm/supabase-signed-image';
 import type { LlmRuntimeConfig } from '@/src/lib/llm/provider';
 import type {
   GenerationSlotSchemaItem,
@@ -19,7 +20,6 @@ import type {
   PdfVisionPageInput,
 } from '@/src/lib/llm/fill-template-from-pdf';
 import { createSupabaseAdminClient } from '@/src/lib/supabase/admin';
-import { getSupabaseSignedUrlExpiresInSeconds } from '@/src/lib/supabase/signed-url';
 
 export type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
@@ -490,22 +490,14 @@ async function createStorageSignedUrl(params: {
   admin: AdminClient;
   storagePath: string;
 }) {
-  const { data, error } = await params.admin.storage
-    .from('generation-pdfs')
-    .createSignedUrl(
-      params.storagePath,
-      getSupabaseSignedUrlExpiresInSeconds(),
-    );
+  const signedImage = await createSupabaseSignedImageUrl({
+    admin: params.admin,
+    source: {
+      storagePath: params.storagePath,
+    },
+  });
 
-  if (error || !data?.signedUrl) {
-    throw new Error(
-      `[StorageSignedUrlFailed] storage_path=${params.storagePath}, error=${
-        error?.message ?? 'missing signed URL'
-      }`,
-    );
-  }
-
-  return data.signedUrl;
+  return signedImage.signedUrl;
 }
 
 export async function buildStoredPageImageSupabaseSignedUrlVisionPages(params: {

@@ -9,6 +9,7 @@ import {
   geminiTemplateSlotExtractionResponseSchema,
   withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
+import { callGeminiAiSdkJson } from '@/src/lib/llm/gemini-ai-sdk';
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
   buildChatCompletionBody,
@@ -18,11 +19,13 @@ import {
 } from '@/src/lib/llm/provider';
 import {
   createLlmUsageAccumulator,
+  recordLlmUsageFromAiSdkUsage,
   recordLlmUsageFromPayload,
   summarizeLlmUsage,
   type LlmUsageAccumulator,
   type LlmUsageSummary,
 } from '@/src/lib/llm/usage';
+import type { ModelMessage } from 'ai';
 import { normalizeSlotCategoryLabel } from '@/src/lib/templates/slot-category';
 
 const EXTRACTION_TIMEOUT_MS = 300000;
@@ -544,6 +547,94 @@ async function requestTextLlmJson(input: {
           content: input.prompt,
         },
       ];
+      if (llmConfig.provider === 'gemini') {
+        const aiSdkMessages = [
+          {
+            role: 'system',
+            content: EXTRACTION_SYSTEM_PROMPT,
+          },
+          {
+            role: 'user',
+            content: input.prompt,
+          },
+        ] satisfies ModelMessage[];
+
+        await input.onTrace?.({
+          message:
+            `[Template Extract][TextRequestBody][${paragraphRequestTraceLabel}] ` +
+            stringifyTraceJson({
+              route: '/api/template-extraction-tasks/[taskId]/process',
+              config_scope: 'TEXT_LLM',
+              provider: llmConfig.provider,
+              provider_package: '@ai-sdk/google',
+              request_mode: 'ai_sdk_generate_object',
+              model: llmConfig.model,
+              file_name: input.fileName,
+              source_paragraph_index: input.paragraphIndex,
+              source_paragraph_indices: input.sourceParagraphIndices ?? [
+                input.paragraphIndex,
+              ],
+              paragraph_display_index: input.paragraphDisplayIndex,
+              total_paragraphs: input.totalParagraphs,
+              batch_paragraph_count: input.batchParagraphCount ?? 1,
+              paragraph_char_count: input.paragraphCharCount,
+              attempt: attempt + 1,
+              max_attempts: maxRetries + 1,
+              schema_name: 'template_slot_extraction',
+            }),
+        });
+
+        const aiSdkResult = await callGeminiAiSdkJson<unknown>({
+          config: llmConfig,
+          messages: aiSdkMessages,
+          schema: geminiTemplateSlotExtractionResponseSchema,
+          schemaName: 'template_slot_extraction',
+          requestLabel: paragraphRequestTraceLabel,
+          abortSignal: controller.signal,
+          onTrace: input.onTrace,
+        });
+
+        recordLlmUsageFromAiSdkUsage(input.usageAccumulator, {
+          phase: 'docx_slot_extraction',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel: paragraphRequestTraceLabel,
+          usage: aiSdkResult.usage,
+        });
+
+        const rawContent = aiSdkResult.rawText;
+
+        if (!rawContent.trim()) {
+          throw new Error('Text LLM returned empty content.');
+        }
+
+        await input.onTrace?.({
+          message:
+            `[Template Extract][LLM Raw Response][${paragraphRequestTraceLabel}] ` +
+            stringifyTraceJson({
+              file_name: input.fileName,
+              source_paragraph_index: input.paragraphIndex,
+              source_paragraph_indices: input.sourceParagraphIndices ?? [
+                input.paragraphIndex,
+              ],
+              paragraph_display_index: input.paragraphDisplayIndex,
+              total_paragraphs: input.totalParagraphs,
+              batch_paragraph_count: input.batchParagraphCount ?? 1,
+              raw_response: rawContent,
+              ai_sdk_generate_text_fallback:
+                aiSdkResult.usedGenerateTextFallback,
+            }),
+        });
+
+        const completedMessage =
+          `[Template Extract][LLM] Completed ${paragraphRequestLabel} ` +
+          `for ${input.fileName} (attempt ${attempt + 1}, concurrency: ${input.concurrency}, ${paragraphRequestDetails}) in ${formatElapsedMs(Date.now() - requestStartedAt)}.`;
+        console.log(completedMessage);
+        await input.onTrace?.({ message: completedMessage });
+
+        return rawContent;
+      }
+
       const chatCompletionBody = buildChatCompletionBody(llmConfig, {
         messages,
       });

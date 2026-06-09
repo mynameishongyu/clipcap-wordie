@@ -20,6 +20,10 @@ import {
 } from '@/src/lib/generation-task-items/runtime';
 import { getOptionalEnv } from '@/src/lib/llm/env';
 import { callGeminiNativeChatCompletion } from '@/src/lib/llm/gemini-native';
+import {
+  callGeminiAiSdkJson,
+  convertMessagesToGeminiAiSdkMessages,
+} from '@/src/lib/llm/gemini-ai-sdk';
 import type { GeminiVisionFile } from '@/src/lib/llm/gemini-vision-file';
 import {
   geminiPageFilterResponseSchema,
@@ -28,6 +32,7 @@ import {
 import { parseModelJsonOutput } from '@/src/lib/llm/json-output';
 import {
   createLlmUsageAccumulator,
+  recordLlmUsageFromAiSdkUsage,
   recordLlmUsageFromPayload,
   summarizeLlmUsage,
   type LlmUsageAccumulator,
@@ -756,40 +761,46 @@ async function classifyVisionPagesForSlotFill(params: {
         //   onTrace: params.onTrace,
         // });
 
-        const geminiResult = await callGeminiNativeChatCompletion({
+        // Previous Gemini path used callGeminiNativeChatCompletion with
+        // File API / proxy URLs. Keep the native helper available for
+        // rollback; the active Gemini path now uses @ai-sdk/google with
+        // Supabase signed image URLs.
+        // const geminiResult = await callGeminiNativeChatCompletion({
+        //   config: llmConfig,
+        //   body: requestBody,
+        //   requestLabel,
+        //   dispatcher: llmFetchDispatcher,
+        //   signal: controller.signal,
+        //   structuredOutput: {
+        //     responseMimeType: 'application/json',
+        //     responseSchema: geminiPageFilterResponseSchema,
+        //   },
+        //   onTrace: params.onTrace,
+        // });
+
+        const aiSdkResult = await callGeminiAiSdkJson<{
+          pages: PageFilterDecision[];
+        }>({
           config: llmConfig,
-          body: requestBody,
+          messages: convertMessagesToGeminiAiSdkMessages([
+            {
+              role: 'system',
+              content: PAGE_FILTER_SYSTEM_PROMPT_EN,
+            },
+            {
+              role: 'user',
+              content,
+            },
+          ]),
+          schema: geminiPageFilterResponseSchema,
+          schemaName: 'pdf_fill_page_filter',
           requestLabel,
-          dispatcher: llmFetchDispatcher,
-          signal: controller.signal,
-          structuredOutput: {
-            responseMimeType: 'application/json',
-            responseSchema: geminiPageFilterResponseSchema,
-          },
-          onGenerateContentRequestBody: async ({
-            requestBody: nativeRequestBody,
-          }) => {
-            await params.onTrace?.({
-              message: `[PDF Fill][PageFilterGeminiNativeRequest][batch ${batchIndex + 1}/${batches.length}] ${JSON.stringify(
-                {
-                  route:
-                    '/api/generation-task-items/[taskItemId]/page-preparation',
-                  config_scope: 'VISION_LLM',
-                  model: traceConfig.model,
-                  provider: traceConfig.provider,
-                  request_label: requestLabel,
-                  request_mode: 'gemini_native_generate_content_file_api',
-                  candidate_file_api_file_count: batch.filter(
-                    (page) => page.gemini_file,
-                  ).length,
-                  file_api_uris: batch.flatMap((page) =>
-                    page.gemini_file?.uri ? [page.gemini_file.uri] : [],
-                  ),
-                  request_body: nativeRequestBody,
-                },
-              )}`,
-            });
-          },
+          abortSignal: controller.signal,
+          imageTraceSources: batch.map((page) => ({
+            page_number: page.page_number,
+            original_page_number:
+              page.original_page_number ?? page.page_number,
+          })),
           onTrace: params.onTrace,
         });
 
@@ -806,8 +817,16 @@ async function classifyVisionPagesForSlotFill(params: {
           );
         });
 
-        payload = geminiResult.payload;
-        usagePayload = geminiResult.responsePayload;
+        payload = {
+          choices: [
+            {
+              message: {
+                content: aiSdkResult.rawText,
+              },
+            },
+          ],
+        };
+        usagePayload = aiSdkResult.usage;
       } else {
         const upstream = await undiciFetch(llmConfig.chatCompletionsUrl, {
           method: 'POST',
@@ -827,13 +846,23 @@ async function classifyVisionPagesForSlotFill(params: {
         payload = (await upstream.json()) as typeof payload;
         usagePayload = payload;
       }
-      recordLlmUsageFromPayload(params.usageAccumulator, {
-        phase: 'pdf_fill_page_filter',
-        provider: llmConfig.provider,
-        model: llmConfig.model,
-        requestLabel,
-        payload: usagePayload,
-      });
+      if (llmConfig.provider === 'gemini') {
+        recordLlmUsageFromAiSdkUsage(params.usageAccumulator, {
+          phase: 'pdf_fill_page_filter',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel,
+          usage: usagePayload,
+        });
+      } else {
+        recordLlmUsageFromPayload(params.usageAccumulator, {
+          phase: 'pdf_fill_page_filter',
+          provider: llmConfig.provider,
+          model: llmConfig.model,
+          requestLabel,
+          payload: usagePayload,
+        });
+      }
       const rawContent = payload.choices?.[0]?.message?.content ?? '';
       const batchResults = parsePageFilterJson(rawContent);
 
@@ -1025,15 +1054,22 @@ async function runGenerationTaskItemPagePreparation(params: {
             image_url: page.image_url,
             original_page_number: page.original_page_number ?? page.page_number,
           }));
+        const shouldBuildGeminiFileApiVisionPages = false;
+        /*
+        // Previous Gemini path uploaded rendered page images to Gemini File
+        // API before page filtering. Keep the helper available for rollback;
+        // Gemini now uses Supabase signed URLs through @ai-sdk/google.
         const shouldBuildGeminiFileApiVisionPages =
           precomputedVisionPages.length === 0 &&
           llmConfig.provider === 'gemini';
+        */
         const shouldBuildSupabaseSignedUrlVisionPages =
           precomputedVisionPages.length === 0 &&
-          llmConfig.provider === 'doubao';
+          (llmConfig.provider === 'doubao' || llmConfig.provider === 'gemini');
         let pipelineVisionPages: PdfVisionPageInput[] = [];
 
         if (shouldBuildGeminiFileApiVisionPages) {
+          /*
           pipelineVisionPages = await buildStoredPageImageFileApiVisionPages({
             admin,
             pageImageAssets,
@@ -1043,6 +1079,7 @@ async function runGenerationTaskItemPagePreparation(params: {
               await appendProcessingTrace(admin, params.item.id, message);
             },
           });
+          */
         } else if (shouldBuildSupabaseSignedUrlVisionPages) {
           /*
           // Previous Doubao path used the Vercel image proxy here. Keep the

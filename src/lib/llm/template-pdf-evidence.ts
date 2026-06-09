@@ -10,6 +10,10 @@ import {
   summarizeGeminiNativeRequestForTrace,
 } from '@/src/lib/llm/gemini-native';
 import {
+  callGeminiAiSdkJson,
+  convertMessagesToGeminiAiSdkMessages,
+} from '@/src/lib/llm/gemini-ai-sdk';
+import {
   geminiTemplatePdfLocateResponseSchema,
   withProviderJsonResponseFormat,
 } from '@/src/lib/llm/gemini-json-schemas';
@@ -25,6 +29,7 @@ import {
   type LlmProvider,
 } from '@/src/lib/llm/provider';
 import {
+  recordLlmUsageFromAiSdkUsage,
   recordLlmUsageFromPayload,
   type LlmUsageAccumulator,
 } from '@/src/lib/llm/usage';
@@ -1406,46 +1411,78 @@ async function locateSlotsInPageBatch(input: {
     };
 
     if (llmConfig.provider === 'gemini') {
-      const geminiResult = await callGeminiNativeChatCompletion({
+      // Previous Gemini path used callGeminiNativeChatCompletion with Gemini
+      // File API / proxy image references. Keep the native helper available
+      // for rollback; the active path uses @ai-sdk/google and Supabase signed
+      // image URLs.
+      // const geminiResult = await callGeminiNativeChatCompletion({
+      //   config: llmConfig,
+      //   body: requestBody,
+      //   requestLabel,
+      //   dispatcher: visionLocateFetchDispatcher,
+      //   signal: controller.signal,
+      //   structuredOutput: {
+      //     responseMimeType: 'application/json',
+      //     responseSchema: geminiTemplatePdfLocateResponseSchema,
+      //   },
+      //   onTrace: input.onTrace,
+      // });
+
+      await input.onTrace?.({
+        message:
+          `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
+          JSON.stringify({
+            route: '/api/template-extraction-tasks/[taskId]/process',
+            config_scope: 'VISION_LLM',
+            model: llmConfig.model,
+            provider: traceConfig.provider,
+            request_label: requestLabel,
+            request_mode: 'ai_sdk_generate_object_supabase_signed_url',
+            request_body: summarizeChatCompletionBodyForTrace(requestBody),
+            image_url_note:
+              'Gemini uses @ai-sdk/google with Supabase signed image URLs. image_url.url is summarized in trace logs.',
+          }),
+      });
+
+      const aiSdkResult = await callGeminiAiSdkJson<unknown>({
         config: llmConfig,
-        body: requestBody,
+        messages: convertMessagesToGeminiAiSdkMessages([
+          {
+            role: 'system',
+            content: PDF_BBOX_SYSTEM_PROMPT,
+          },
+          {
+            role: 'user',
+            content,
+          },
+        ]),
+        schema: geminiTemplatePdfLocateResponseSchema,
+        schemaName: 'template_pdf_locate',
         requestLabel,
-        dispatcher: visionLocateFetchDispatcher,
-        signal: controller.signal,
-        structuredOutput: {
-          responseMimeType: 'application/json',
-          responseSchema: geminiTemplatePdfLocateResponseSchema,
-        },
-        onGenerateContentRequestBody: async ({
-          requestBody: geminiRequestBody,
-        }) => {
-          await input.onTrace?.({
-            message:
-              `[Template PDF Locate][VisionRequestBody][Batch ${input.pageBatchIndex + 1}/${input.totalPageBatches}] ` +
-              JSON.stringify({
-                route: '/api/template-extraction-tasks/[taskId]/process',
-                config_scope: 'VISION_LLM',
-                model: llmConfig.model,
-                provider: traceConfig.provider,
-                request_label: requestLabel,
-                request_mode: 'gemini_native_generate_content_file_api',
-                ...summarizeGeminiNativeRequestForTrace({
-                  requestBody: geminiRequestBody,
-                }),
-              }),
-          });
-        },
+        abortSignal: controller.signal,
+        imageTraceSources: input.pageBatch.map((page) => ({
+          page_number: page.page_number,
+          original_page_number: page.original_page_number ?? page.page_number,
+        })),
         onTrace: input.onTrace,
       });
 
-      recordLlmUsageFromPayload(input.usageAccumulator, {
+      recordLlmUsageFromAiSdkUsage(input.usageAccumulator, {
         phase: 'pdf_evidence_location',
         provider: llmConfig.provider,
         model: llmConfig.model,
         requestLabel,
-        payload: geminiResult.responsePayload,
+        usage: aiSdkResult.usage,
       });
-      payload = geminiResult.payload;
+      payload = {
+        choices: [
+          {
+            message: {
+              content: aiSdkResult.rawText,
+            },
+          },
+        ],
+      };
     } else {
       await input.onTrace?.({
         message:

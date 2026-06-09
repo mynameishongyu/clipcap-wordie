@@ -219,23 +219,21 @@ async function resolvePdfVisionPages(input: {
   if (storedAssets.length > 0) {
     const llmConfig = getLlmRuntimeConfig('vision');
 
-    if (llmConfig.provider === 'gemini') {
-      return buildStoredPageImageFileApiVisionPages({
-        admin: input.admin,
-        pageImageAssets: storedAssets,
-        config: llmConfig,
-        requestLabel: `template pdf evidence ${input.taskId} ${
-          input.pdfFileName ?? 'unknown-pdf'
-        }`,
-        onTrace: input.onTrace,
-      });
-    }
-
-    if (llmConfig.provider === 'doubao') {
+    if (llmConfig.provider === 'gemini' || llmConfig.provider === 'doubao') {
       /*
-      // Previous Doubao path used the Vercel image proxy here. Keep the proxy
-      // helper available for rollback/comparison; Doubao now uses Supabase
-      // signed URLs directly.
+      // Previous Gemini path uploaded template PDF page images to Gemini File
+      // API, and previous Doubao path used the Vercel image proxy here. Keep
+      // those helpers available for rollback/comparison; both providers now
+      // use Supabase signed URLs directly.
+      // return buildStoredPageImageFileApiVisionPages({
+      //   admin: input.admin,
+      //   pageImageAssets: storedAssets,
+      //   config: llmConfig,
+      //   requestLabel: `template pdf evidence ${input.taskId} ${
+      //     input.pdfFileName ?? 'unknown-pdf'
+      //   }`,
+      //   onTrace: input.onTrace,
+      // });
       return buildStoredPageImageProxyVisionPages({
         pageImageAssets: storedAssets,
         requestLabel: `template pdf evidence ${input.taskId} ${

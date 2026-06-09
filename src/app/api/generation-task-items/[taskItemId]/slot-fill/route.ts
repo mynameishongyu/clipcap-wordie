@@ -326,11 +326,11 @@ async function loadReferenceExamplePagesWithBbox(params: {
           | ReturnType<typeof createGeminiImageProxyFile>
           | undefined;
 
-        if (llmConfig.provider === 'doubao') {
+        if (llmConfig.provider === 'doubao' || llmConfig.provider === 'gemini') {
           /*
-          // Previous Doubao path used the Vercel image proxy for annotated
-          // reference pages. Keep the proxy helpers available for rollback;
-          // Doubao now uses Supabase signed URLs directly.
+          // Previous Doubao/Gemini path used the Vercel image proxy for
+          // annotated reference pages. Keep the proxy helpers available for
+          // rollback; both providers now use Supabase signed URLs directly.
           annotatedImageUrl = createGeminiImageProxyUrl({
             storagePath: annotatedStoragePath,
             mimeType: annotatedMimeType,
@@ -507,6 +507,10 @@ async function getSharedReferencePagesForSlotFill(params: {
     return params.pages;
   }
 
+  /*
+  // Previous Gemini path uploaded shared reference pages to Gemini File API.
+  // Keep that helper available for rollback; Gemini now reuses the Supabase
+  // signed URLs created in loadReferenceExamplePagesWithBbox.
   const referenceAssets = params.pages.flatMap((page) => {
     const storagePath = page.annotated_storage_path?.trim();
 
@@ -533,58 +537,25 @@ async function getSharedReferencePagesForSlotFill(params: {
       await appendProcessingTrace(params.admin, params.taskItemId, message);
     },
   });
-  const geminiFileByPageNumber = new Map(
-    uploadedReferencePages.flatMap((page) =>
-      page.gemini_file ? [[page.page_number, page.gemini_file] as const] : [],
-    ),
-  );
-  const pages = params.pages.map((page) => ({
-    ...page,
-    image_url: '',
-    gemini_file:
-      geminiFileByPageNumber.get(page.page_number) ?? page.gemini_file,
-  }));
+  */
 
   await appendProcessingTrace(
     params.admin,
     params.taskItemId,
-    `[Gemini File API][SharedReferencePages] ${JSON.stringify({
-      task_id: params.taskId,
-      template_id: params.templateId,
-      reference_page_count: pages.length,
-      source: 'gemini_file_api',
-      pages: pages.map((page) => ({
-        page_number: page.page_number,
-        annotated_storage_path: page.annotated_storage_path ?? null,
-        file_uri: page.gemini_file?.uri ?? null,
-        mime_type: page.gemini_file?.mimeType ?? null,
-      })),
-    })}`,
-  );
-
-  /*
-  // Previous Gemini path reused the Vercel image proxy references created in
-  // loadReferenceExamplePagesWithBbox. Keep that path available for rollback;
-  // Gemini now uses File API file_uri values.
-  await appendProcessingTrace(
-    params.admin,
-    params.taskItemId,
-    `[Gemini Image Proxy][SharedReferencePages] ${JSON.stringify({
+    `[Supabase Signed URL][SharedReferencePages] ${JSON.stringify({
       task_id: params.taskId,
       template_id: params.templateId,
       reference_page_count: params.pages.length,
-      source: 'vercel_gemini_image_proxy',
+      source: 'supabase_signed_url',
       pages: params.pages.map((page) => ({
         page_number: page.page_number,
         annotated_storage_path: page.annotated_storage_path ?? null,
-        file_uri: page.gemini_file?.uri ?? null,
-        mime_type: page.gemini_file?.mimeType ?? null,
+        has_image_url: Boolean(page.image_url),
       })),
     })}`,
   );
-  */
 
-  return pages;
+  return params.pages;
 }
 async function runGenerationTaskItemSlotFill(params: {
   item: GenerationTaskItemRecord;
@@ -655,13 +626,21 @@ async function runGenerationTaskItemSlotFill(params: {
     });
 
     const llmConfig = getLlmRuntimeConfig('vision');
+    const usesGeminiFileApi = false;
+    /*
+    // Previous Gemini path uploaded task page images to Gemini File API before
+    // slot fill. Keep the helper available for rollback; Gemini now uses
+    // Supabase signed URLs through @ai-sdk/google.
     const usesGeminiFileApi =
       llmConfig.provider === 'gemini' && pageImageAssets.length > 0;
+    */
     const usesSupabaseSignedUrls =
-      llmConfig.provider === 'doubao' && pageImageAssets.length > 0;
+      (llmConfig.provider === 'doubao' || llmConfig.provider === 'gemini') &&
+      pageImageAssets.length > 0;
     let visionPages: PdfVisionPageInput[];
 
     if (usesGeminiFileApi) {
+      /*
       visionPages = await buildStoredPageImageFileApiVisionPages({
         admin,
         pageImageAssets,
@@ -671,6 +650,8 @@ async function runGenerationTaskItemSlotFill(params: {
           await appendProcessingTrace(admin, params.item.id, message);
         },
       });
+      */
+      visionPages = [];
     } else if (usesSupabaseSignedUrls) {
       /*
       // Previous Doubao path used Vercel image proxy URLs here. Keep the proxy

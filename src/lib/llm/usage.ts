@@ -165,6 +165,68 @@ export function recordLlmUsageFromPayload(
   });
 }
 
+export function extractAiSdkUsageTokenSummary(
+  usage: unknown,
+): LlmUsageTokenSummary | null {
+  const usageRecord = asRecord(usage);
+
+  if (Object.keys(usageRecord).length === 0) {
+    return null;
+  }
+
+  const inputTokenDetails = asRecord(usageRecord.inputTokenDetails);
+  const outputTokenDetails = asRecord(usageRecord.outputTokenDetails);
+  const promptTokens = readNumber(usageRecord, ['inputTokens']);
+  const completionTokens = readNumber(usageRecord, ['outputTokens']);
+  const reasoningTokens =
+    readNumber(outputTokenDetails, ['reasoningTokens']) ||
+    readNumber(usageRecord, ['reasoningTokens']);
+  const explicitTotalTokens = readOptionalNumber(usageRecord, [
+    'totalTokens',
+  ]);
+
+  return {
+    call_count: 1,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens:
+      explicitTotalTokens ?? promptTokens + completionTokens,
+    cached_tokens:
+      readNumber(inputTokenDetails, ['cacheReadTokens']) ||
+      readNumber(usageRecord, ['cachedInputTokens']),
+    reasoning_tokens: reasoningTokens,
+  };
+}
+
+export function recordLlmUsageFromAiSdkUsage(
+  accumulator: LlmUsageAccumulator | undefined,
+  input: {
+    phase: string;
+    provider: string;
+    model: string;
+    requestLabel?: string;
+    usage: unknown;
+  },
+) {
+  if (!accumulator) {
+    return;
+  }
+
+  const usage = extractAiSdkUsageTokenSummary(input.usage);
+
+  if (!usage) {
+    return;
+  }
+
+  accumulator.calls.push({
+    ...usage,
+    phase: input.phase,
+    provider: input.provider,
+    model: input.model,
+    ...(input.requestLabel ? { request_label: input.requestLabel } : {}),
+  });
+}
+
 export function summarizeLlmUsage(
   accumulator: LlmUsageAccumulator,
   metadata?: {
