@@ -3,8 +3,8 @@ const nullableNumber = { type: ['number', 'null'] } as const;
 const nullableInteger = { type: ['integer', 'null'] } as const;
 
 const bboxArraySchema = {
-  type: ['array', 'null'],
-  items: { type: 'number' },
+  type: 'array',
+  items: { type: 'integer' },
   minItems: 4,
   maxItems: 4,
 } as const;
