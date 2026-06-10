@@ -2589,6 +2589,7 @@ function buildReferencePageAlignmentPromptPayload(input: {
       'If several new PDF pages contain identical values, select the page whose overall layout and labels best match the annotated reference page.',
       'matched_uploaded_page_number must be one of new_pdf_pages.page_number, or null when no reliable match exists.',
       'Do not use printed page numbers inside the PDF image. Use only the uploaded page label: New PDF uploaded page N.',
+      'reason must be a short English phrase with at most 20 words. Do not quote OCR text repeatedly. Do not list candidate snippets. Do not repeat names, ID-card words, labels, values, or the same phrase multiple times.',
     ],
     output_schema: {
       alignments: [
