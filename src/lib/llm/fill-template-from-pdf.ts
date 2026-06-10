@@ -162,6 +162,7 @@ interface DirectVisionSlotFillJob {
   visionPages: PdfVisionPageInput[];
   referenceExamplePages: ReferencePdfVisionPageInput[];
   requestLabel: string;
+  forcedEvidencePageBySlotKey?: Record<string, number>;
 }
 
 interface DirectVisionReferencePageGroup {
@@ -1611,7 +1612,10 @@ function mergeSlotResults(
         meaning_to_applicant: slot.meaning_to_applicant,
         original_value: preferredMatch?.original_value ?? '',
         evidence: preferredMatch?.evidence ?? '',
-        evidence_page_numbers: mergeEvidencePageNumbers(slotMatches),
+        evidence_page_numbers:
+          preferredMatch?.evidence_page_numbers?.length
+            ? preferredMatch.evidence_page_numbers
+            : mergeEvidencePageNumbers(slotMatches),
         notes: preferredMatch?.notes ?? '',
         confidence: preferredMatch?.confidence ?? null,
         matched_reference_label:
@@ -1955,15 +1959,27 @@ function sanitizeExtractedItemEvidencePages(
   items: Array<z.infer<typeof generationExtractedItemSchema>>,
   validUploadedPageNumbers: number[],
   fallbackUploadedPageNumbers: number[],
+  forcedEvidencePageBySlotKey: Record<string, number> = {},
 ) {
-  return items.map((item) => ({
-    ...item,
-    evidence_page_numbers: sanitizeEvidencePageNumbers(
-      item.evidence_page_numbers ?? [],
-      validUploadedPageNumbers,
-      fallbackUploadedPageNumbers,
-    ),
-  }));
+  const uploadedPageNumberSet = new Set(validUploadedPageNumbers);
+
+  return items.map((item) => {
+    const forcedEvidencePageNumber = resolveProvidedUploadedPageNumber(
+      forcedEvidencePageBySlotKey[item.slot_key] ?? null,
+      uploadedPageNumberSet,
+    );
+
+    return {
+      ...item,
+      evidence_page_numbers: forcedEvidencePageNumber
+        ? [forcedEvidencePageNumber]
+        : sanitizeEvidencePageNumbers(
+            item.evidence_page_numbers ?? [],
+            validUploadedPageNumbers,
+            fallbackUploadedPageNumbers,
+          ),
+    };
+  });
 }
 
 function buildSlotBatches<T>(items: T[], batchSize: number) {
@@ -3177,6 +3193,14 @@ function buildDirectVisionSlotFillJobs(input: {
     const matchedUploadedPageNumbers = Array.from(
       visionPageByBatchPageNumber.keys(),
     ).sort((left, right) => left - right);
+    const forcedEvidencePageBySlotKey = Object.fromEntries(
+      batch.flatMap((group) =>
+        group.slots.map((slot) => [
+          slot.slot_key,
+          group.matchedUploadedPageNumber,
+        ]),
+      ),
+    );
 
     jobs.push({
       slots: batch.flatMap((group) => group.slots),
@@ -3185,6 +3209,7 @@ function buildDirectVisionSlotFillJobs(input: {
       requestLabel:
         `reference pages ${referencePageNumbers.join(', ')} aligned to ` +
         `uploaded page(s) ${matchedUploadedPageNumbers.join(', ')}`,
+      forcedEvidencePageBySlotKey,
     });
   }
 
@@ -3215,6 +3240,7 @@ async function extractSlotsFromVisionPageBatch(input: {
   totalBatches: number;
   totalVisionPages: number;
   requestLabel?: string;
+  forcedEvidencePageBySlotKey?: Record<string, number>;
   onTrace?: (trace: { message: string }) => Promise<void> | void;
   usageAccumulator?: LlmUsageAccumulator;
   processStartedAtMs?: number;
@@ -3258,6 +3284,11 @@ async function extractSlotsFromVisionPageBatch(input: {
         input.requestLabel ??
         `visual slot fill batch ${input.batchIndex + 1}/${input.totalBatches}`;
       const llmConcurrency = getDirectVisionPagesLlmConcurrency();
+      const forcedEvidencePageBySlotKey =
+        input.forcedEvidencePageBySlotKey ?? {};
+      const forcedEvidencePageEntries = Object.entries(
+        forcedEvidencePageBySlotKey,
+      ).filter(([, pageNumber]) => uploadedPageNumberSet.has(pageNumber));
       const referencePageNumbers = input.referenceExamplePages.map(
         (page) => page.page_number,
       );
@@ -3324,6 +3355,9 @@ async function extractSlotsFromVisionPageBatch(input: {
             llm_concurrency: llmConcurrency,
             page_numbers: pageNumbers,
             reference_example_page_numbers: referencePageNumbers,
+            forced_evidence_page_by_slot_key: Object.fromEntries(
+              forcedEvidencePageEntries,
+            ),
             total_vision_pages: input.totalVisionPages,
             image_payload: {
               request_image_total_bytes: requestImageTotalBytes,
@@ -3692,6 +3726,7 @@ async function extractSlotsFromVisionPageBatch(input: {
             parsedExtractedItems.data.extracted_items,
             allUploadedPageNumbers,
             pageNumbers,
+            forcedEvidencePageBySlotKey,
           )
         : [];
       const extractedItemsFromResults = input.slots.flatMap((slot) => {
@@ -3710,6 +3745,10 @@ async function extractSlotsFromVisionPageBatch(input: {
           firstMatch,
         );
         const matchPageNumber = resolveMatchPageNumber(firstMatch);
+        const forcedEvidencePageNumber = resolveProvidedUploadedPageNumber(
+          forcedEvidencePageBySlotKey[slot.slot_key] ?? null,
+          uploadedPageNumberSet,
+        );
         const validMatchPageNumber = resolveProvidedUploadedPageNumber(
           matchPageNumber,
           uploadedPageNumberSet,
@@ -3722,9 +3761,11 @@ async function extractSlotsFromVisionPageBatch(input: {
             meaning_to_applicant: slot.meaning_to_applicant,
             original_value: extractedValue,
             evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
-            evidence_page_numbers: validMatchPageNumber
-              ? [validMatchPageNumber]
-              : pageNumbers,
+            evidence_page_numbers: forcedEvidencePageNumber
+              ? [forcedEvidencePageNumber]
+              : validMatchPageNumber
+                ? [validMatchPageNumber]
+                : pageNumbers,
             notes: resolveSourceReason(firstMatch),
             confidence:
               typeof firstMatch?.confidence === 'number'
@@ -3922,6 +3963,8 @@ export async function fillSlotsFromVisionPages(params: {
         reference_page_numbers: job.referenceExamplePages.map(
           (page) => page.page_number,
         ),
+        forced_evidence_page_by_slot_key:
+          job.forcedEvidencePageBySlotKey ?? {},
       })),
     })}`,
   });
@@ -3942,6 +3985,7 @@ export async function fillSlotsFromVisionPages(params: {
         totalBatches: slotFillJobs.length,
         totalVisionPages: validVisionPages.length,
         requestLabel: job.requestLabel,
+        forcedEvidencePageBySlotKey: job.forcedEvidencePageBySlotKey,
         onTrace: params.onTrace,
         usageAccumulator: params.usageAccumulator,
         processStartedAtMs: params.processStartedAtMs,
