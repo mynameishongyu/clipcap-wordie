@@ -2515,6 +2515,10 @@ function buildDirectVisionSlotFillPromptPayload(input: {
       TEMPLATE_REPLACEMENT_VALUE_GRANULARITY_EXAMPLES,
       'Search only New PDF uploaded page images for final values. The new PDF may have different page numbers and layout than the reference PDF.',
       'For matches[0].page_number, use only the uploaded-page number shown in the text label immediately before each new PDF image, such as "New PDF uploaded page 1". Do not use printed page numbers or reference page numbers.',
+      'matches[0].page_number must be the New PDF uploaded page number of the exact image where matches[0].value and matches[0].evidence_text are visible. The value, evidence_text, and page_number must all refer to the same uploaded page image.',
+      'Never use reference page numbers, original PDF printed page numbers, document page numbers, or alignment/reference page numbers as matches[0].page_number. Only use the label immediately before a new PDF image: "New PDF uploaded page N".',
+      'Start matches[0].evidence_text with "New PDF uploaded page N:" where N is exactly the same number as matches[0].page_number. Example: "New PDF uploaded page 25: 已过期分期手续费: 3300".',
+      'If you cannot identify which New PDF uploaded page contains the value, leave final_value empty, matches[0].value empty, and matches[0].page_number null.',
       'For multi-candidate fields such as phone numbers, addresses, dates, names, and amounts, prefer the candidate whose page, section, nearby label, and visual region best match slot_source and the reference box when available. Leave final_value empty if the source cannot be distinguished.',
       'Return a final_value only if it is visible or strongly inferable from the provided new PDF images.',
       'For dates, normalize visible dates to Chinese date format when possible, using the pattern YYYY\\u5e74M\\u6708D\\u65e5. For money amounts and rates, preserve visible digits, decimals, and commas; include units only when template_original_value also includes that unit.',
@@ -3209,7 +3213,11 @@ function buildDirectVisionSlotFillJobs(input: {
       requestLabel:
         `reference pages ${referencePageNumbers.join(', ')} aligned to ` +
         `uploaded page(s) ${matchedUploadedPageNumbers.join(', ')}`,
-      forcedEvidencePageBySlotKey,
+      // Keep forced reference-alignment evidence page support available, but
+      // do not apply it in the active flow. The LLM-returned page_number is
+      // currently more reliable for display when uploaded-page numbering and
+      // alignment numbering differ.
+      // forcedEvidencePageBySlotKey,
     });
   }
 
@@ -3985,7 +3993,9 @@ export async function fillSlotsFromVisionPages(params: {
         totalBatches: slotFillJobs.length,
         totalVisionPages: validVisionPages.length,
         requestLabel: job.requestLabel,
-        forcedEvidencePageBySlotKey: job.forcedEvidencePageBySlotKey,
+        // Keep the forced page override disabled in the active flow; use the
+        // model-returned page_number instead.
+        // forcedEvidencePageBySlotKey: job.forcedEvidencePageBySlotKey,
         onTrace: params.onTrace,
         usageAccumulator: params.usageAccumulator,
         processStartedAtMs: params.processStartedAtMs,
