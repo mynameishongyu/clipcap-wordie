@@ -2584,19 +2584,23 @@ function buildReferencePageAlignmentPromptPayload(input: {
     strict_requirements: [
       'Return JSON only.',
       'For each reference_example_pdf_pages item, choose the one uploaded new PDF page that best matches the reference page as a whole.',
-      'Use page title, document/form type, table/grid structure, nearby field labels, section headings, and relative positions of annotated boxes as the primary matching signals.',
+      'Document/form type is the strongest signal. Match a contract signature page to a contract signature page, a loan approval notice to a loan approval notice, a disbursement notice to a disbursement notice, a vehicle registration certificate to a vehicle registration certificate, and a system screenshot to a system screenshot.',
+      'Use page title, document/form type, main table/grid structure, page orientation, nearby field labels, section headings, and relative positions of annotated boxes as the primary matching signals.',
+      'Do not match pages from different document types merely because both contain dates, amounts, names, signatures, seals, page numbers, or similar repeated values.',
+      'For rotated or landscape reference pages, prefer uploaded pages with the same orientation, document type, and table geometry. Do not match a rotated table document to an unrelated portrait certificate or form.',
+      'If document type signals conflict, prefer the page with the closest title, section labels, and structural layout over pages with similar individual values.',
       'Do not choose a new PDF page merely because it contains the same slot values. Repeated values on a different layout or form type are weaker evidence than matching layout and labels.',
       'If several new PDF pages contain identical values, select the page whose overall layout and labels best match the annotated reference page.',
-      'matched_uploaded_page_number must be one of new_pdf_pages.page_number, or null when no reliable match exists.',
+      'matched_uploaded_page_number must be one of new_pdf_pages.page_number.',
       'Do not use printed page numbers inside the PDF image. Use only the uploaded page label: New PDF uploaded page N.',
-      'reason must be a short English phrase with at most 20 words. Do not quote OCR text repeatedly. Do not list candidate snippets. Do not repeat names, ID-card words, labels, values, or the same phrase multiple times.',
+      'reason must be a short English phrase with at most 20 words that names the matching document type or layout signal. Do not quote OCR text repeatedly. Do not list candidate snippets. Do not repeat names, ID-card words, labels, values, or the same phrase multiple times.',
     ],
     output_schema: {
       alignments: [
         {
           reference_page_number: 'page_number from reference_example_pdf_pages',
           matched_uploaded_page_number:
-            'page_number from new_pdf_pages, or null',
+            'page_number from new_pdf_pages',
           confidence: '0-1 alignment confidence',
           reason:
             'brief page-level reason based on title, layout, labels, and annotated box context; do not cite value equality alone',
