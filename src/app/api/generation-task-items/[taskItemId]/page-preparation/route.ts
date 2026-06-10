@@ -1384,18 +1384,26 @@ async function runGenerationTaskItemPagePreparation(params: {
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     const failedAt = new Date().toISOString();
-    const cleanupConfig = getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS);
-
-    if (cleanupConfig.provider === 'gemini') {
-      await cleanupGeminiFileApiFilesForTrace({
-        config: cleanupConfig,
-        files: collectGeminiFileApiFilesFromAssets(pageImageAssets),
-        requestLabel: `page preparation failed ${params.item.id}`,
-        onTrace: async ({ message }) => {
-          await appendProcessingTrace(admin, params.item.id, message);
-        },
-      });
-    }
+    // Active Gemini image flow uses Supabase signed URLs, not Gemini File API
+    // uploads. Keep cleanup helpers available for rollback, but do not emit
+    // File API cleanup logs in the current flow.
+    // const cleanupConfig = getLlmRuntimeConfig('vision', PDF_FILL_LLM_OPTIONS);
+    // const actuallyUploadedGeminiFiles =
+    //   collectGeminiFileApiFilesFromAssets(pageImageAssets);
+    //
+    // if (
+    //   cleanupConfig.provider === 'gemini' &&
+    //   actuallyUploadedGeminiFiles.length > 0
+    // ) {
+    //   await cleanupGeminiFileApiFilesForTrace({
+    //     config: cleanupConfig,
+    //     files: actuallyUploadedGeminiFiles,
+    //     requestLabel: `page preparation failed ${params.item.id}`,
+    //     onTrace: async ({ message }) => {
+    //       await appendProcessingTrace(admin, params.item.id, message);
+    //     },
+    //   });
+    // }
 
     await admin
       .from('generation_task_items')

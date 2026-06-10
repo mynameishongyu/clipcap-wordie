@@ -113,6 +113,14 @@ function summarizeImageTraceSources(sources?: GeminiAiSdkTraceSource[]) {
   }));
 }
 
+function summarizeTextForTrace(text: string, maxLength = 4000) {
+  return {
+    raw_text_length: text.length,
+    raw_text_preview: text.slice(0, maxLength),
+    raw_text_truncated: text.length > maxLength,
+  };
+}
+
 export function convertMessagesToGeminiAiSdkMessages(
   messages: GeminiAiSdkConvertibleMessage[],
 ) {
@@ -269,6 +277,15 @@ export async function callGeminiAiSdkJson<T>(params: {
           structuredOutputs: false,
         },
       },
+    });
+    await params.onTrace?.({
+      message: `[Gemini AI SDK][GenerateTextFallbackRaw] ${JSON.stringify({
+        request_label: params.requestLabel,
+        model: params.config.model,
+        schema_name: params.schemaName,
+        finish_reason: textResult.finishReason,
+        ...summarizeTextForTrace(textResult.text),
+      })}`,
     });
     const parsed = parseModelJsonOutput<T>(textResult.text, {
       context: `Gemini AI SDK ${params.schemaName}`,

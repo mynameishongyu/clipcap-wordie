@@ -1069,24 +1069,31 @@ async function runGenerationTaskItemSlotFill(params: {
       }),
     });
   } finally {
-    const cleanupConfig = getLlmRuntimeConfig('vision');
-
-    if (cleanupConfig.provider === 'gemini') {
-      await cleanupGeminiFileApiFilesForTrace({
-        config: cleanupConfig,
-        files: [
-          ...collectGeminiFileApiFilesFromAssets(allPageImageAssets),
-          ...collectGeminiFileApiFilesFromVisionPages(
-            slotFillVisionPagesForCleanup,
-          ),
-          ...collectGeminiFileApiFilesFromVisionPages(referencePagesForCleanup),
-        ],
-        requestLabel: `slot fill ${params.item.id}`,
-        onTrace: async ({ message }) => {
-          await appendProcessingTrace(admin, params.item.id, message);
-        },
-      });
-    }
+    // Active Gemini image flow uses Supabase signed URLs, not Gemini File API
+    // uploads. Keep cleanup helpers available for rollback, but do not emit
+    // File API cleanup logs in the current flow.
+    // const cleanupConfig = getLlmRuntimeConfig('vision');
+    // const actuallyUploadedGeminiFiles = [
+    //   ...collectGeminiFileApiFilesFromAssets(allPageImageAssets),
+    //   ...collectGeminiFileApiFilesFromVisionPages(
+    //     slotFillVisionPagesForCleanup,
+    //   ),
+    //   ...collectGeminiFileApiFilesFromVisionPages(referencePagesForCleanup),
+    // ];
+    //
+    // if (
+    //   cleanupConfig.provider === 'gemini' &&
+    //   actuallyUploadedGeminiFiles.length > 0
+    // ) {
+    //   await cleanupGeminiFileApiFilesForTrace({
+    //     config: cleanupConfig,
+    //     files: actuallyUploadedGeminiFiles,
+    //     requestLabel: `slot fill ${params.item.id}`,
+    //     onTrace: async ({ message }) => {
+    //       await appendProcessingTrace(admin, params.item.id, message);
+    //     },
+    //   });
+    // }
   }
 }
 

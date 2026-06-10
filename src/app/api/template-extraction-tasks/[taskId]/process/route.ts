@@ -549,18 +549,26 @@ export async function POST(
           })}`,
         );
       } finally {
-        const cleanupConfig = getLlmRuntimeConfig('vision');
-
-        if (cleanupConfig.provider === 'gemini') {
-          await cleanupGeminiFileApiFilesForTrace({
-            config: cleanupConfig,
-            files: collectGeminiFileApiFilesFromVisionPages(pdfVisionPages),
-            requestLabel: `template pdf evidence ${task.id}`,
-            onTrace: async (entry) => {
-              await appendProcessingTrace(routeAdmin, task.id, entry.message);
-            },
-          });
-        }
+        // Active Gemini image flow uses Supabase signed URLs, not Gemini File
+        // API uploads. Keep cleanup helpers available for rollback, but do not
+        // emit File API cleanup logs in the current flow.
+        // const cleanupConfig = getLlmRuntimeConfig('vision');
+        // const actuallyUploadedGeminiFiles =
+        //   collectGeminiFileApiFilesFromVisionPages(pdfVisionPages);
+        //
+        // if (
+        //   cleanupConfig.provider === 'gemini' &&
+        //   actuallyUploadedGeminiFiles.length > 0
+        // ) {
+        //   await cleanupGeminiFileApiFilesForTrace({
+        //     config: cleanupConfig,
+        //     files: actuallyUploadedGeminiFiles,
+        //     requestLabel: `template pdf evidence ${task.id}`,
+        //     onTrace: async (entry) => {
+        //       await appendProcessingTrace(routeAdmin, task.id, entry.message);
+        //     },
+        //   });
+        // }
       }
     }
 
