@@ -29,3 +29,7 @@ png_pdf/output/
 delete_supabase/
 gemini_signed_urlV2/
 test_gemini_api.py
+page_align
+memory
+skills-lock.json
+.next

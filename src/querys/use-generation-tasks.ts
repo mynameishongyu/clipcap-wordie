@@ -3,12 +3,6 @@
 import { useMutation } from '@tanstack/react-query';
 import type { CreateGenerationTaskResponse } from '@/src/app/api/types/generation-task';
 import type { PdfVisionPageInput } from '@/src/lib/pdf/client-pdf';
-import {
-  cleanupBrowserGeminiFiles,
-  getBrowserGeminiFileUploadConfig,
-  uploadBrowserImageToGeminiFileApi,
-  type ClientGeminiFileReference,
-} from '@/src/lib/gemini/client-file-upload';
 import { getPdfStorageUploadConcurrency } from '@/src/lib/pdf/upload-concurrency';
 import { getSupabaseBrowserClient } from '@/src/lib/supabase/client';
 
@@ -256,39 +250,24 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
             storage_path: string;
             content_type?: string;
             size?: number;
-            gemini_file?: ClientGeminiFileReference | null;
+            gemini_file?: null;
             crop?: PdfVisionPageInput['crop'];
             rotation_applied?: PdfVisionPageInput['rotationApplied'];
           }
         | undefined
       > = Array.from({ length: totalPageImageCount });
-      const geminiUploadConfig = await getBrowserGeminiFileUploadConfig().catch(
-        (error) => {
-          console.warn('[Gemini File API][BatchGenerateConfigFailed]', {
-            fileName: item.file.name,
-            errorMessage:
-              error instanceof Error ? error.message : String(error),
-          });
-
-          return null;
-        },
-      );
-      const geminiUploadEnabled = geminiUploadConfig?.enabled === true;
-      const pageUploadConcurrency = geminiUploadEnabled
-        ? geminiUploadConfig.concurrency
-        : uploadConcurrency;
-      const uploadedGeminiFilesForCleanup: ClientGeminiFileReference[] = [];
+      // Gemini File API browser pre-upload is disabled. The active vision flow
+      // reads PDF page images from Supabase signed URLs during processing.
+      const pageUploadConcurrency = uploadConcurrency;
 
       input.onStageChange?.({
         title: '正在上传 PDF 页面图片',
         description: `${item.file.name}：准备并行上传 ${totalPageImageCount} 张 PDF 页面图片，并发数 ${uploadConcurrency}。`,
       });
 
-      console.info('[Gemini File API][BatchGenerateUploadConfig]', {
+      console.info('[Generation Task][PDF Page Image Upload Config]', {
         fileName: item.file.name,
-        enabled: geminiUploadEnabled,
-        provider: geminiUploadConfig?.provider ?? null,
-        model: geminiUploadConfig?.model ?? null,
+        geminiFileApiPreuploadEnabled: false,
         pageUploadConcurrency,
       });
 
@@ -310,29 +289,12 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
               imageBlob,
             );
             const pageImageStoragePath = `${pdfPageFolderPath}/page-${uploadedPageNumber}.${extension}`;
-            const displayName = `generation-${pdfAssetId}-page-${uploadedPageNumber}`;
-            const supabaseUploadPromise = supabase.storage
+            const { error: pageImageUploadError } = await supabase.storage
               .from('generation-pdfs')
               .upload(pageImageStoragePath, imageBlob, {
                 contentType: imageBlob.type || 'application/octet-stream',
                 upsert: false,
               });
-            const geminiUploadPromise = geminiUploadEnabled
-              ? uploadBrowserImageToGeminiFileApi({
-                  blob: imageBlob,
-                  displayName,
-                  fileName: item.file.name,
-                  pageNumber: uploadedPageNumber,
-                  originalPageNumber,
-                  storagePath: pageImageStoragePath,
-                })
-              : Promise.resolve(null);
-            const [{ error: pageImageUploadError }, geminiFile] =
-              await Promise.all([supabaseUploadPromise, geminiUploadPromise]);
-
-            if (geminiFile) {
-              uploadedGeminiFilesForCleanup.push(geminiFile);
-            }
 
             if (pageImageUploadError) {
               console.error('[Generation Task][PDF Page Image Upload] Failed', {
@@ -364,7 +326,7 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
               storage_path: pageImageStoragePath,
               content_type: imageBlob.type || 'application/octet-stream',
               size: imageBlob.size,
-              ...(geminiFile ? { gemini_file: geminiFile } : {}),
+              gemini_file: null,
               ...(visionPage.crop ? { crop: visionPage.crop } : {}),
               ...(visionPage.rotationApplied
                 ? { rotation_applied: visionPage.rotationApplied }
@@ -373,7 +335,6 @@ async function uploadFilesToSupabase(input: CreateGenerationTaskInput) {
           },
         );
       } catch (error) {
-        await cleanupBrowserGeminiFiles(uploadedGeminiFilesForCleanup);
         throw error;
       }
       const uploadDurationMs = Date.now() - uploadStartedAt;
