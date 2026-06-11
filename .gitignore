@@ -32,3 +32,4 @@ test_gemini_api.py
 page_align
 memory
 skills-lock.json
+.next
