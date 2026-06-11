@@ -603,6 +603,9 @@ const TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT =
 const TEMPLATE_REPLACEMENT_VALUE_GRANULARITY_EXAMPLES =
   'Do not add vehicle category words, explanatory words, or broader field phrases when template_original_value is shorter. Example: template_original_value "解放牌" -> return "东风日产牌", not "东风日产牌汽车".';
 
+const EXACT_SOURCE_LABEL_REQUIREMENT =
+  'Full visible field labels are part of the source identity. Generic words such as fee, amount, balance, date, 手续费, 金额, 余额, and 日期 are not enough. Similar labels are different sources; for example, 已过期分期手续费, 已逾期分期手续费, 每期还款手续费, 已到期分期手续费, and 未到期分期手续费 must not be substituted for each other. matches[0].evidence_text must include the exact visible source label used for the copied value. If the exact label cannot be read or distinguished from neighboring labels, leave final_value empty.';
+
 export function buildTextSlotFillPromptPayload(input: {
   documentName: string;
   slots: GenerationSlotSchemaItem[];
@@ -615,7 +618,7 @@ export function buildTextSlotFillPromptPayload(input: {
     slot_definitions: input.slots.map((slot) =>
       buildSlotDefinitionForPrompt(slot),
     ),
-    strict_requirement: `Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. ${TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT} The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.`,
+    strict_requirement: `Return the exact same slot_key copied from slot_definitions. slot_source describes where the template slot value came from. reference_example_pdf_evidence is only an example from the template review PDF; use it to understand the field, nearby label, page/region pattern, and expected value type, but never copy the example_slot_value unless the same value is visible in the new PDF content. The new PDF may have different pages, page numbers, and layout, so search all provided content. final_value must be the exact value used for filling. ${TEMPLATE_REPLACEMENT_VALUE_REQUIREMENT} ${EXACT_SOURCE_LABEL_REQUIREMENT} The first match.value must equal final_value. The first match.snippet must contain final_value as a direct quote from the PDF text chunk. For any date field, always return the final_value in Chinese date format like 2026年1月14日. Do not return date values as 2026-01-14, 2026/01/14, or 2026.01.14.`,
     page_numbers: input.pageNumbers,
     content: input.chunkText,
     output_schema: {
@@ -1507,6 +1510,48 @@ const LATEST_EVIDENCE_SLOT_KEYWORDS = [
   '\u8fd8\u6b3e',
 ];
 
+const SPECIFIC_SOURCE_LABEL_RULES = [
+  {
+    expected_aliases: ['已过期分期手续费', '已逾期分期手续费'],
+    conflict_labels: [
+      '每期还款手续费',
+      '已到期分期手续费',
+      '未到期分期手续费',
+      '分期手续费',
+    ],
+  },
+  {
+    expected_aliases: ['每期还款手续费'],
+    conflict_labels: [
+      '已过期分期手续费',
+      '已逾期分期手续费',
+      '已到期分期手续费',
+      '未到期分期手续费',
+      '分期手续费',
+    ],
+  },
+  {
+    expected_aliases: ['已到期分期手续费'],
+    conflict_labels: [
+      '已过期分期手续费',
+      '已逾期分期手续费',
+      '每期还款手续费',
+      '未到期分期手续费',
+      '分期手续费',
+    ],
+  },
+  {
+    expected_aliases: ['未到期分期手续费'],
+    conflict_labels: [
+      '已过期分期手续费',
+      '已逾期分期手续费',
+      '每期还款手续费',
+      '已到期分期手续费',
+      '分期手续费',
+    ],
+  },
+];
+
 function getSlotSearchText(slot: GenerationSlotSchemaItem) {
   return `${slot.field_category} ${slot.meaning_to_applicant}`;
 }
@@ -1517,6 +1562,97 @@ function shouldPreferLatestEvidence(slot: GenerationSlotSchemaItem) {
   return LATEST_EVIDENCE_SLOT_KEYWORDS.some((keyword) =>
     searchText.includes(keyword),
   );
+}
+
+function normalizeSourceLabelText(value: string | null | undefined) {
+  return (value ?? '').replace(/\s+/g, '');
+}
+
+function getSlotSpecificSourceText(slot: GenerationSlotSchemaItem) {
+  return normalizeSourceLabelText(
+    [
+      slot.field_category,
+      slot.meaning_to_applicant,
+      slot.reference_pdf_evidence?.example_evidence_text,
+      slot.reference_pdf_evidence?.example_match_type,
+    ]
+      .filter((value): value is string => typeof value === 'string')
+      .join('\n'),
+  );
+}
+
+function findSpecificSourceLabelRule(slot: GenerationSlotSchemaItem) {
+  const slotSourceText = getSlotSpecificSourceText(slot);
+
+  return (
+    SPECIFIC_SOURCE_LABEL_RULES.find((rule) =>
+      rule.expected_aliases.some((label) =>
+        slotSourceText.includes(normalizeSourceLabelText(label)),
+      ),
+    ) ?? null
+  );
+}
+
+function appendExtractionNote(
+  existingNote: string | null | undefined,
+  newNote: string,
+) {
+  const trimmedExistingNote = existingNote?.trim();
+  return trimmedExistingNote ? `${trimmedExistingNote} | ${newNote}` : newNote;
+}
+
+function validateExtractedValueAgainstSpecificSourceLabel(
+  slot: GenerationSlotSchemaItem,
+  item: PdfFillExtractedItem,
+) {
+  if (!item.original_value.trim()) {
+    return item;
+  }
+
+  const sourceLabelRule = findSpecificSourceLabelRule(slot);
+
+  if (!sourceLabelRule) {
+    return item;
+  }
+
+  const evidenceText = normalizeSourceLabelText(item.evidence);
+  const hasExpectedLabel = sourceLabelRule.expected_aliases.some((label) =>
+    evidenceText.includes(normalizeSourceLabelText(label)),
+  );
+
+  if (hasExpectedLabel) {
+    return item;
+  }
+
+  const conflictLabel = sourceLabelRule.conflict_labels.find((label) =>
+    evidenceText.includes(normalizeSourceLabelText(label)),
+  );
+  const expectedLabel = sourceLabelRule.expected_aliases[0];
+  const note = conflictLabel
+    ? `Rejected likely neighboring field extraction: expected "${expectedLabel}" but evidence points to "${conflictLabel}".`
+    : `Rejected weak source evidence: expected evidence label "${expectedLabel}".`;
+
+  return {
+    ...item,
+    original_value: '',
+    notes: appendExtractionNote(item.notes, note),
+    confidence: 0,
+  };
+}
+
+function validateExtractedItemsAgainstSpecificSourceLabels(
+  slots: GenerationSlotSchemaItem[],
+  items: PdfFillExtractedItem[],
+) {
+  const slotByKey = new Map(slots.map((slot) => [slot.slot_key, slot]));
+
+  return items.map((item) => {
+    const slot = slotByKey.get(item.slot_key);
+
+    return slot
+      ? validateExtractedValueAgainstSpecificSourceLabel(slot, item)
+      : item;
+  });
 }
 
 function getEvidenceMaxPageNumber(item: PdfFillExtractedItem) {
@@ -1606,7 +1742,7 @@ function mergeSlotResults(
         matches: slotMatches,
       });
 
-      return {
+      const mergedItem: PdfFillExtractedItem = {
         slot_key: slot.slot_key,
         field_category: slot.field_category,
         meaning_to_applicant: slot.meaning_to_applicant,
@@ -1623,6 +1759,8 @@ function mergeSlotResults(
         new_pdf_bbox: preferredMatch?.new_pdf_bbox ?? null,
         layout_match_score: preferredMatch?.layout_match_score ?? null,
       };
+
+      return validateExtractedValueAgainstSpecificSourceLabel(slot, mergedItem);
     }),
   };
 }
@@ -2347,25 +2485,28 @@ async function extractAllSlotsWithTextModel(input: {
             firstMatch,
           );
 
+          const extractedItem: PdfFillExtractedItem = {
+            slot_key: slot.slot_key,
+            field_category: slot.field_category,
+            meaning_to_applicant: slot.meaning_to_applicant,
+            original_value: extractedValue,
+            evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
+            evidence_page_numbers:
+              firstResult?.matches
+                ?.map((match) => resolveMatchPageNumber(match))
+                .filter((value): value is number => typeof value === 'number') ??
+              (resolveMatchPageNumber(firstMatch)
+                ? [resolveMatchPageNumber(firstMatch) as number]
+                : input.pageNumbers),
+            notes: '',
+            confidence: null,
+          };
+
           return [
-            {
-              slot_key: slot.slot_key,
-              field_category: slot.field_category,
-              meaning_to_applicant: slot.meaning_to_applicant,
-              original_value: extractedValue,
-              evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
-              evidence_page_numbers:
-                firstResult?.matches
-                  ?.map((match) => resolveMatchPageNumber(match))
-                  .filter(
-                    (value): value is number => typeof value === 'number',
-                  ) ??
-                (resolveMatchPageNumber(firstMatch)
-                  ? [resolveMatchPageNumber(firstMatch) as number]
-                  : input.pageNumbers),
-              notes: '',
-              confidence: null,
-            },
+            validateExtractedValueAgainstSpecificSourceLabel(
+              slot,
+              extractedItem,
+            ),
           ];
         }),
       };
@@ -2505,6 +2646,7 @@ function buildDirectVisionSlotFillPromptPayload(input: {
         : 'For non-reference slots, choose the most specific visible field that matches the slot meaning and nearby labels.',
       'Label qualifiers such as M1, CD2, CCOS, CD1, M6+, CD3, numbers, letters, and parenthesized suffixes are part of the field identity. For example, "overdue date (M1)" and "overdue date (CD2)" are different fields. If the reference source contains one qualifier, do not use a field with a different qualifier.',
       'For table cells, the exact nearby field label, row label, column label, section title, and qualifier are stronger evidence than a semantically similar value. Do not substitute CD2 for M1, M1 for CD2, CCOS for another date field, or one fee/balance cell for a neighboring fee/balance cell.',
+      EXACT_SOURCE_LABEL_REQUIREMENT,
       'If slot_source, meaning_to_applicant, or the reference source identity indicates system time, Windows taskbar time, bottom-right computer date, "系统时间", or "系统时间加1天", read the Windows taskbar date from the new PDF image as the base value. Do not use business table dates such as M1, CD2, CCOS, billing cycle dates, overdue dates, or repayment dates for these slots.',
       'Do not infer date offsets from template_original_value, example_slot_value, reference image values, or relationships between template slots. Template dates are historical examples, not formulas. Use slot_source/reference source identity as the only derivation rule.',
       'For a direct system-time slot, final_value must equal the visible Windows taskbar date exactly. Do not subtract one day, use the previous day, infer "-1 day", or derive the value by reversing another plus-one-day slot.',
@@ -2564,17 +2706,6 @@ function buildReferencePageAlignmentPromptPayload(input: {
       page_number: page.page_number,
       original_page_number: page.original_page_number ?? page.page_number,
       file_name: page.example_pdf_file_name ?? null,
-      annotated_slots:
-        page.annotated_slots?.map((slot) => ({
-          slot_key: slot.slot_key,
-          slot_name: slot.slot_name,
-          slot_source: slot.slot_source,
-          example_annotation_label:
-            slot.example_annotation_label ?? slot.slot_key,
-          example_box_2d: slot.example_box_2d,
-          example_evidence_text: slot.example_evidence_text,
-          example_slot_value: slot.example_slot_value,
-        })) ?? [],
     })),
     new_pdf_pages: input.visionPages.map((page) => ({
       label: `New PDF uploaded page ${page.page_number}`,
@@ -2584,16 +2715,17 @@ function buildReferencePageAlignmentPromptPayload(input: {
     strict_requirements: [
       'Return JSON only.',
       'This is a page layout alignment task, not a value extraction task.',
-      'For each reference_example_pdf_pages item, choose the uploaded new PDF page with the most similar visual layout template.',
-      'Primary matching signals, in order: (1) overall page structure and layout, (2) table/grid shape, row-column arrangement, block positions, orientation, and rotation, (3) fixed field labels and section headings around annotated boxes, (4) document title or form title, (5) variable values only as a last weak clue.',
-      'Ignore variable values when aligning pages: names, ID numbers, phone numbers, dates, amounts, signatures, seals, serial numbers, printed page numbers, customer names, product values, and handwritten values.',
-      'If two pages have different overall layout or table/grid structure, do not match them even if their title or values look similar.',
-      'If two pages have the same layout structure but different variable content, treat them as a strong match.',
-      'System screenshots must match system screenshots by UI layout. Scanned paper documents must match scanned paper documents by page layout.',
-      'Use document title or form title only after the visual layout and fixed structure are similar. Title similarity alone is not enough.',
+      'For each reference_example_pdf_pages item, choose the uploaded new PDF page with the most similar visual page template.',
+      'Match by these signals in priority order: (1) overall page layout: major blocks, whitespace, page density, single/two-column structure, scanned paper vs screenshot; (2) structural elements: table/grid shape, row-column layout, repeated blocks, signature/seal areas, paragraph blocks, header/footer positions; (3) page title or form title.',
+      'Reject candidates with a different dominant layout structure, even if they share similar titles, serial numbers, stamps, handwriting, names, dates, amounts, or other values.',
+      'Do not use variable content as matching evidence. Use variable content only to notice conflicts.',
+      'If two pages have the same dominant layout and structural template but different variable content, treat them as a strong match.',
+      'A dense table page, a signature/seal block page, a paragraph text page, and a system screenshot are different dominant layouts unless their full-page structure is visually equivalent.',
+      'Use document title or form title only after the overall layout and structural elements are similar. Title similarity alone is not enough.',
+      'If no candidate is a good structural match, choose the least-bad candidate with confidence below 0.35 and state the layout conflict.',
       'matched_uploaded_page_number must be one of new_pdf_pages.page_number.',
       'Do not use printed page numbers inside the PDF image. Use only the uploaded page label: New PDF uploaded page N.',
-      'reason must briefly mention the matching layout signal, not copied values. Keep it under 20 English words.',
+      'reason must briefly mention the matching layout signal or the main layout conflict. Keep it under 20 English words.',
     ],
     output_schema: {
       alignments: [
@@ -2603,7 +2735,7 @@ function buildReferencePageAlignmentPromptPayload(input: {
             'page_number from new_pdf_pages',
           confidence: '0-1 alignment confidence',
           reason:
-            'brief page-level reason based on stable title, fixed layout, labels, orientation, and annotated box context; do not cite variable value equality',
+            'brief page-level reason based on overall layout, structural elements, title, or the main layout conflict',
         },
       ],
     },
@@ -3735,11 +3867,14 @@ async function extractSlotsFromVisionPageBatch(input: {
         extracted_items: normalized.extracted_items ?? [],
       });
       const extractedItemsFromSchema = parsedExtractedItems.success
-        ? sanitizeExtractedItemEvidencePages(
-            parsedExtractedItems.data.extracted_items,
-            allUploadedPageNumbers,
-            pageNumbers,
-            forcedEvidencePageBySlotKey,
+        ? validateExtractedItemsAgainstSpecificSourceLabels(
+            input.slots,
+            sanitizeExtractedItemEvidencePages(
+              parsedExtractedItems.data.extracted_items,
+              allUploadedPageNumbers,
+              pageNumbers,
+              forcedEvidencePageBySlotKey,
+            ),
           )
         : [];
       const extractedItemsFromResults = input.slots.flatMap((slot) => {
@@ -3767,35 +3902,37 @@ async function extractSlotsFromVisionPageBatch(input: {
           uploadedPageNumberSet,
         );
 
-        return [
-          {
-            slot_key: slot.slot_key,
-            field_category: slot.field_category,
-            meaning_to_applicant: slot.meaning_to_applicant,
-            original_value: extractedValue,
-            evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
-            evidence_page_numbers: forcedEvidencePageNumber
-              ? [forcedEvidencePageNumber]
-              : validMatchPageNumber
-                ? [validMatchPageNumber]
-                : pageNumbers,
-            notes: resolveSourceReason(firstMatch),
-            confidence:
-              typeof firstMatch?.confidence === 'number'
-                ? firstMatch.confidence
-                : null,
-            matched_reference_label:
-              typeof firstMatch?.matched_reference_label === 'string'
-                ? firstMatch.matched_reference_label
-                : null,
-            new_pdf_bbox: Array.isArray(firstMatch?.new_pdf_bbox)
-              ? firstMatch.new_pdf_bbox
+        const extractedItem: PdfFillExtractedItem = {
+          slot_key: slot.slot_key,
+          field_category: slot.field_category,
+          meaning_to_applicant: slot.meaning_to_applicant,
+          original_value: extractedValue,
+          evidence: resolveEvidenceSnippet(extractedValue, firstMatch),
+          evidence_page_numbers: forcedEvidencePageNumber
+            ? [forcedEvidencePageNumber]
+            : validMatchPageNumber
+              ? [validMatchPageNumber]
+              : pageNumbers,
+          notes: resolveSourceReason(firstMatch),
+          confidence:
+            typeof firstMatch?.confidence === 'number'
+              ? firstMatch.confidence
               : null,
-            layout_match_score:
-              typeof firstMatch?.layout_match_score === 'number'
-                ? firstMatch.layout_match_score
-                : null,
-          },
+          matched_reference_label:
+            typeof firstMatch?.matched_reference_label === 'string'
+              ? firstMatch.matched_reference_label
+              : null,
+          new_pdf_bbox: Array.isArray(firstMatch?.new_pdf_bbox)
+            ? firstMatch.new_pdf_bbox
+            : null,
+          layout_match_score:
+            typeof firstMatch?.layout_match_score === 'number'
+              ? firstMatch.layout_match_score
+              : null,
+        };
+
+        return [
+          validateExtractedValueAgainstSpecificSourceLabel(slot, extractedItem),
         ];
       });
       const result = {
